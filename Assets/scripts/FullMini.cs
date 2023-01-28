@@ -80,25 +80,7 @@ public class FullMini : MonoBehaviour
     {
         instance = this;
     }
-    //void OnGUI()
-    //{
-    //    Vector3 point = new Vector3();
-    //    Event currentEvent = Event.current;
-    //    Vector2 mousePos = new Vector2();
 
-    //    // Get the mouse position from Event.
-    //    // Note that the y position from Event is inverted.
-    //    mousePos.x = currentEvent.mousePosition.x;
-    //    mousePos.y = cam.pixelHeight - currentEvent.mousePosition.y;
-
-    //    point = cam.ScreenToWorldPoint(new Vector3(mousePos.x, mousePos.y, cam.nearClipPlane));
-
-    //    GUILayout.BeginArea(new Rect(20, 20, 250, 120));
-    //    GUILayout.Label("Screen pixels: " + cam.pixelWidth + ":" + cam.pixelHeight);
-    //    GUILayout.Label("Mouse position: " + mousePos);
-    //    GUILayout.Label("World position: " + point.ToString("F3"));
-    //    GUILayout.EndArea();
-    //}
     public void add()
     {
         Debug.Log("addclick");
@@ -139,47 +121,8 @@ public class FullMini : MonoBehaviour
 
     }
 
-    public void run(GameObject soldier, GameObject secondSoldier)
-    {
 
-        nav = soldier.GetComponent<UnityEngine.AI.NavMeshAgent>();
-        //nav.SetDestination(secondSoldier.transform.position);
-        nav.destination = secondSoldier.transform.position;
-        //soldier.transform.position = Vector3.MoveTowards(soldier.transform.position, secondSoldier.transform.position, Time.deltaTime * speed);
-        //if (Vector3.Distance(soldier.transform.position, secondSoldier.transform.position) < 5f)
-        //{
-        //    move2 = false;
-        //    move3 = false;
 
-        //}
-    }
-
-    public void run2(GameObject soldier, Vector3 userInputPosition)
-    {
-        nav = soldier.GetComponent<UnityEngine.AI.NavMeshAgent>();
-        nav.destination = new Vector3(userInputPosition.x, soldier.transform.position.y, userInputPosition.z);
-        if (Vector3.Distance(soldier.transform.position, userInputPosition) ==0f)
-        {
-            nav.destination = soldier.transform.position;
-            move3 = false;
-        }
-        else
-        {
-            nav.destination = new Vector3(userInputPosition.x, soldier.transform.position.y, userInputPosition.z);
-        }
-        //soldier.transform.position = Vector3.MoveTowards(soldier.transform.position, new Vector3(userInputPosition.x, soldier.transform.position.y, userInputPosition.z), Time.deltaTime * speed);
-        //if (soldier.transform.position.x == userInputPosition.x)
-        //{
-        //    move2 = false;
-        //    move3 = false;
-
-        //}
-    }
-
-    public void run3(GameObject soldier, Vector3 userInputPosition)
-    {
-
-    }
 
     public bool mouseDisable()
     {
@@ -204,9 +147,9 @@ public class FullMini : MonoBehaviour
         
         GameObject army1 = GameObject.Find(hName);
         GameObject army2 = GameObject.Find(seconds);
-        UnityEngine.AI.NavMeshAgent nav1;
+        //UnityEngine.AI.NavMeshAgent nav1;
 
-        nav1 = army1.GetComponent<UnityEngine.AI.NavMeshAgent>();
+        //nav1 = army1.GetComponent<UnityEngine.AI.NavMeshAgent>();
         //nav.SetDestination(secondSoldier.transform.position);
 
         //nav1.destination = army2.transform.position;
@@ -215,41 +158,81 @@ public class FullMini : MonoBehaviour
         GameObject arrow2 = army1.transform.Find("DirectionSprite").gameObject;
         //arrow2.SetActive(true);
         //Debug.Log(army2.transform.position);
-        if (Vector3.Distance(army1.transform.position, army2.transform.position) <.5f)
+
+        List<GameObject> gm = new List<GameObject>();
+        foreach (KeyValuePair<string, List<string>> entry in listList)
         {
-            nav1.destination = army1.transform.position;
-            move2 = false;
-            arrow2.SetActive(false);
-            EventCall.Remove(EventCall.Single(x => x.Id == Id));
+            if (entry.Key == seconds)
+            {
+
+                foreach (string x in entry.Value)
+                {
+
+                    soldier = GameObject.Find(x);
+                        UnityEngine.AI.NavMeshAgent nav1;
+                        nav1 = soldier.GetComponent<UnityEngine.AI.NavMeshAgent>();
+                        nav1.destination = army2.transform.position;
+                        gm.Add(soldier);
+                        if (Vector3.Distance(soldier.transform.position, army2.transform.position) < 1f)
+                        {
+                            nav1.destination = soldier.transform.position;
+                        }
+                        else
+                        {
+                            nav1.destination = army2.transform.position;
+                        }
+             
+
+                    if (gm.All(obj => Vector3.Distance(obj.transform.position, army2.transform.position) < 1f)) // or .Any to test for ... "any"
+                    {
+                        Debug.Log("done");
+
+                        EventCall.Remove(EventCall.Single(x => x.Id == Id));
+                    }
+
+                }
 
 
-        }
-        else
-        {
-            if (GameObject.Find(seconds) != null)
-            {
-                 nav1.destination = army2.transform.position;
             }
-            else
-            {
-                Debug.Log("change");
-                nav1.destination = army1.transform.position;
-                EventCall.Remove(EventCall.Single(x => x.Id == Id));
-            }
+
         }
+        //if (Vector3.Distance(army1.transform.position, army2.transform.position) <1f)
+        //{
+        //    nav1.destination = army1.transform.position;
+        //    move2 = false;
+        //    arrow2.SetActive(false);
+        //    EventCall.Remove(EventCall.Single(x => x.Id == Id));
+
+
+        //}
+        //else
+        //{
+        //    if (GameObject.Find(seconds) != null)
+        //    {
+        //         nav1.destination = army2.transform.position;
+        //    }
+        //    else
+        //    {
+        //        Debug.Log("change");
+        //        nav1.destination = army1.transform.position;
+        //        EventCall.Remove(EventCall.Single(x => x.Id == Id));
+        //    }
+        //}
     }
 
     public void moveSingle(string hName, Vector3 holders, string Id)
     {
       
         GameObject pick1 = GameObject.Find(hName); //"this" is the child
+       
+        GameObject iconSprite = pick1.transform.Find("IconSprite").gameObject;
+        iconSprite.layer = LayerMask.NameToLayer("cantClick");
         nav = pick1.GetComponent<UnityEngine.AI.NavMeshAgent>();
         nav.destination = new Vector3(holders.x, pick1.transform.position.y, holders.z);
         GameObject arrow2 = pick1.transform.Find("DirectionSprite").gameObject;
         foreach (QueueFunctions x in EventCall)
         {
             Debug.Log(x.Id);
-            Debug.Log("running");
         }
         if (Vector3.Distance(pick1.transform.position, new Vector3(holders.x, pick1.transform.position.y, holders.z)) == 0f)
         {
@@ -259,6 +242,7 @@ public class FullMini : MonoBehaviour
             move3 = false;
             EventCall.Remove(EventCall.Single(x => x.Id == Id));
             queueObjects.RemoveAll(x => x == pick1.name);
+            iconSprite.layer = LayerMask.NameToLayer("army");
 
         }
         else
@@ -320,29 +304,6 @@ public class FullMini : MonoBehaviour
                     nav.destination = new Vector3(holders.x, soldier.transform.position.y, holders.z);
                 }
 
-                //if (Vector3.Distance(soldier.transform.position, new Vector3(holders.x, soldier.transform.position.y, holders.z)) < 1f)
-                //{
-                //    foreach (string z in entry.Value)
-                //    {
-                //        soldier = GameObject.Find(z);
-                //        GameObject arrow2 = soldier.transform.Find("DirectionSprite").gameObject;
-                //        arrow2.SetActive(false);
-                //        nav.destination = soldier.transform.position;
-                //    }
-             
-                //}
-        
-                //if (soldier.transform.position.x == holder.x)
-                //{
-                //    pick1.transform.position = new Vector3(soldier.transform.position.x, soldier.transform.position.y, soldier.transform.position.z);
-                //    move4 = false;
-                //    moveMode = false;
-                //    MiniUI.instance.button.SetActive(false);
-                //    MiniUI.instance.moveButton.SetActive(false);
-                //    MiniUI.instance.splitButton.SetActive(false);
-                //    MiniUI.instance.cancelButton.SetActive(false);
-
-                //}
             }
 
         }
@@ -614,245 +575,18 @@ public class FullMini : MonoBehaviour
     }
     void Update()
     {
+
+
             foreach (QueueFunctions x in EventCall)
             {                       
                 x.method();
             }
         
-        if (Input.GetKeyDown(KeyCode.F))
-        {
-            Debug.Log(EventCall.Count());
-        }
-            
+        //if (Input.GetKeyDown(KeyCode.F))
+        //{
+        //    Debug.Log(EventCall.Count());
+        //}
 
-        //afsdasdfasdfsf
-        if (move2 == true)
-        {
-
-        }
-
-        if (move3 == true)
-        {
-            //moveMode = false;
-            //GameObject pick1 = GameObject.Find(hitName); //"this" is the child
-            //nav = pick1.GetComponent<UnityEngine.AI.NavMeshAgent>();
-            //nav.destination = new Vector3(holder.x, pick1.transform.position.y, holder.z);
-            //GameObject arrow2 = pick1.transform.Find("DirectionSprite").gameObject;
-            //arrow2.SetActive(true);
-            //if (Vector3.Distance(pick1.transform.position, new Vector3(holder.x, pick1.transform.position.y, holder.z)) == 0f)
-            //{
-            //    arrow2.SetActive(false);
-            //    nav.destination = pick1.transform.position;
-            //    move2 = false;
-            //    move3 = false;
-            //    moveMode = false;
-            //}
-            //else
-            //{
-            //    nav.destination = new Vector3(holder.x, 1, holder.z);
-            //}
-     
-            //run2(pick1, holder);
-        }
-
-        if (move4 == true)
-        {
-          
-        }
-        if (move5 == true)
-        {
-
-        }   
-
-        if (move6 == true)
-        {
-            //GameObject pick1 = GameObject.Find(hitName);
-            //GameObject pick2 = GameObject.Find(first);
-
-            //nav = pick1.GetComponent<UnityEngine.AI.NavMeshAgent>();
-            //nav.destination = pick2.transform.position;
-            //if (Vector3.Distance(pick1.transform.position, pick2.transform.position) < 1f)
-            //{
-            //    nav.destination = pick1.transform.position;
-
-            //    move6 = false;
-            //    Debug.Log("over");
-            //}
-            //else
-            //{
-            //    nav.destination = pick2.transform.position;
-            //}
-            //pick1.transform.position = Vector3.MoveTowards(pick1.transform.position, pick2.transform.position, Time.deltaTime * speed);
-            //if (pick1.transform.position == pick2.transform.position)
-            //{
-
-            //    move6 = false;
-
-            //}
-        }
-
-        if (move7 == true)
-        {
-            //GameObject pick1 = GameObject.Find(hitName);
-            //GameObject pick2 = GameObject.Find(third);
-            //pick1.transform.position = pick2.transform.position;
-
-            //foreach (KeyValuePair<string, List<string>> entry in listList)
-            //{
-            //    if (entry.Key == pick1.name)
-            //    {
-            //        bool done = false;
-            //        GameObject arrow3 = pick1.transform.Find("child").gameObject;
-            //        arrow3.SetActive(false);
-            //        foreach (string x in entry.Value)
-            //        {                  
-            //                soldier = GameObject.Find(x);
-            //                nav = soldier.GetComponent<UnityEngine.AI.NavMeshAgent>();
-            //                nav.destination = pick2.transform.position;
-            //                if (Vector3.Distance(soldier.transform.position, pick2.transform.position) < 2f)
-            //                {
-            //                    foreach (string z in entry.Value)
-            //                    {
-            //                        soldier = GameObject.Find(z);
-            //                        nav = soldier.GetComponent<UnityEngine.AI.NavMeshAgent>();
-            //                        nav.destination = soldier.transform.position;
-            //                    }
-            //                    listList.Remove(hitName);
-            //                    Destroy(GameObject.Find(hitName));
-            //                    move7 = false;
-            //                    Debug.Log("over");
-            //                }
-            //                else
-            //                {
-            //                    nav.destination = pick2.transform.position;
-            //                }
-            //                //soldier.transform.position = Vector3.MoveTowards(soldier.transform.position, new Vector3(pick2.transform.position.x - 1f, soldier.transform.position.y, pick2.transform.position.z), Time.deltaTime * speed);
-                       
-            //            //soldier = GameObject.Find(x);
-            //            //soldier.transform.position = Vector3.MoveTowards(soldier.transform.position, new Vector3(pick2.transform.position.x - 1f, pick2.transform.position.y - 1f, pick2.transform.position.z - 1f), Time.deltaTime * speed);
-            //        }
-
-            //        //if (soldier.transform.position.y == pick2.transform.position.y - 1f)
-            //        //{
-            //        //    listList.Remove(hitName);
-            //        //    Destroy(GameObject.Find(hitName));
-            //        //    move7 = false;
-            //        //}
-
-            //    }
-
-            //}
-
-        }
-
-        if (move8 == true)
-        {
-            //Debug.Log("move8");
-            //GameObject pick = GameObject.Find(hitName);
-            //GameObject pick1 = GameObject.Find(objToSpawn.name);
-            //GameObject pick2 = GameObject.Find(objToSpawn2.name);
-            //foreach (KeyValuePair<string, List<string>> entry in listList)
-            //{
-            //    if (entry.Key == pick1.name)
-
-            //    {
-            //        foreach (string x in entry.Value)
-            //        {
-            //            GameObject soldier = GameObject.Find(x);
-            //            //GameObject arrow2 = soldier.transform.Find("IconSprite").gameObject;
-            //            //arrow2 .SetActive(true);
-            //            //soldier.transform.position = Vector3.MoveTowards(soldier.transform.position, new Vector3(pick.transform.position.x + 5f, pick.transform.position.y, pick.transform.position.z), Time.deltaTime * speed);
-            //            nav = soldier.GetComponent<UnityEngine.AI.NavMeshAgent>();
-            //            //nav.SetDestination(secondSoldier.transform.position);
-            //            nav.destination = new Vector3(pick.transform.position.x - 1f, pick.transform.position.y, pick.transform.position.z);
-            //        }
-
-
-            //    }
-            //    if (entry.Key == pick2.name)
-            //    {
-            //        foreach (string x in entry.Value)
-            //        {
-            //            soldier2 = GameObject.Find(x);
-            //            //soldier2.transform.position = Vector3.MoveTowards(soldier2.transform.position, new Vector3(pick.transform.position.x - 5f, pick.transform.position.y, pick.transform.position.z), Time.deltaTime * speed);
-            //            nav = soldier2.GetComponent<UnityEngine.AI.NavMeshAgent>();
-            //            nav.destination = new Vector3(pick.transform.position.x + 1f, pick.transform.position.y, pick.transform.position.z);
-            //        }
-            //        if (Vector3.Distance(soldier2.transform.position, new Vector3(pick.transform.position.x + 1f, pick.transform.position.y, pick.transform.position.z)) < 1f)
-            //        {
-            //            Destroy(GameObject.Find(pick.name));
-            //            listList.Remove(pick.name);
-            //            move8 = false;
-
-            //        }
-
-            //    }
-
-            //}
-
-
-
-        }
-
-        if (move9 == true)
-        {
-            //Debug.Log("move9");
-            //GameObject pick1 = GameObject.Find(hitName);
-            //foreach (KeyValuePair<string, List<string>> entry in listList)
-            //{
-            //    if (entry.Key == pick1.name)
-            //    {
-            //        foreach (string x in entry.Value)
-            //        {
-            //            soldier = GameObject.Find(x);
-            //            if (entry.Value.First() == x)
-            //            {
-            //                soldier.layer = LayerMask.NameToLayer("army");
-            //                soldier = GameObject.Find(x);
-            //                GameObject arrow2 = soldier.transform.Find("IconSprite").gameObject;
-            //                arrow2.SetActive(true);
-            //                nav = soldier.GetComponent<UnityEngine.AI.NavMeshAgent>();
-            //                nav.destination = new Vector3(pick1.transform.position.x -1f, pick1.transform.position.y, pick1.transform.position.z);
-            //                //soldier.transform.position = Vector3.MoveTowards(soldier.transform.position, new Vector3(pick1.transform.position.x + 1f, pick1.transform.position.y, pick1.transform.position.z), Time.deltaTime * speed);
-            //            }
-
-
-            //            else if (entry.Value.Last() == x)
-            //            {
-            //                soldier.layer = LayerMask.NameToLayer("army");
-            //                GameObject arrow2 = soldier.transform.Find("IconSprite").gameObject;
-            //                arrow2.SetActive(true);
-            //                nav = soldier.GetComponent<UnityEngine.AI.NavMeshAgent>();
-            //                nav.destination = new Vector3(pick1.transform.position.x + 1f, pick1.transform.position.y, pick1.transform.position.z);
-            //                //soldier.transform.position = Vector3.MoveTowards(soldier.transform.position, new Vector3(pick1.transform.position.x + 5f, pick1.transform.position.y, pick1.transform.position.z), Time.deltaTime * speed);
-            //            }
-
-            //        }
-            //        //if (Vector3.Distance(soldier.transform.position, new Vector3(pick1.transform.position.x + 5f, pick1.transform.position.y, pick1.transform.position.z)) < speed * Time.deltaTime)
-            //        //{
-            //        //Destroy(GameObject.Find(entry.Key));
-            //        //move9 = false;
-            //        //}
-
-            //        if (Vector3.Distance(soldier.transform.position, new Vector3(pick1.transform.position.x + 1f, pick1.transform.position.y, pick1.transform.position.z)) < 2f)
-            //        {
-            //            Destroy(GameObject.Find(entry.Key));
-            //            listList.Remove(entry.Key);
-            //            move9 = false;
-            //        }
-            //        //if (soldier.transform.position.x == pick1.transform.position.x+5f)
-            //        //{
-            //        //   Destroy(GameObject.Find(entry.Key));
-            //        //    hitName = "";
-            //        //    addMode = false;
-            //        //    move9 = false;
-            //        //}
-
-            //    }
-
-            //}
-
-        }
 
         if (cam.enabled == true)
         {
@@ -1200,11 +934,12 @@ public class FullMini : MonoBehaviour
                 {
                  
                     GameObject pick1 = GameObject.Find(hitName);
-                    if (hit.transform.gameObject.layer == LayerMask.NameToLayer("army") && hit.transform.gameObject.transform.parent.gameObject.name != hitName && pick1.layer != LayerMask.NameToLayer("team"))
+                    if (hit.transform.gameObject.layer == LayerMask.NameToLayer("army") && hit.transform.gameObject.transform.parent.gameObject.name != hitName && pick1.layer == LayerMask.NameToLayer("army"))
                     {
-                    
+                        Debug.Log(hitName);
+                        Debug.Log(hit.transform.gameObject.layer);
                         groups.Clear();
-                        Debug.Log("Inside1" + hitName);
+                        Debug.Log("Inside1" + pick1.layer);
                         i++;
                         //hitName = hit.transform.gameObject.name;
                         objToSpawn = new GameObject("team_" + i);
@@ -1457,46 +1192,8 @@ public class FullMini : MonoBehaviour
 
                         }
 
-                        //foreach (KeyValuePair<string, List<string>> entry in listList)
-                        //{
-                        //    if (entry.Key == "team_2")
-                        //    {
-                        //        foreach (string x in entry.Value)
-                        //        {
 
-                        //            Debug.Log(x);
-                        //        }
-
-                        //    }
-
-                        //}
-                        //listList.Remove(hitName);
-                        //foreach (KeyValuePair<string, List<string>> entry in listList)
-                        //{
-                        //    Debug.Log(entry.Key);
-                        //    foreach (string x in entry.Value)
-                        //    {
-
-                        //        Debug.Log(x);
-
-                        //    }
-
-                        //}
-
-                        //var combinedList = list2;
-                        //Debug.Log(combinedList);
-                        //listList.Add(hit.transform.gameObject.name, combinedList);
-                        //foreach (KeyValuePair<string, List<string>> entry in listList)
-                        //{
-                        //    if (entry.Key == hit.transform.gameObject.name)
-                        //    {
-                        //        Debug.Log(entry.Value);
-
-                        //    }
-
-                        //}
-
-                        var p = "TeamToArmy" + y;
+                        var p = "TeamToTeam" + y;
 
                         QueueFunctions s = new QueueFunctions()
                         {
