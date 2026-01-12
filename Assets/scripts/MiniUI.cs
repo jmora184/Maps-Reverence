@@ -8,6 +8,8 @@ public class MiniUI : MonoBehaviour
     public static MiniUI instance;
     public GameObject button;
     public GameObject moveButton;
+    public GameObject AllySprite;
+    public GameObject mouseMove;
     public GameObject splitButton;
     public GameObject cancelButton;
     public GameObject test;
@@ -20,6 +22,7 @@ public class MiniUI : MonoBehaviour
     }
     void Start()
     {
+        //reae
         rt = rawImage.GetComponent<RectTransform>();
     }
 

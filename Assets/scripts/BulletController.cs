@@ -23,7 +23,7 @@ public class BulletController : MonoBehaviour
     //comp
     void Update()
     {
-        theRB.velocity = transform.forward * moveSpeed;
+        theRB.linearVelocity = transform.forward * moveSpeed;
 
         lifeTime -= Time.deltaTime;
         if (lifeTime <= 0)
@@ -35,25 +35,36 @@ public class BulletController : MonoBehaviour
     private void OnTriggerEnter(Collider other)
     {
 
-        if (other.gameObject.tag == "Enemy" && damageEnemy)
+        Debug.Log("BULLET HIT: " + other.name + " tag=" + other.tag + " layer=" + other.gameObject.layer);
+        // Damage ENEMY
+        if (damageEnemy && other.CompareTag("Enemy"))
         {
-            //Destroy(other.gameObject);
-            other.gameObject.GetComponent<EnemyHealthController>().DamageEnemy(Damage);
+            var eh = other.GetComponentInParent<EnemyHealthController>();
+            if (eh != null) eh.DamageEnemy(Damage);
         }
 
-        if (other.gameObject.tag == "HeadShot" && damageEnemy)
+        // Headshot (enemy child collider)
+        if (damageEnemy && other.CompareTag("HeadShot"))
         {
-            //Destroy(other.gameObject);
-            other.transform.parent.GetComponent<EnemyHealthController>().DamageEnemy(Damage+2);
+            var eh = other.GetComponentInParent<EnemyHealthController>();
+            if (eh != null) eh.DamageEnemy(Damage + 2);
             Debug.Log("headshot");
         }
 
-        if (other.gameObject.tag=="Player" && damagePlayer)
+        // Damage ALLY
+        if (damageEnemy && other.CompareTag("Ally"))
         {
-            Debug.Log("hit player at" + transform.position);
+            var ah = other.GetComponentInParent<AllyHealth>();
+            if (ah != null) ah.DamageAlly(Damage);
+        }
+
+        // Damage PLAYER
+        if (damagePlayer && other.CompareTag("Player"))
+        {
             PlayerHealthController.instance.DamagePlayer(Damage);
         }
+
         Destroy(gameObject);
-        Instantiate(impactEffect, transform.position + (transform.forward * (-moveSpeed) * Time.deltaTime), transform.rotation);
+        Instantiate(impactEffect, transform.position, transform.rotation);
     }
 }
