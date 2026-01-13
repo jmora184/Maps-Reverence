@@ -6,6 +6,8 @@ public class TeamIconUI : MonoBehaviour
 {
     [Header("UI")]
     public Button button;
+
+    [Tooltip("Drag the child Text (Legacy) that sits in the middle of the star.")]
     public Text label;
 
     private Team _team;
@@ -23,8 +25,15 @@ public class TeamIconUI : MonoBehaviour
         _team = team;
         _onClick = onClick;
 
+        // Display the number of members on the team
         if (label != null && _team != null)
-            label.text = _team.GetDisplayLabel();
+        {
+            int count = (_team.Members != null) ? _team.Members.Count : 0;
+            label.text = count.ToString();
+
+            // Optional: hide if 0 or 1 (uncomment if you prefer)
+            // label.gameObject.SetActive(count > 1);
+        }
 
         if (button == null) button = GetComponent<Button>();
 

@@ -41,6 +41,17 @@ public class ContextCommandPanelUI : MonoBehaviour
     private bool suppressAfterJoinTargetChosen;
     private GameObject suppressPrimarySelectionRef;
 
+    private int suppressSelectionCountRef;
+
+    // ✅ NEW: after a move destination is chosen, keep the panel hidden until the player re-selects (clicks a unit/star again).
+    private bool suppressAfterMoveTargetChosen;
+    private bool waitingForMoveConfirm;
+    private GameObject suppressMovePrimarySelectionRef;
+
+
+    private int moveSuppressSetFrame = -1;// Track state transitions so we can detect "move confirm" (leaving MoveTargeting after pressing Move)
+    private CommandStateMachine.State lastState = CommandStateMachine.State.Inactive;
+
     private void Awake()
     {
         if (canvas == null) canvas = GetComponentInParent<Canvas>();
@@ -53,6 +64,8 @@ public class ContextCommandPanelUI : MonoBehaviour
 
         WireButtons();
         Hide();
+
+        if (sm != null) lastState = sm.CurrentState;
     }
 
     private void OnEnable()
@@ -89,11 +102,19 @@ public class ContextCommandPanelUI : MonoBehaviour
             return;
         }
 
+
+
+        // If we are suppressing after a move destination was chosen, keep hidden.
+        if (suppressAfterMoveTargetChosen)
+        {
+            Hide();
+            return;
+        }
         bool shouldShow =
-            state == CommandStateMachine.State.UnitSelected &&
-            selectionCount > 0 &&
-            sm != null &&
-            sm.PrimarySelected != null;
+                    state == CommandStateMachine.State.UnitSelected &&
+                    selectionCount > 0 &&
+                    sm != null &&
+                    sm.PrimarySelected != null;
 
         if (!shouldShow)
         {
@@ -110,6 +131,20 @@ public class ContextCommandPanelUI : MonoBehaviour
     {
         if (sm == null || panel == null) return;
 
+        // Detect leaving MoveTargeting after the player pressed Move (meaning destination was chosen)
+        if (waitingForMoveConfirm && lastState == CommandStateMachine.State.MoveTargeting && sm.CurrentState != CommandStateMachine.State.MoveTargeting)
+        {
+            waitingForMoveConfirm = false;
+
+            // Keep hidden even if selection stays (e.g., team remains selected)
+            suppressAfterMoveTargetChosen = true;
+            suppressMovePrimarySelectionRef = sm.PrimarySelected;
+
+
+            moveSuppressSetFrame = Time.frameCount; Hide();
+            lastState = sm.CurrentState;
+            return;
+        }
         // Suppress after 2nd ally chosen
         if (suppressAfterJoinTargetChosen)
         {
@@ -117,9 +152,18 @@ public class ContextCommandPanelUI : MonoBehaviour
             return;
         }
 
+
+
+        // Suppress after move destination chosen
+        if (suppressAfterMoveTargetChosen)
+        {
+            Hide();
+            lastState = sm.CurrentState;
+            return;
+        }
         bool shouldShow =
-            sm.CurrentState == CommandStateMachine.State.UnitSelected &&
-            sm.PrimarySelected != null;
+                    sm.CurrentState == CommandStateMachine.State.UnitSelected &&
+                    sm.PrimarySelected != null;
 
         if (!shouldShow)
         {
@@ -130,6 +174,9 @@ public class ContextCommandPanelUI : MonoBehaviour
         followTarget = sm.PrimarySelected.transform;
         Show();
         Reposition();
+
+        // Track for transition detection
+        lastState = sm.CurrentState;
     }
 
     private void HandleAddRequested(IReadOnlyList<GameObject> selection, GameObject clickedUnit)
@@ -146,6 +193,8 @@ public class ContextCommandPanelUI : MonoBehaviour
             // Track what selection we’re “waiting to change from”
             suppressPrimarySelectionRef = sm.PrimarySelected;
 
+            suppressSelectionCountRef = selection != null ? selection.Count : 0;
+
             // Hide immediately
             Hide();
         }
@@ -153,15 +202,36 @@ public class ContextCommandPanelUI : MonoBehaviour
 
     private void HandleSelectionChanged(IReadOnlyList<GameObject> selection)
     {
-        if (!suppressAfterJoinTargetChosen) return;
         if (sm == null) return;
 
-        // Once the player clicks another object, the primary selected changes.
-        if (sm.PrimarySelected != suppressPrimarySelectionRef)
+        // JOIN suppression clears when the selection changes away from the join-confirm moment.
+        // Primary may stay the same (leader), so also clear when selection COUNT changes (eg: clicking team star selects team).
+        if (suppressAfterJoinTargetChosen)
         {
-            suppressAfterJoinTargetChosen = false;
-            suppressPrimarySelectionRef = null;
-            // LateUpdate/Refresh will show naturally when appropriate.
+            int currentCount = selection != null ? selection.Count : 0;
+
+            if (sm.PrimarySelected != suppressPrimarySelectionRef || currentCount != suppressSelectionCountRef)
+            {
+                suppressAfterJoinTargetChosen = false;
+                suppressPrimarySelectionRef = null;
+                suppressSelectionCountRef = 0;
+                suppressSelectionCountRef = 0;
+
+                suppressSelectionCountRef = 0;
+                // LateUpdate/Refresh will show naturally when appropriate.
+            }
+        }
+
+        // MOVE suppression clears only when the player re-selects something (unit icon or team star).
+        // We also ignore any selection callbacks that happen in the same frame we set suppression.
+        if (suppressAfterMoveTargetChosen)
+        {
+            if (Time.frameCount > moveSuppressSetFrame)
+            {
+                suppressAfterMoveTargetChosen = false;
+                suppressMovePrimarySelectionRef = null;
+                moveSuppressSetFrame = -1;
+            }
         }
     }
 
@@ -194,6 +264,9 @@ public class ContextCommandPanelUI : MonoBehaviour
                 sm.ArmMoveFromCurrentSelection();
                 Hide();
 
+
+                // We will suppress the panel once the destination is confirmed (when we leave MoveTargeting)
+                waitingForMoveConfirm = true;
                 // Move hint
                 TryShowHint(moveHintMessage, moveHintDuration);
             });
@@ -217,6 +290,7 @@ public class ContextCommandPanelUI : MonoBehaviour
                 // Cancel should also clear suppression
                 suppressAfterJoinTargetChosen = false;
                 suppressPrimarySelectionRef = null;
+                suppressSelectionCountRef = 0;
 
                 Hide();
             });
