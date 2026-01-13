@@ -35,6 +35,13 @@ public class CommandOverlayUI : MonoBehaviour
 
     [Header("Selected Ring")]
     public string selectedRingChildName = "SelectedRing";
+    [Tooltip("Optional second ring for team selection. Add a child under the ally icon named this (ex: TeamSelectedRing).")]
+    public string teamSelectedRingChildName = "TeamSelectedRing";
+
+    [Header("Team Star Bob Sync")]
+    [Tooltip("If enabled, team star bob uses the anchor ally icon\'s current bob offset (so it feels attached). Falls back to its own sine bob if not found.")]
+    public bool teamStarBobSyncToAnchorIcon = true;
+
 
     [Header("Team Star Icon")]
     public RectTransform teamStarIconPrefab;
@@ -333,13 +340,60 @@ public class CommandOverlayUI : MonoBehaviour
         if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
         if (sm == null) return;
 
-        Transform selectedT = (sm.PrimarySelected != null) ? sm.PrimarySelected.transform : null;
+        // Build selected transform sets
+        HashSet<Transform> selected = new();
+        var cur = sm.CurrentSelection;
+        if (cur != null)
+        {
+            for (int i = 0; i < cur.Count; i++)
+            {
+                var go = cur[i];
+                if (go != null) selected.Add(go.transform);
+            }
+        }
 
+        // Only allies participate in team highlighting
+        HashSet<Transform> selectedAllies = new();
+        foreach (var t in selected)
+            if (t != null && allyIconByUnit.ContainsKey(t))
+                selectedAllies.Add(t);
+
+        bool multiAllySelection = selectedAllies.Count > 1;
+
+        // Cache whether each team is fully selected (to enable the team ring)
+        Dictionary<int, bool> fullTeamSelectedById = null;
+        if (multiAllySelection && TeamManager.Instance != null)
+        {
+            fullTeamSelectedById = new Dictionary<int, bool>();
+            var teams = TeamManager.Instance.Teams;
+            for (int i = 0; i < teams.Count; i++)
+            {
+                var team = teams[i];
+                if (team == null) continue;
+                fullTeamSelectedById[team.Id] = IsFullTeamSelected(team, selectedAllies);
+            }
+        }
+
+        // Allies: regular selected ring for any selected ally; team ring only when the full team is selected
         foreach (var kvp in allyIconByUnit)
-            SetSelectedRing(kvp.Value, kvp.Key == selectedT);
+        {
+            bool on = selected.Contains(kvp.Key);
+            SetSelectedRing(kvp.Value, on);
 
+            bool teamOn = false;
+            if (on && multiAllySelection && TeamManager.Instance != null)
+            {
+                var team = TeamManager.Instance.GetTeamOf(kvp.Key);
+                if (team != null && fullTeamSelectedById != null && fullTeamSelectedById.TryGetValue(team.Id, out bool full) && full)
+                    teamOn = true;
+            }
+
+            SetTeamSelectedRing(kvp.Value, teamOn);
+        }
+
+        // Enemies: only regular selected ring
         foreach (var kvp in enemyIconByUnit)
-            SetSelectedRing(kvp.Value, kvp.Key == selectedT);
+            SetSelectedRing(kvp.Value, selected.Contains(kvp.Key));
     }
 
     private void SetSelectedRing(RectTransform icon, bool on)
@@ -347,6 +401,63 @@ public class CommandOverlayUI : MonoBehaviour
         if (icon == null) return;
         var ring = icon.Find(selectedRingChildName);
         if (ring != null) ring.gameObject.SetActive(on);
+    }
+
+    private void SetTeamSelectedRing(RectTransform icon, bool on)
+    {
+        if (icon == null) return;
+        if (string.IsNullOrEmpty(teamSelectedRingChildName)) return;
+        var ring = icon.Find(teamSelectedRingChildName);
+        if (ring != null) ring.gameObject.SetActive(on);
+    }
+
+    private bool IsFullTeamSelected(Team team, HashSet<Transform> selectedAllies)
+    {
+        if (team == null || selectedAllies == null) return false;
+
+        int memberCount = 0;
+        for (int i = 0; i < team.Members.Count; i++)
+        {
+            var m = team.Members[i];
+            if (m == null) continue;
+            memberCount++;
+            if (!selectedAllies.Contains(m)) return false;
+        }
+
+        return selectedAllies.Count == memberCount;
+    }
+
+    private float GetAnchorIconBobOffsetPixels(Transform anchor)
+    {
+        if (anchor == null) return 0f;
+        if (!allyIconByUnit.TryGetValue(anchor, out var icon) || icon == null) return 0f;
+
+        // Try to read the current bob offset from the ally icon\'s bob script via reflection.
+        // This keeps the team star perfectly in-phase with the anchor ally icon if that prefab is bobbing itself.
+        var behaviours = icon.GetComponentsInChildren<MonoBehaviour>(true);
+        for (int i = 0; i < behaviours.Length; i++)
+        {
+            var b = behaviours[i];
+            if (b == null) continue;
+
+            var t = b.GetType();
+            var fTarget = t.GetField("bobTarget", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            var fBase = t.GetField("bobBaseLocalPos", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            if (fTarget == null || fBase == null) continue;
+
+            try
+            {
+                var bobTarget = fTarget.GetValue(b) as RectTransform;
+                if (bobTarget == null) continue;
+
+                object baseObj = fBase.GetValue(b);
+                if (baseObj is Vector3 basePos)
+                    return bobTarget.localPosition.y - basePos.y;
+            }
+            catch { }
+        }
+
+        return 0f;
     }
 
     private void SyncTeamsAndStars(Camera uiCam)
@@ -405,7 +516,16 @@ public class CommandOverlayUI : MonoBehaviour
 
                 if (teamStarBobEnabled)
                 {
-                    float y = Mathf.Sin((Time.unscaledTime + seed) * teamStarBobSpeed) * teamStarBobAmount;
+                    float y = 0f;
+
+                    // Prefer syncing to the anchor ally icon\'s bob if available
+                    if (teamStarBobSyncToAnchorIcon)
+                        y = GetAnchorIconBobOffsetPixels(anchor);
+
+                    // Fallback: sine bob with per-team seed
+                    if (Mathf.Approximately(y, 0f))
+                        y = Mathf.Sin((Time.unscaledTime + seed) * teamStarBobSpeed) * teamStarBobAmount;
+
                     star.anchoredPosition += new Vector2(0f, y);
                 }
             }
