@@ -41,11 +41,6 @@ public class CommandOverlayUI : MonoBehaviour
     public float teamStarWorldHeight = 2.2f;
     public bool selectTeamWhenClickTeamedMember = true;
 
-    [Header("Team Star Bob")]
-    public bool teamStarBobEnabled = true;
-    public float teamStarBobAmount = 6f;
-    public float teamStarBobSpeed = 2f;
-
     [Header("Button Panel (optional)")]
     public RectTransform commandButtonPanel;
     public Vector2 buttonPanelScreenOffset = new Vector2(0f, 0f);
@@ -58,13 +53,22 @@ public class CommandOverlayUI : MonoBehaviour
     [Tooltip("How close agent.destination must be to team.Anchor.position to count as a join-route destination.")]
     public float joinRouteDestinationSnap = 1.25f;
 
+    [Header("Team Star Bob")]
+    [Tooltip("If enabled, team star icons gently bob up and down (UI pixels) like ally/enemy icons.")]
+    public bool teamStarBobEnabled = true;
+    [Tooltip("Pixels up/down.")]
+    public float teamStarBobAmount = 6f;
+    [Tooltip("Speed of bob animation.")]
+    public float teamStarBobSpeed = 2f;
+
+    private readonly Dictionary<int, float> teamStarBobSeedByTeamId = new();
+
     private Canvas canvas;
     private CommandStateMachine sm;
 
     private readonly Dictionary<Transform, RectTransform> allyIconByUnit = new();
     private readonly Dictionary<Transform, RectTransform> enemyIconByUnit = new();
     private readonly Dictionary<int, RectTransform> teamStarByTeamId = new();
-    private readonly Dictionary<int, float> teamStarBobSeedByTeamId = new();
     private readonly HashSet<Transform> teamedUnits = new();
 
     private Transform buttonPanelAnchorOverride;
@@ -296,7 +300,7 @@ public class CommandOverlayUI : MonoBehaviour
             dict.Remove(toRemove[i]);
     }
 
-    private void UpdateWorldAnchoredUI(RectTransform ui, Transform worldTarget, float height, Camera uiCam, float bobAmount = 0f, float bobSpeed = 0f, float bobSeed = 0f)
+    private void UpdateWorldAnchoredUI(RectTransform ui, Transform worldTarget, float height, Camera uiCam)
     {
         if (ui == null || worldTarget == null) return;
 
@@ -321,12 +325,6 @@ public class CommandOverlayUI : MonoBehaviour
             uiCam,
             out Vector2 localPoint);
 
-        if (bobAmount != 0f && bobSpeed != 0f)
-        {
-            float y = Mathf.Sin((Time.unscaledTime + bobSeed) * bobSpeed) * bobAmount;
-            localPoint.y += y;
-        }
-
         ui.anchoredPosition = localPoint;
     }
 
@@ -335,26 +333,13 @@ public class CommandOverlayUI : MonoBehaviour
         if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
         if (sm == null) return;
 
-        // Highlight EVERY selected unit.
-        // If a team star is selected, the state machine selection contains all team members.
-        HashSet<Transform> selectedTs = null;
-
-        var selection = sm.CurrentSelection;
-        if (selection != null && selection.Count > 0)
-        {
-            selectedTs = new HashSet<Transform>(selection.Count);
-            for (int i = 0; i < selection.Count; i++)
-            {
-                var go = selection[i];
-                if (go != null) selectedTs.Add(go.transform);
-            }
-        }
+        Transform selectedT = (sm.PrimarySelected != null) ? sm.PrimarySelected.transform : null;
 
         foreach (var kvp in allyIconByUnit)
-            SetSelectedRing(kvp.Value, selectedTs != null && selectedTs.Contains(kvp.Key));
+            SetSelectedRing(kvp.Value, kvp.Key == selectedT);
 
         foreach (var kvp in enemyIconByUnit)
-            SetSelectedRing(kvp.Value, selectedTs != null && selectedTs.Contains(kvp.Key));
+            SetSelectedRing(kvp.Value, kvp.Key == selectedT);
     }
 
     private void SetSelectedRing(RectTransform icon, bool on)
@@ -403,24 +388,31 @@ public class CommandOverlayUI : MonoBehaviour
             if (anchor == null && team.Members.Count > 0) anchor = team.Members[0];
 
             if (anchor != null)
-                float seed;
-            if (!teamStarBobSeedByTeamId.TryGetValue(team.Id, out seed))
             {
-                seed = UnityEngine.Random.Range(0f, 1000f);
-                teamStarBobSeedByTeamId[team.Id] = seed;
+                // Ensure visible (it may have been hidden if anchor was temporarily null)
+                if (!star.gameObject.activeSelf) star.gameObject.SetActive(true);
+
+                // Per-team bob seed so each star moves a little differently
+                float seed;
+                if (!teamStarBobSeedByTeamId.TryGetValue(team.Id, out seed))
+                {
+                    seed = UnityEngine.Random.Range(0f, 1000f);
+                    teamStarBobSeedByTeamId[team.Id] = seed;
+                }
+
+                // Position star over the anchor (star-holder) then apply optional bob in UI pixels
+                UpdateWorldAnchoredUI(star, anchor, teamStarWorldHeight, uiCam);
+
+                if (teamStarBobEnabled)
+                {
+                    float y = Mathf.Sin((Time.unscaledTime + seed) * teamStarBobSpeed) * teamStarBobAmount;
+                    star.anchoredPosition += new Vector2(0f, y);
+                }
             }
-
-            UpdateWorldAnchoredUI(
-                star,
-                anchor,
-                teamStarWorldHeight,
-                uiCam,
-                teamStarBobEnabled ? teamStarBobAmount : 0f,
-                teamStarBobEnabled ? teamStarBobSpeed : 0f,
-                seed);
-
             else
+            {
                 star.gameObject.SetActive(false);
+            }
         }
 
         // Cleanup removed teams
