@@ -88,6 +88,13 @@ public class CommandOverlayUI : MonoBehaviour
     private bool suppressButtonPanelAfterJoinTargetChosen;
     private GameObject suppressButtonPanelPrimarySelectionRef;
 
+
+    // After MOVE destination chosen, keep the panel hidden until the primary selection changes.
+    private bool suppressButtonPanelAfterMoveTargetChosen;
+    private GameObject suppressButtonPanelPrimarySelectionRef_Move;
+
+    // Track state transitions (for detecting move confirm)
+    private CommandStateMachine.State lastSmState = CommandStateMachine.State.AwaitSelection;
     private void Awake()
     {
         Instance = this;
@@ -98,6 +105,8 @@ public class CommandOverlayUI : MonoBehaviour
 
         sm = FindObjectOfType<CommandStateMachine>();
 
+
+        if (sm != null) lastSmState = sm.CurrentState;
         AutoFindHintToastUI();
 
         if (commandButtonPanel != null)
@@ -262,6 +271,24 @@ public class CommandOverlayUI : MonoBehaviour
         Camera uiCam = canvas != null ? canvas.worldCamera : null;
         if (uiCam == null) uiCam = Camera.main;
 
+
+        // Ensure we have the state machine (used for panel suppression on move confirm)
+        if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
+        if (sm != null)
+        {
+            // Detect MOVE confirmation moment: MoveTargeting -> UnitSelected
+            if (lastSmState == CommandStateMachine.State.MoveTargeting &&
+                sm.CurrentState == CommandStateMachine.State.UnitSelected)
+            {
+                suppressButtonPanelAfterMoveTargetChosen = true;
+                suppressButtonPanelPrimarySelectionRef_Move = sm.PrimarySelected;
+
+                if (commandButtonPanel != null)
+                    commandButtonPanel.gameObject.SetActive(false);
+            }
+
+            lastSmState = sm.CurrentState;
+        }
         // Update ally/enemy icons
         UpdateIcons(allyIconByUnit, iconWorldHeight, uiCam);
         UpdateIcons(enemyIconByUnit, iconWorldHeight, uiCam);
@@ -706,10 +733,24 @@ public class CommandOverlayUI : MonoBehaviour
         if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
         if (sm == null) return;
 
+
+        // Suppress after JOIN confirmation (2nd ally chosen) until selection changes
         if (suppressButtonPanelAfterJoinTargetChosen)
         {
             if (sm.PrimarySelected != suppressButtonPanelPrimarySelectionRef)
                 suppressButtonPanelAfterJoinTargetChosen = false;
+            else
+            {
+                commandButtonPanel.gameObject.SetActive(false);
+                return;
+            }
+        }
+
+        // Suppress after MOVE destination chosen until selection changes
+        if (suppressButtonPanelAfterMoveTargetChosen)
+        {
+            if (sm.PrimarySelected != suppressButtonPanelPrimarySelectionRef_Move)
+                suppressButtonPanelAfterMoveTargetChosen = false;
             else
             {
                 commandButtonPanel.gameObject.SetActive(false);
@@ -722,7 +763,7 @@ public class CommandOverlayUI : MonoBehaviour
             commandButtonPanel.gameObject.SetActive(false);
             return;
         }
-
+        Debug.Log("BUTTON PANEL ENABLED by CommandOverlayUI. Frame=" + Time.frameCount, commandButtonPanel);
         commandButtonPanel.gameObject.SetActive(true);
 
         Transform anchor = sm.PrimarySelected.transform;
@@ -772,6 +813,8 @@ public class CommandOverlayUI : MonoBehaviour
         // Selection changed => allow panel again
         suppressButtonPanelAfterJoinTargetChosen = false;
         suppressButtonPanelPrimarySelectionRef = null;
+        suppressButtonPanelAfterMoveTargetChosen = false;
+        suppressButtonPanelPrimarySelectionRef_Move = null;
     }
 
     private void ClearAllIcons()

@@ -33,6 +33,9 @@ public class CommandStateMachine : MonoBehaviour
     [Header("Move behavior")]
     public bool queueMovesInCommandMode = true;
 
+
+    [Tooltip("If true, after clicking a move destination we keep the current selection, but return to AwaitSelection (so panels do not pop back up).")]
+    public bool keepSelectionAfterMove = true;
     [Header("UI")]
     public CommandModeButtonsUI buttonsUI;
 
@@ -135,7 +138,12 @@ public class CommandStateMachine : MonoBehaviour
                     if (MoveDestinationMarkerSystem.Instance != null)
                         MoveDestinationMarkerSystem.Instance.PlaceFor(selection.ToArray(), hit.point);
 
-                    ClearSelectionInternal();
+                    if (!keepSelectionAfterMove)
+                    {
+                        ClearSelectionInternal();
+                    }
+                    // Always leave targeting mode after confirming the move.
+                    // We return to AwaitSelection so other UIs don\'t immediately pop the panel back up.
                     SetState(State.AwaitSelection);
                     buttonsUI?.Refresh(CurrentState, selection.Count);
                 }
