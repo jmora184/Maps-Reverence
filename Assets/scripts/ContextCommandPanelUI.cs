@@ -1,12 +1,17 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Reflection;
 using UnityEngine;
 using UnityEngine.UI;
-
 
 /// <summary>
 /// Shows a vertical-stack context command panel (Join/Move/Cancel)
 /// near the currently selected unit in command mode.
+/// 
+/// UPDATED:
+/// - If a TEAM is selected (selectionCount > 1) and a Team Star UI exists,
+///   the panel will anchor under the TEAM STAR (instead of the ally).
+///   This uses reflection to locate the TeamIconUI's underlying Team (Id match).
 /// </summary>
 public class ContextCommandPanelUI : MonoBehaviour
 {
@@ -40,17 +45,20 @@ public class ContextCommandPanelUI : MonoBehaviour
     // until the player changes selection to another object.
     private bool suppressAfterJoinTargetChosen;
     private GameObject suppressPrimarySelectionRef;
-
     private int suppressSelectionCountRef;
 
-    // ✅ NEW: after a move destination is chosen, keep the panel hidden until the player re-selects (clicks a unit/star again).
+    // After a move destination is chosen, keep the panel hidden until the player re-selects
     private bool suppressAfterMoveTargetChosen;
     private bool waitingForMoveConfirm;
     private GameObject suppressMovePrimarySelectionRef;
 
+    private int moveSuppressSetFrame = -1;
 
-    private int moveSuppressSetFrame = -1;// Track state transitions so we can detect "move confirm" (leaving MoveTargeting after pressing Move)
+    // Track state transitions so we can detect "move confirm" (leaving MoveTargeting after pressing Move)
     private CommandStateMachine.State lastState = CommandStateMachine.State.Inactive;
+
+    // Reflection cache for TeamIconUI -> Team field
+    private static FieldInfo cachedTeamIconUITeamField;
 
     private void Awake()
     {
@@ -73,10 +81,7 @@ public class ContextCommandPanelUI : MonoBehaviour
         if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
         if (sm != null)
         {
-            // Detect the moment a join target (2nd ally) is chosen:
             sm.OnAddRequested += HandleAddRequested;
-
-            // Detect when user clicks something else (selection changes):
             sm.OnSelectionChanged += HandleSelectionChanged;
         }
     }
@@ -95,32 +100,16 @@ public class ContextCommandPanelUI : MonoBehaviour
     /// </summary>
     public void Refresh(CommandStateMachine.State state, int selectionCount)
     {
-        // If we are suppressing after a join target was chosen, keep hidden.
-        if (suppressAfterJoinTargetChosen)
-        {
-            Hide();
-            return;
-        }
+        if (suppressAfterJoinTargetChosen) { Hide(); return; }
+        if (suppressAfterMoveTargetChosen) { Hide(); return; }
 
-
-
-        // If we are suppressing after a move destination was chosen, keep hidden.
-        if (suppressAfterMoveTargetChosen)
-        {
-            Hide();
-            return;
-        }
         bool shouldShow =
-                    state == CommandStateMachine.State.UnitSelected &&
-                    selectionCount > 0 &&
-                    sm != null &&
-                    sm.PrimarySelected != null;
+            state == CommandStateMachine.State.UnitSelected &&
+            selectionCount > 0 &&
+            sm != null &&
+            sm.PrimarySelected != null;
 
-        if (!shouldShow)
-        {
-            Hide();
-            return;
-        }
+        if (!shouldShow) { Hide(); return; }
 
         followTarget = sm.PrimarySelected.transform;
         Show();
@@ -136,46 +125,29 @@ public class ContextCommandPanelUI : MonoBehaviour
         {
             waitingForMoveConfirm = false;
 
-            // Keep hidden even if selection stays (e.g., team remains selected)
             suppressAfterMoveTargetChosen = true;
             suppressMovePrimarySelectionRef = sm.PrimarySelected;
 
+            moveSuppressSetFrame = Time.frameCount;
+            Hide();
 
-            moveSuppressSetFrame = Time.frameCount; Hide();
             lastState = sm.CurrentState;
             return;
         }
-        // Suppress after 2nd ally chosen
-        if (suppressAfterJoinTargetChosen)
-        {
-            Hide();
-            return;
-        }
 
+        if (suppressAfterJoinTargetChosen) { Hide(); lastState = sm.CurrentState; return; }
+        if (suppressAfterMoveTargetChosen) { Hide(); lastState = sm.CurrentState; return; }
 
-
-        // Suppress after move destination chosen
-        if (suppressAfterMoveTargetChosen)
-        {
-            Hide();
-            lastState = sm.CurrentState;
-            return;
-        }
         bool shouldShow =
-                    sm.CurrentState == CommandStateMachine.State.UnitSelected &&
-                    sm.PrimarySelected != null;
+            sm.CurrentState == CommandStateMachine.State.UnitSelected &&
+            sm.PrimarySelected != null;
 
-        if (!shouldShow)
-        {
-            Hide();
-            return;
-        }
+        if (!shouldShow) { Hide(); lastState = sm.CurrentState; return; }
 
         followTarget = sm.PrimarySelected.transform;
         Show();
         Reposition();
 
-        // Track for transition detection
         lastState = sm.CurrentState;
     }
 
@@ -184,18 +156,12 @@ public class ContextCommandPanelUI : MonoBehaviour
         if (sm == null) return;
         if (clickedUnit == null) return;
 
-        // Detect JOIN confirmation moment:
-        // JoinArmed is true, JoinSource exists, and clickedUnit is NOT the join source.
+        // JOIN confirmation moment
         if (sm.JoinArmed && sm.JoinSource != null && clickedUnit != sm.JoinSource)
         {
             suppressAfterJoinTargetChosen = true;
-
-            // Track what selection we’re “waiting to change from”
             suppressPrimarySelectionRef = sm.PrimarySelected;
-
             suppressSelectionCountRef = selection != null ? selection.Count : 0;
-
-            // Hide immediately
             Hide();
         }
     }
@@ -204,26 +170,19 @@ public class ContextCommandPanelUI : MonoBehaviour
     {
         if (sm == null) return;
 
-        // JOIN suppression clears when the selection changes away from the join-confirm moment.
-        // Primary may stay the same (leader), so also clear when selection COUNT changes (eg: clicking team star selects team).
+        // JOIN suppression clears when selection changes away
         if (suppressAfterJoinTargetChosen)
         {
             int currentCount = selection != null ? selection.Count : 0;
-
             if (sm.PrimarySelected != suppressPrimarySelectionRef || currentCount != suppressSelectionCountRef)
             {
                 suppressAfterJoinTargetChosen = false;
                 suppressPrimarySelectionRef = null;
                 suppressSelectionCountRef = 0;
-                suppressSelectionCountRef = 0;
-
-                suppressSelectionCountRef = 0;
-                // LateUpdate/Refresh will show naturally when appropriate.
             }
         }
 
-        // MOVE suppression clears only when the player re-selects something (unit icon or team star).
-        // We also ignore any selection callbacks that happen in the same frame we set suppression.
+        // MOVE suppression clears only when the player re-selects something (and not in the same frame)
         if (suppressAfterMoveTargetChosen)
         {
             if (Time.frameCount > moveSuppressSetFrame)
@@ -246,8 +205,6 @@ public class ContextCommandPanelUI : MonoBehaviour
 
                 sm.ArmJoinFromCurrentSelection();
                 Hide();
-
-                // show join hint
                 TryShowHint(joinHintMessage, joinHintDuration);
             });
         }
@@ -257,17 +214,14 @@ public class ContextCommandPanelUI : MonoBehaviour
             moveButton.onClick.RemoveAllListeners();
             moveButton.onClick.AddListener(() =>
             {
-                // Only if a unit is selected
                 if (sm == null || sm.PrimarySelected == null) return;
 
-                // ✅ UPDATED to match your current CommandStateMachine
                 sm.ArmMoveFromCurrentSelection();
                 Hide();
 
-
                 // We will suppress the panel once the destination is confirmed (when we leave MoveTargeting)
                 waitingForMoveConfirm = true;
-                // Move hint
+
                 TryShowHint(moveHintMessage, moveHintDuration);
             });
         }
@@ -277,20 +231,20 @@ public class ContextCommandPanelUI : MonoBehaviour
             cancelButton.onClick.RemoveAllListeners();
             cancelButton.onClick.AddListener(() =>
             {
-                // ✅ Your CommandStateMachine no longer exposes ExitCommandMode publicly.
-                // So we let CommandCamToggle handle leaving command mode,
-                // and we clear selection for safety.
-
                 if (sm != null)
                     sm.ClearSelection();
 
                 if (CommandCamToggle.Instance != null)
                     CommandCamToggle.Instance.SetCommandMode(false);
 
-                // Cancel should also clear suppression
                 suppressAfterJoinTargetChosen = false;
                 suppressPrimarySelectionRef = null;
                 suppressSelectionCountRef = 0;
+
+                suppressAfterMoveTargetChosen = false;
+                suppressMovePrimarySelectionRef = null;
+                moveSuppressSetFrame = -1;
+                waitingForMoveConfirm = false;
 
                 Hide();
             });
@@ -312,15 +266,12 @@ public class ContextCommandPanelUI : MonoBehaviour
 
     private void Reposition()
     {
-        if (followTarget == null) return;
+        if (panel == null) return;
 
         EnsureCommandCam();
         if (commandCam == null) return;
 
-        Vector3 world = followTarget.position + Vector3.up * worldHeight;
-        Vector3 screen = commandCam.WorldToScreenPoint(world);
-        if (screen.z <= 0f) { Hide(); return; }
-
+        // Determine UI camera for conversion (overlay = null)
         Camera uiCam = null;
         if (canvas != null && canvas.renderMode != RenderMode.ScreenSpaceOverlay)
         {
@@ -328,17 +279,96 @@ public class ContextCommandPanelUI : MonoBehaviour
             if (uiCam == null) uiCam = commandCam;
         }
 
-        float s = (canvas != null) ? canvas.scaleFactor : 1f;
-        Vector2 screenPos = (Vector2)screen + (screenOffset * s);
-
         RectTransform parentRect = panel.parent as RectTransform;
         if (parentRect == null) parentRect = canvasRoot;
         if (parentRect == null) return;
 
-        if (RectTransformUtility.ScreenPointToLocalPointInRectangle(parentRect, screenPos, uiCam, out Vector2 local))
+        // ✅ NEW: If a TEAM is selected and we can find its star UI, anchor the panel under the star.
+        if (sm != null && sm.PrimarySelected != null)
         {
-            panel.anchoredPosition = ClampToRect(parentRect, panel, local, screenPadding);
+            int selCount = sm.CurrentSelection != null ? sm.CurrentSelection.Count : 0;
+            if (selCount > 1 && TeamManager.Instance != null)
+            {
+                Team team = TeamManager.Instance.GetTeamOf(sm.PrimarySelected.transform);
+                if (team != null)
+                {
+                    RectTransform star = FindTeamStarRect(team.Id);
+                    if (star != null && star.gameObject.activeInHierarchy)
+                    {
+                        float s = (canvas != null) ? canvas.scaleFactor : 1f;
+
+                        // Convert star UI world position -> screen -> panel-parent local
+                        Vector2 starScreen = RectTransformUtility.WorldToScreenPoint(uiCam, star.position);
+                        Vector2 desiredScreen = starScreen + (screenOffset * s);
+
+                        if (RectTransformUtility.ScreenPointToLocalPointInRectangle(parentRect, desiredScreen, uiCam, out Vector2 local))
+                        {
+                            panel.anchoredPosition = ClampToRect(parentRect, panel, local, screenPadding);
+                            panel.SetAsLastSibling();
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback: follow selected unit in world
+        if (followTarget == null) return;
+
+        Vector3 world = followTarget.position + Vector3.up * worldHeight;
+        Vector3 screen = commandCam.WorldToScreenPoint(world);
+        if (screen.z <= 0f) { Hide(); return; }
+
+        float scale = (canvas != null) ? canvas.scaleFactor : 1f;
+        Vector2 screenPos = (Vector2)screen + (screenOffset * scale);
+
+        if (RectTransformUtility.ScreenPointToLocalPointInRectangle(parentRect, screenPos, uiCam, out Vector2 localPoint))
+        {
+            panel.anchoredPosition = ClampToRect(parentRect, panel, localPoint, screenPadding);
             panel.SetAsLastSibling();
+        }
+    }
+
+    private RectTransform FindTeamStarRect(int teamId)
+    {
+        // Find all TeamIconUI in the scene (including inactive)
+        TeamIconUI[] all = Resources.FindObjectsOfTypeAll<TeamIconUI>();
+        for (int i = 0; i < all.Length; i++)
+        {
+            TeamIconUI ui = all[i];
+            if (ui == null) continue;
+            if (!ui.gameObject.scene.IsValid()) continue; // scene objects only
+
+            Team t = TryGetTeamFromTeamIconUI(ui);
+            if (t != null && t.Id == teamId)
+                return ui.transform as RectTransform;
+        }
+        return null;
+    }
+
+    private Team TryGetTeamFromTeamIconUI(TeamIconUI teamIconUI)
+    {
+        if (teamIconUI == null) return null;
+
+        // Cache a likely field once
+        if (cachedTeamIconUITeamField == null)
+        {
+            Type tp = teamIconUI.GetType();
+            cachedTeamIconUITeamField =
+                tp.GetField("_team", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public) ??
+                tp.GetField("team", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public) ??
+                tp.GetField("Team", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        }
+
+        if (cachedTeamIconUITeamField == null) return null;
+
+        try
+        {
+            return cachedTeamIconUITeamField.GetValue(teamIconUI) as Team;
+        }
+        catch
+        {
+            return null;
         }
     }
 
@@ -391,7 +421,7 @@ public class ContextCommandPanelUI : MonoBehaviour
 
             var show2 = hintType.GetMethod(
                 "Show",
-                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static,
+                BindingFlags.Public | BindingFlags.Static,
                 null,
                 new[] { typeof(string), typeof(float) },
                 null);
@@ -404,7 +434,7 @@ public class ContextCommandPanelUI : MonoBehaviour
 
             var show1 = hintType.GetMethod(
                 "Show",
-                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static,
+                BindingFlags.Public | BindingFlags.Static,
                 null,
                 new[] { typeof(string) },
                 null);

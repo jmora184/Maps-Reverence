@@ -63,6 +63,8 @@ public class CommandStateMachine : MonoBehaviour
     public GameObject JoinSource { get; private set; }
 
     public event Action<IReadOnlyList<GameObject>, Vector3> OnMoveRequested;
+    // Fires whenever the player clicks a ground point in MoveTargeting (even if moves are queued)
+    public event Action<IReadOnlyList<GameObject>, Vector3> OnMoveTargetChosen;
     public event Action<IReadOnlyList<GameObject>, GameObject> OnAddRequested;
     public event Action<IReadOnlyList<GameObject>> OnSplitRequested;
     public event Action<IReadOnlyList<GameObject>> OnSelectionChanged;
@@ -130,6 +132,9 @@ public class CommandStateMachine : MonoBehaviour
             {
                 if (Physics.Raycast(r, out RaycastHit hit, raycastMaxDistance, groundMask))
                 {
+                    // Notify UI about the chosen destination (even if the move is queued)
+                    OnMoveTargetChosen?.Invoke(selection, hit.point);
+
                     if (queueMovesInCommandMode && CommandQueue.Instance != null)
                         CommandQueue.Instance.EnqueueMove(selection, hit.point);
                     else

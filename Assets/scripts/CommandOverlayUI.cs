@@ -38,15 +38,32 @@ public class CommandOverlayUI : MonoBehaviour
     [Tooltip("Optional second ring for team selection. Add a child under the ally icon named this (ex: TeamSelectedRing).")]
     public string teamSelectedRingChildName = "TeamSelectedRing";
 
-    [Header("Team Star Bob Sync")]
-    [Tooltip("If enabled, team star bob uses the anchor ally icon\'s current bob offset (so it feels attached). Falls back to its own sine bob if not found.")]
-    public bool teamStarBobSyncToAnchorIcon = true;
-
-
     [Header("Team Star Icon")]
     public RectTransform teamStarIconPrefab;
     public float teamStarWorldHeight = 2.2f;
     public bool selectTeamWhenClickTeamedMember = true;
+
+    [Header("Team Star Bob")]
+    [Tooltip("If enabled, team star icons gently bob up and down (UI pixels) like ally/enemy icons.")]
+    public bool teamStarBobEnabled = true;
+    [Tooltip("Pixels up/down.")]
+    public float teamStarBobAmount = 6f;
+    [Tooltip("Speed of bob animation.")]
+    public float teamStarBobSpeed = 2f;
+    [Header("Team Star Bob Sync")]
+    [Tooltip("If enabled, team star bob uses the anchor ally icon's current bob offset (so it feels attached). Falls back to its own sine bob if not found.")]
+    public bool teamStarBobSyncToAnchorIcon = true;
+
+    private readonly Dictionary<int, float> teamStarBobSeedByTeamId = new();
+
+    [Header("Team Star Snap To Move Destination")]
+    [Tooltip("If true, when issuing a move order for a team, the team star jumps to the chosen destination immediately in command view.")]
+    public bool teamStarSnapToIssuedMoveDestination = true;
+    [Tooltip("How close the team anchor must get to the last issued destination before the star snaps back onto the anchor (world units).")]
+    public float teamStarSnapClearDistance = 1.0f;
+
+    // Last issued move destination per team (world position on ground). When set, star renders at this point until cleared.
+    private readonly Dictionary<int, Vector3> teamStarForcedWorldPosByTeamId = new();
 
     [Header("Button Panel (optional)")]
     public RectTransform commandButtonPanel;
@@ -60,16 +77,6 @@ public class CommandOverlayUI : MonoBehaviour
     [Tooltip("How close agent.destination must be to team.Anchor.position to count as a join-route destination.")]
     public float joinRouteDestinationSnap = 1.25f;
 
-    [Header("Team Star Bob")]
-    [Tooltip("If enabled, team star icons gently bob up and down (UI pixels) like ally/enemy icons.")]
-    public bool teamStarBobEnabled = true;
-    [Tooltip("Pixels up/down.")]
-    public float teamStarBobAmount = 6f;
-    [Tooltip("Speed of bob animation.")]
-    public float teamStarBobSpeed = 2f;
-
-    private readonly Dictionary<int, float> teamStarBobSeedByTeamId = new();
-
     private Canvas canvas;
     private CommandStateMachine sm;
 
@@ -78,23 +85,19 @@ public class CommandOverlayUI : MonoBehaviour
     private readonly Dictionary<int, RectTransform> teamStarByTeamId = new();
     private readonly HashSet<Transform> teamedUnits = new();
 
-    private Transform buttonPanelAnchorOverride;
-    private float buttonPanelAnchorOverrideUntil;
-
     private Coroutine hintHideRoutine;
 
-    // ✅ NEW: after join is confirmed (2nd ally chosen), keep the panel hidden
-    // until the primary selection changes.
+    // After JOIN confirmed (2nd ally chosen), keep panel hidden until primary selection changes.
     private bool suppressButtonPanelAfterJoinTargetChosen;
     private GameObject suppressButtonPanelPrimarySelectionRef;
 
-
-    // After MOVE destination chosen, keep the panel hidden until the primary selection changes.
+    // After MOVE destination chosen, keep panel hidden until primary selection changes.
     private bool suppressButtonPanelAfterMoveTargetChosen;
     private GameObject suppressButtonPanelPrimarySelectionRef_Move;
 
-    // Track state transitions (for detecting move confirm)
+    // Track state transitions (for move confirm suppression in setups that return to UnitSelected)
     private CommandStateMachine.State lastSmState = CommandStateMachine.State.AwaitSelection;
+
     private void Awake()
     {
         Instance = this;
@@ -104,9 +107,8 @@ public class CommandOverlayUI : MonoBehaviour
             canvasRoot = canvas.transform as RectTransform;
 
         sm = FindObjectOfType<CommandStateMachine>();
-
-
         if (sm != null) lastSmState = sm.CurrentState;
+
         AutoFindHintToastUI();
 
         if (commandButtonPanel != null)
@@ -116,10 +118,15 @@ public class CommandOverlayUI : MonoBehaviour
     private void OnEnable()
     {
         if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
+
         if (sm != null)
         {
             sm.OnAddRequested += HandleAddRequested_ForButtonPanel;
             sm.OnSelectionChanged += HandleSelectionChanged_ForButtonPanel;
+
+            // Snap star on move target chosen (works for queued or immediate moves)
+            sm.OnMoveRequested += HandleMoveRequested_SnapTeamStar;
+            sm.OnMoveTargetChosen += HandleMoveRequested_SnapTeamStar;
         }
 
         AutoFindHintToastUI();
@@ -131,6 +138,9 @@ public class CommandOverlayUI : MonoBehaviour
         {
             sm.OnAddRequested -= HandleAddRequested_ForButtonPanel;
             sm.OnSelectionChanged -= HandleSelectionChanged_ForButtonPanel;
+
+            sm.OnMoveRequested -= HandleMoveRequested_SnapTeamStar;
+            sm.OnMoveTargetChosen -= HandleMoveRequested_SnapTeamStar;
         }
     }
 
@@ -153,7 +163,7 @@ public class CommandOverlayUI : MonoBehaviour
         BuildIcons();
     }
 
-    // -------------------- HINT TOAST (WORKS EVEN IF DISABLED) --------------------
+    // -------------------- HINT TOAST --------------------
 
     private void AutoFindHintToastUI()
     {
@@ -165,9 +175,7 @@ public class CommandOverlayUI : MonoBehaviour
         {
             var h = all[i];
             if (h == null) continue;
-
-            // Only use scene objects (not prefabs/assets)
-            if (!h.gameObject.scene.IsValid()) continue;
+            if (!h.gameObject.scene.IsValid()) continue; // scene objects only
 
             hintToastUI = h;
             return;
@@ -186,10 +194,8 @@ public class CommandOverlayUI : MonoBehaviour
             return;
         }
 
-        // Show now
         hintToastUI.Show(message);
 
-        // Auto-hide after duration
         if (hintHideRoutine != null) StopCoroutine(hintHideRoutine);
         hintHideRoutine = StartCoroutine(HideHintAfter(durationSeconds));
     }
@@ -271,12 +277,11 @@ public class CommandOverlayUI : MonoBehaviour
         Camera uiCam = canvas != null ? canvas.worldCamera : null;
         if (uiCam == null) uiCam = Camera.main;
 
-
-        // Ensure we have the state machine (used for panel suppression on move confirm)
         if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
+
+        // Detect MOVE confirmation moment: MoveTargeting -> UnitSelected (some setups)
         if (sm != null)
         {
-            // Detect MOVE confirmation moment: MoveTargeting -> UnitSelected
             if (lastSmState == CommandStateMachine.State.MoveTargeting &&
                 sm.CurrentState == CommandStateMachine.State.UnitSelected)
             {
@@ -289,6 +294,7 @@ public class CommandOverlayUI : MonoBehaviour
 
             lastSmState = sm.CurrentState;
         }
+
         // Update ally/enemy icons
         UpdateIcons(allyIconByUnit, iconWorldHeight, uiCam);
         UpdateIcons(enemyIconByUnit, iconWorldHeight, uiCam);
@@ -308,7 +314,7 @@ public class CommandOverlayUI : MonoBehaviour
         // Selection ring highlight
         UpdateSelectionHighlight();
 
-        // Optional command button panel anchoring (not required for your ContextCommandPanelUI)
+        // Optional command button panel anchoring
         UpdateCommandButtonPanel(uiCam);
     }
 
@@ -339,9 +345,9 @@ public class CommandOverlayUI : MonoBehaviour
         if (ui == null || worldTarget == null) return;
 
         Vector3 wpos = worldTarget.position + Vector3.up * height;
-        Vector3 screen = (commandCam != null) ? commandCam.WorldToScreenPoint(wpos) : Camera.main.WorldToScreenPoint(wpos);
+        Camera cam = commandCam != null ? commandCam : Camera.main;
+        Vector3 screen = cam != null ? cam.WorldToScreenPoint(wpos) : Vector3.zero;
 
-        // Hide if behind camera
         if (screen.z < 0f)
         {
             ui.gameObject.SetActive(false);
@@ -362,12 +368,41 @@ public class CommandOverlayUI : MonoBehaviour
         ui.anchoredPosition = localPoint;
     }
 
+    private void UpdateWorldAnchoredUI_Point(RectTransform ui, Vector3 worldPoint, float height, Camera uiCam)
+    {
+        if (ui == null) return;
+
+        Vector3 wpos = worldPoint + Vector3.up * height;
+        Camera cam = commandCam != null ? commandCam : Camera.main;
+        Vector3 screen = cam != null ? cam.WorldToScreenPoint(wpos) : Vector3.zero;
+
+        if (screen.z < 0f)
+        {
+            ui.gameObject.SetActive(false);
+            return;
+        }
+
+        ui.gameObject.SetActive(true);
+
+        RectTransform parentRT = ui.parent as RectTransform;
+        if (parentRT == null) parentRT = canvasRoot;
+
+        RectTransformUtility.ScreenPointToLocalPointInRectangle(
+            parentRT,
+            new Vector2(screen.x, screen.y),
+            uiCam,
+            out Vector2 localPoint);
+
+        ui.anchoredPosition = localPoint;
+    }
+
+    // -------------------- SELECTION HIGHLIGHT --------------------
+
     private void UpdateSelectionHighlight()
     {
         if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
         if (sm == null) return;
 
-        // Build selected transform sets
         HashSet<Transform> selected = new();
         var cur = sm.CurrentSelection;
         if (cur != null)
@@ -379,7 +414,6 @@ public class CommandOverlayUI : MonoBehaviour
             }
         }
 
-        // Only allies participate in team highlighting
         HashSet<Transform> selectedAllies = new();
         foreach (var t in selected)
             if (t != null && allyIconByUnit.ContainsKey(t))
@@ -387,7 +421,6 @@ public class CommandOverlayUI : MonoBehaviour
 
         bool multiAllySelection = selectedAllies.Count > 1;
 
-        // Cache whether each team is fully selected (to enable the team ring)
         Dictionary<int, bool> fullTeamSelectedById = null;
         if (multiAllySelection && TeamManager.Instance != null)
         {
@@ -401,7 +434,6 @@ public class CommandOverlayUI : MonoBehaviour
             }
         }
 
-        // Allies: regular selected ring for any selected ally; team ring only when the full team is selected
         foreach (var kvp in allyIconByUnit)
         {
             bool on = selected.Contains(kvp.Key);
@@ -418,7 +450,6 @@ public class CommandOverlayUI : MonoBehaviour
             SetTeamSelectedRing(kvp.Value, teamOn);
         }
 
-        // Enemies: only regular selected ring
         foreach (var kvp in enemyIconByUnit)
             SetSelectedRing(kvp.Value, selected.Contains(kvp.Key));
     }
@@ -459,8 +490,6 @@ public class CommandOverlayUI : MonoBehaviour
         if (anchor == null) return 0f;
         if (!allyIconByUnit.TryGetValue(anchor, out var icon) || icon == null) return 0f;
 
-        // Try to read the current bob offset from the ally icon\'s bob script via reflection.
-        // This keeps the team star perfectly in-phase with the anchor ally icon if that prefab is bobbing itself.
         var behaviours = icon.GetComponentsInChildren<MonoBehaviour>(true);
         for (int i = 0; i < behaviours.Length; i++)
         {
@@ -486,6 +515,8 @@ public class CommandOverlayUI : MonoBehaviour
 
         return 0f;
     }
+
+    // -------------------- TEAM STARS --------------------
 
     private void SyncTeamsAndStars(Camera uiCam)
     {
@@ -527,29 +558,35 @@ public class CommandOverlayUI : MonoBehaviour
 
             if (anchor != null)
             {
-                // Ensure visible (it may have been hidden if anchor was temporarily null)
                 if (!star.gameObject.activeSelf) star.gameObject.SetActive(true);
 
-                // Per-team bob seed so each star moves a little differently
-                float seed;
-                if (!teamStarBobSeedByTeamId.TryGetValue(team.Id, out seed))
+                // seed
+                if (!teamStarBobSeedByTeamId.TryGetValue(team.Id, out float seed))
                 {
                     seed = UnityEngine.Random.Range(0f, 1000f);
                     teamStarBobSeedByTeamId[team.Id] = seed;
                 }
 
-                // Position star over the anchor (star-holder) then apply optional bob in UI pixels
-                UpdateWorldAnchoredUI(star, anchor, teamStarWorldHeight, uiCam);
+                // forced move destination?
+                if (teamStarSnapToIssuedMoveDestination && teamStarForcedWorldPosByTeamId.TryGetValue(team.Id, out var forcedPos))
+                {
+                    UpdateWorldAnchoredUI_Point(star, forcedPos, teamStarWorldHeight, uiCam);
+
+                    if (!IsTeamStillMovingToward(team, forcedPos))
+                        teamStarForcedWorldPosByTeamId.Remove(team.Id);
+                }
+                else
+                {
+                    UpdateWorldAnchoredUI(star, anchor, teamStarWorldHeight, uiCam);
+                }
 
                 if (teamStarBobEnabled)
                 {
                     float y = 0f;
 
-                    // Prefer syncing to the anchor ally icon\'s bob if available
                     if (teamStarBobSyncToAnchorIcon)
                         y = GetAnchorIconBobOffsetPixels(anchor);
 
-                    // Fallback: sine bob with per-team seed
                     if (Mathf.Approximately(y, 0f))
                         y = Mathf.Sin((Time.unscaledTime + seed) * teamStarBobSpeed) * teamStarBobAmount;
 
@@ -575,11 +612,10 @@ public class CommandOverlayUI : MonoBehaviour
                 Destroy(rt.gameObject);
             teamStarByTeamId.Remove(id);
             teamStarBobSeedByTeamId.Remove(id);
+            teamStarForcedWorldPosByTeamId.Remove(id);
         }
     }
 
-    // If a unit is part of a team, its ally icon should not be selectable.
-    // Players must click the Team Star icon to select / command the whole team.
     private void UpdateAllyIconClickability()
     {
         if (TeamManager.Instance == null) return;
@@ -594,9 +630,6 @@ public class CommandOverlayUI : MonoBehaviour
             var btn = icon.GetComponent<Button>();
             if (btn == null) continue;
 
-            // If a unit is in a team, normally its icon is not clickable.
-            // BUT: while that unit is still traveling to the team ("in route"), keep it clickable
-            // so the player can click and receive the hint message.
             var team = TeamManager.Instance.GetTeamOf(unit);
             bool isTeamed = team != null;
 
@@ -604,11 +637,8 @@ public class CommandOverlayUI : MonoBehaviour
 
             if (isTeamed && team != null)
             {
-                // If it's still moving toward the team anchor, allow click so OnUnitClicked can show the hint.
                 allowClick = IsInRouteToTeamAnchor(unit, team);
 
-                // Fallback: if JoinRouteMarker is present, also treat it as "in route"
-                // (covers cases where destination isn't snapped exactly to the anchor yet).
                 if (!allowClick)
                 {
                     var marker = unit.GetComponent<JoinRouteMarker>();
@@ -617,24 +647,23 @@ public class CommandOverlayUI : MonoBehaviour
                 }
             }
 
+            // While join-targeting, allow clicking teamed allies so they can be chosen as the JOIN target.
+            if (sm != null && sm.CurrentState == CommandStateMachine.State.AddTargeting)
+                allowClick = true;
+
             btn.interactable = allowClick;
             btn.enabled = allowClick;
         }
     }
 
-
-    // Build a selection list for a team such that the team's Anchor is first.
-    // This ensures any UI that anchors to PrimarySelected (selection[0]) appears over the star-holder.
     private List<GameObject> BuildTeamSelection(Team team)
     {
         var sel = new List<GameObject>();
         if (team == null) return sel;
 
-        // Put the anchor first (if it is a member)
         if (team.Anchor != null && team.Contains(team.Anchor))
             sel.Add(team.Anchor.gameObject);
 
-        // Then add the rest (skipping nulls and the anchor if already added)
         for (int i = 0; i < team.Members.Count; i++)
         {
             var m = team.Members[i];
@@ -653,17 +682,25 @@ public class CommandOverlayUI : MonoBehaviour
         if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
         if (sm == null) return;
 
-        // Make the CommandStateMachine treat the team like the current selection.
-        // IMPORTANT: Put the star-holder (team.Anchor) first so PrimarySelected matches the star UI.
-        var sel = BuildTeamSelection(team);
-        sm.SetSelection(sel);
-
-        // Pin panel over the team anchor briefly (optional)
-        if (team.Anchor != null)
+        // ✅ If we're currently choosing a JOIN target, clicking the star should act like clicking the team "anchor"
+        // so an unteamed ally can join an already-existing team.
+        if (sm.CurrentState == CommandStateMachine.State.AddTargeting)
         {
-            buttonPanelAnchorOverride = team.Anchor;
-            buttonPanelAnchorOverrideUntil = Time.time + 10f;
+            Transform anchor = team.Anchor;
+            if (anchor == null && team.Members != null && team.Members.Count > 0)
+                anchor = team.Members[0];
+
+            if (anchor != null)
+                sm.ClickUnitFromUI(anchor.gameObject);
+
+            return;
         }
+
+        // Otherwise: select the whole team.
+        sm.SetSelection(BuildTeamSelection(team));
+
+        // IMPORTANT: Do NOT override the panel anchor to a member Transform.
+        // The panel will anchor under the star UI in UpdateCommandButtonPanel.
     }
 
     private void OnUnitClicked(Transform unit)
@@ -673,7 +710,15 @@ public class CommandOverlayUI : MonoBehaviour
         if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
         if (sm == null) return;
 
-        // If teamed ally clicked: show "in route" OR select team
+
+        // If we're currently choosing a JOIN target, do NOT auto-select the whole team.
+        // We need the click to pass through so CommandStateMachine can fire OnAddRequested.
+        if (sm.CurrentState == CommandStateMachine.State.AddTargeting)
+        {
+            sm.ClickUnitFromUI(unit.gameObject);
+            return;
+        }
+
         if (unit.CompareTag("Ally") && TeamManager.Instance != null)
         {
             var team = TeamManager.Instance.GetTeamOf(unit);
@@ -681,23 +726,18 @@ public class CommandOverlayUI : MonoBehaviour
             {
                 if (IsInRouteToTeamAnchor(unit, team))
                 {
-                    string msg = (sm != null && !string.IsNullOrWhiteSpace(sm.joinInRouteMessage)) ? sm.joinInRouteMessage : "Ally is en route";
-                    float dur = (sm != null ? sm.joinInRouteDuration : defaultHintDuration);
+                    string msg = (!string.IsNullOrWhiteSpace(sm.joinInRouteMessage)) ? sm.joinInRouteMessage : "Ally is en route";
+                    float dur = sm.joinInRouteDuration > 0 ? sm.joinInRouteDuration : defaultHintDuration;
                     ShowHint(msg, dur);
                     return;
                 }
 
                 if (selectTeamWhenClickTeamedMember)
                 {
-                    var sel = BuildTeamSelection(team);
+                    sm.SetSelection(BuildTeamSelection(team));
 
-                    sm.SetSelection(sel);
-
-                    if (team.Anchor != null)
-                    {
-                        buttonPanelAnchorOverride = team.Anchor;
-                        buttonPanelAnchorOverrideUntil = Time.time + 10f;
-                    }
+                    // IMPORTANT: Do NOT override the panel anchor to a member Transform.
+                    // The panel will anchor under the star UI in UpdateCommandButtonPanel.
                     return;
                 }
             }
@@ -726,6 +766,8 @@ public class CommandOverlayUI : MonoBehaviour
         return destToAnchor <= joinRouteDestinationSnap;
     }
 
+    // -------------------- BUTTON PANEL --------------------
+
     private void UpdateCommandButtonPanel(Camera uiCam)
     {
         if (commandButtonPanel == null) return;
@@ -733,8 +775,7 @@ public class CommandOverlayUI : MonoBehaviour
         if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
         if (sm == null) return;
 
-
-        // Suppress after JOIN confirmation (2nd ally chosen) until selection changes
+        // JOIN suppression
         if (suppressButtonPanelAfterJoinTargetChosen)
         {
             if (sm.PrimarySelected != suppressButtonPanelPrimarySelectionRef)
@@ -746,7 +787,7 @@ public class CommandOverlayUI : MonoBehaviour
             }
         }
 
-        // Suppress after MOVE destination chosen until selection changes
+        // MOVE suppression
         if (suppressButtonPanelAfterMoveTargetChosen)
         {
             if (sm.PrimarySelected != suppressButtonPanelPrimarySelectionRef_Move)
@@ -763,16 +804,47 @@ public class CommandOverlayUI : MonoBehaviour
             commandButtonPanel.gameObject.SetActive(false);
             return;
         }
-        Debug.Log("BUTTON PANEL ENABLED by CommandOverlayUI. Frame=" + Time.frameCount, commandButtonPanel);
+
         commandButtonPanel.gameObject.SetActive(true);
 
+        // Prefer anchoring under team star UI whenever the primary selected unit belongs to a team.
+        RectTransform teamStarUI = null;
+        if (TeamManager.Instance != null && sm.PrimarySelected != null)
+        {
+            var team = TeamManager.Instance.GetTeamOf(sm.PrimarySelected.transform);
+            if (team != null)
+                teamStarByTeamId.TryGetValue(team.Id, out teamStarUI);
+        }
+
+        if (teamStarUI != null && teamStarUI.gameObject.activeInHierarchy)
+        {
+            // Best case: both under the same RectTransform parent (common setup).
+            var panelParent = commandButtonPanel.parent as RectTransform;
+            var starParent = teamStarUI.parent as RectTransform;
+
+            if (panelParent != null && starParent != null && panelParent == starParent)
+            {
+                commandButtonPanel.anchoredPosition = teamStarUI.anchoredPosition + buttonPanelScreenOffset;
+                return;
+            }
+
+            // Otherwise, convert the star's UI world position into the panel parent's local space.
+            RectTransform targetParent = panelParent != null ? panelParent : canvasRoot;
+            if (targetParent != null)
+            {
+                Vector3 starWorld = teamStarUI.TransformPoint(teamStarUI.rect.center);
+                Vector3 lp3 = targetParent.InverseTransformPoint(starWorld);
+                commandButtonPanel.anchoredPosition = new Vector2(lp3.x, lp3.y) + buttonPanelScreenOffset;
+                return;
+            }
+        }
+
+        // Fallback: anchor under the primary selected unit (world position)
         Transform anchor = sm.PrimarySelected.transform;
 
-        if (buttonPanelAnchorOverride != null && Time.time <= buttonPanelAnchorOverrideUntil)
-            anchor = buttonPanelAnchorOverride;
-
         Vector3 wpos = anchor.position + Vector3.up * iconWorldHeight;
-        Vector3 screen = (commandCam != null) ? commandCam.WorldToScreenPoint(wpos) : Camera.main.WorldToScreenPoint(wpos);
+        Camera cam = commandCam != null ? commandCam : Camera.main;
+        Vector3 screen = cam != null ? cam.WorldToScreenPoint(wpos) : Vector3.zero;
 
         if (screen.z < 0f)
         {
@@ -780,24 +852,77 @@ public class CommandOverlayUI : MonoBehaviour
             return;
         }
 
-        RectTransform parentRT = commandButtonPanel.parent as RectTransform;
-        if (parentRT == null) parentRT = canvasRoot;
+        RectTransform parentRect = commandButtonPanel.parent as RectTransform;
+        if (parentRect == null) parentRect = canvasRoot;
 
         RectTransformUtility.ScreenPointToLocalPointInRectangle(
-            parentRT,
+            parentRect,
             new Vector2(screen.x, screen.y),
             uiCam,
-            out Vector2 localPoint);
+            out Vector2 lp);
 
-        commandButtonPanel.anchoredPosition = localPoint + buttonPanelScreenOffset;
+        commandButtonPanel.anchoredPosition = lp + buttonPanelScreenOffset;
     }
+
+    // -------------------- TEAM STAR SNAP --------------------
+
+    private void HandleMoveRequested_SnapTeamStar(IReadOnlyList<GameObject> selection, Vector3 destination)
+    {
+        if (!teamStarSnapToIssuedMoveDestination) return;
+        if (selection == null || selection.Count == 0) return;
+        if (TeamManager.Instance == null) return;
+
+        Transform primary = selection[0] != null ? selection[0].transform : null;
+        if (primary == null) return;
+
+        Team team = TeamManager.Instance.GetTeamOf(primary);
+        if (team == null) return;
+
+        teamStarForcedWorldPosByTeamId[team.Id] = destination;
+
+        // Also suppress the panel until selection changes (so panel doesn't pop back immediately after click)
+        suppressButtonPanelAfterMoveTargetChosen = true;
+        suppressButtonPanelPrimarySelectionRef_Move = sm != null ? sm.PrimarySelected : selection[0];
+        if (commandButtonPanel != null) commandButtonPanel.gameObject.SetActive(false);
+    }
+
+    private bool IsTeamStillMovingToward(Team team, Vector3 destination)
+    {
+        if (team == null) return false;
+
+        Transform anchor = team.Anchor != null ? team.Anchor : (team.Members.Count > 0 ? team.Members[0] : null);
+        if (anchor == null) return false;
+
+        if (Vector3.Distance(anchor.position, destination) <= Mathf.Max(0.1f, teamStarSnapClearDistance))
+            return false;
+
+        var agent = anchor.GetComponent<NavMeshAgent>();
+        if (agent == null) agent = anchor.GetComponentInChildren<NavMeshAgent>();
+        if (agent != null && agent.isActiveAndEnabled)
+        {
+            if (agent.pathPending) return true;
+            if (agent.hasPath && agent.remainingDistance > Mathf.Max(agent.stoppingDistance, 0.05f) + 0.2f)
+                return true;
+        }
+
+        for (int i = 0; i < team.Members.Count; i++)
+        {
+            var m = team.Members[i];
+            if (m == null) continue;
+            if (Vector3.Distance(m.position, destination) > Mathf.Max(0.1f, teamStarSnapClearDistance) + 0.25f)
+                return true;
+        }
+
+        return false;
+    }
+
+    // -------------------- PANEL EVENTS --------------------
 
     private void HandleAddRequested_ForButtonPanel(IReadOnlyList<GameObject> selection, GameObject clickedUnit)
     {
         if (sm == null) return;
         if (clickedUnit == null) return;
 
-        // Detect JOIN confirmation moment:
         if (sm.JoinArmed && sm.JoinSource != null && clickedUnit != sm.JoinSource)
         {
             suppressButtonPanelAfterJoinTargetChosen = true;
@@ -810,12 +935,14 @@ public class CommandOverlayUI : MonoBehaviour
 
     private void HandleSelectionChanged_ForButtonPanel(IReadOnlyList<GameObject> selection)
     {
-        // Selection changed => allow panel again
         suppressButtonPanelAfterJoinTargetChosen = false;
         suppressButtonPanelPrimarySelectionRef = null;
+
         suppressButtonPanelAfterMoveTargetChosen = false;
         suppressButtonPanelPrimarySelectionRef_Move = null;
     }
+
+    // -------------------- CLEANUP --------------------
 
     private void ClearAllIcons()
     {
