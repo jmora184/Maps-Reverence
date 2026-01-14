@@ -16,6 +16,13 @@ public class CommandExecutor : MonoBehaviour
     [Header("Join Settings")]
     public float joinArriveThreshold = 0.35f; // how close leader must get to target to be "arrived"
 
+
+    // -------------------- JOIN ROUTE (for DirectionArrowPreview) --------------------
+    // DirectionArrowPreview.cs looks for these names (via reflection) to show an arrow while a join leader is in-route.
+    public bool IsJoinMoveInProgress { get; private set; }
+    public Transform JoinMoveLeader { get; private set; }
+    public Transform JoinMoveTarget { get; private set; }
+
     private Coroutine joinMoveRoutine;
 
     private void Awake()
@@ -147,7 +154,16 @@ public class CommandExecutor : MonoBehaviour
 
             // ✅ Move the leader to the target, and mark as in-route so selection can block
             if (joinMoveRoutine != null)
+            {
                 StopCoroutine(joinMoveRoutine);
+                joinMoveRoutine = null;
+                ClearJoinRouteState();
+            }
+
+            // Expose join-route state for DirectionArrowPreview
+            IsJoinMoveInProgress = true;
+            JoinMoveLeader = leaderGO.transform;
+            JoinMoveTarget = targetGO.transform;
 
             joinMoveRoutine = StartCoroutine(MoveLeaderToJoinTargetRoutine(leaderGO, targetGO));
 
@@ -181,6 +197,7 @@ public class CommandExecutor : MonoBehaviour
             Destroy(marker);
 
             joinMoveRoutine = null;
+            ClearJoinRouteState();
             yield break;
         }
 
@@ -212,6 +229,15 @@ public class CommandExecutor : MonoBehaviour
         }
 
         joinMoveRoutine = null;
+        ClearJoinRouteState();
+    }
+
+
+    private void ClearJoinRouteState()
+    {
+        IsJoinMoveInProgress = false;
+        JoinMoveLeader = null;
+        JoinMoveTarget = null;
     }
 
     // -------------------- SPLIT (placeholder) --------------------

@@ -228,6 +228,11 @@ public class CommandOverlayUI : MonoBehaviour
 
             allyIconByUnit[go.transform] = icon;
 
+
+            // Bind ally UI helpers (health bar, team tag, etc.)
+            var allyUI = icon.GetComponent<AllyHealthIcon>();
+            if (allyUI != null) allyUI.Bind(go.transform);
+
             var btn = icon.GetComponent<Button>();
             if (btn != null)
             {
