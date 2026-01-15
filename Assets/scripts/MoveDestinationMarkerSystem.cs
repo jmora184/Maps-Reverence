@@ -27,6 +27,17 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
     [Tooltip("Hover marker follows mouse only while StateMachine is MoveTargeting.")]
     public bool showHoverWhileMoveTargeting = true;
 
+    [Header("Hover Sprites")]
+    [Tooltip("Sprite used for the hover marker during MoveTargeting (defaults to markerPrefab's sprite if left empty).")]
+    public Sprite moveHoverSprite;
+
+    [Tooltip("Sprite used when the mouse is hovering an enemy icon during MoveTargeting (optional).")]
+    public Sprite attackHoverSprite;
+
+    [Tooltip("If true, hovering an enemy icon switches the hover marker sprite to attackHoverSprite.")]
+    public bool switchHoverSpriteWhenOverEnemy = true;
+
+
     [Tooltip("Pinned markers remain until you leave Command Mode (your request).")]
     public bool keepPinnedUntilExitCommandMode = true;
 
@@ -43,6 +54,8 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
     // ---- internals ----
     private SpriteRenderer hoverMarker;
 
+
+    private bool hoverOverEnemyIcon;
     // per-unit pinned marker
     private class Pinned
     {
@@ -71,6 +84,12 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
             hoverMarker.name = "MouseHoverMarker";
             hoverMarker.gameObject.SetActive(false);
             hoverMarker.transform.rotation = Quaternion.Euler(flatEuler);
+
+            // Default moveHoverSprite to whatever the prefab had (so you only need to set attackHoverSprite).
+            if (moveHoverSprite == null)
+                moveHoverSprite = hoverMarker.sprite;
+
+            ApplyHoverSprite();
         }
         else
         {
@@ -147,6 +166,28 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
         }
     }
 
+
+
+    /// <summary>
+    /// Called by UI (enemy icons) to tell this system whether the mouse is currently hovering an enemy icon.
+    /// While MoveTargeting, this will swap the hover marker sprite to the attack sprite (if assigned).
+    /// </summary>
+    public void SetHoverOverEnemyIcon(bool overEnemy)
+    {
+        hoverOverEnemyIcon = overEnemy;
+        ApplyHoverSprite();
+    }
+
+    private void ApplyHoverSprite()
+    {
+        if (hoverMarker == null) return;
+        if (!switchHoverSpriteWhenOverEnemy) return;
+
+        // Prefer attack sprite when hovering an enemy icon.
+        Sprite s = (hoverOverEnemyIcon && attackHoverSprite != null) ? attackHoverSprite : moveHoverSprite;
+        if (s != null) hoverMarker.sprite = s;
+    }
+
     private void UpdateHoverMarker()
     {
         if (hoverMarker == null) return;
@@ -160,9 +201,16 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
         bool inMoveTargeting = stateMachine.CurrentState == CommandStateMachine.State.MoveTargeting;
         if (!inMoveTargeting)
         {
+            // Leaving move targeting => ensure we return to the move sprite next time.
+            hoverOverEnemyIcon = false;
+            ApplyHoverSprite();
+
             hoverMarker.gameObject.SetActive(false);
             return;
         }
+
+        // While targeting, keep sprite in sync with UI hover.
+        ApplyHoverSprite();
 
         Ray r = commandCam.ScreenPointToRay(Input.mousePosition);
         if (Physics.Raycast(r, out RaycastHit hit, raycastMaxDistance, groundMask))

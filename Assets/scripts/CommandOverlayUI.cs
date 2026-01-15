@@ -5,6 +5,7 @@ using System.Reflection;
 using UnityEngine;
 using UnityEngine.AI;
 using UnityEngine.UI;
+using UnityEngine.EventSystems;
 
 public class CommandOverlayUI : MonoBehaviour
 {
@@ -323,6 +324,9 @@ public class CommandOverlayUI : MonoBehaviour
 
             enemyIconByUnit[go.transform] = icon;
 
+            // When MoveTargeting, swap hover marker sprite to attack while hovering an enemy icon.
+            HookEnemyHoverEvents(icon);
+
             var btn = icon.GetComponent<Button>();
             if (btn != null)
             {
@@ -343,6 +347,55 @@ public class CommandOverlayUI : MonoBehaviour
             }
         }
     }
+
+    // -------------------- ENEMY HOVER (attack icon preview) --------------------
+
+    private void HookEnemyHoverEvents(RectTransform enemyIcon)
+    {
+        if (enemyIcon == null) return;
+
+        // Ensure the icon can receive pointer events.
+        var img = enemyIcon.GetComponent<Image>();
+        if (img != null) img.raycastTarget = true;
+
+        var trigger = enemyIcon.GetComponent<EventTrigger>();
+        if (trigger == null) trigger = enemyIcon.gameObject.AddComponent<EventTrigger>();
+
+        if (trigger.triggers == null)
+            trigger.triggers = new List<EventTrigger.Entry>();
+
+        // Replace any existing entries for these event types (prevents duplicates after rebuilds).
+        RemoveEventTrigger(trigger, EventTriggerType.PointerEnter);
+        RemoveEventTrigger(trigger, EventTriggerType.PointerExit);
+
+        var enter = new EventTrigger.Entry { eventID = EventTriggerType.PointerEnter };
+        enter.callback.AddListener(_ =>
+        {
+            if (MoveDestinationMarkerSystem.Instance != null)
+                MoveDestinationMarkerSystem.Instance.SetHoverOverEnemyIcon(true);
+        });
+        trigger.triggers.Add(enter);
+
+        var exit = new EventTrigger.Entry { eventID = EventTriggerType.PointerExit };
+        exit.callback.AddListener(_ =>
+        {
+            if (MoveDestinationMarkerSystem.Instance != null)
+                MoveDestinationMarkerSystem.Instance.SetHoverOverEnemyIcon(false);
+        });
+        trigger.triggers.Add(exit);
+    }
+
+    private void RemoveEventTrigger(EventTrigger trigger, EventTriggerType type)
+    {
+        if (trigger == null || trigger.triggers == null) return;
+
+        for (int i = trigger.triggers.Count - 1; i >= 0; i--)
+        {
+            if (trigger.triggers[i] != null && trigger.triggers[i].eventID == type)
+                trigger.triggers.RemoveAt(i);
+        }
+    }
+
 
     private void LateUpdate()
     {
