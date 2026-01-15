@@ -3,6 +3,13 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.AI;
 
+/// <summary>
+/// Executes move / join / split commands coming from CommandStateMachine.
+/// 
+/// ✅ Team-aware movement:
+/// If the player has selected an Ally that belongs to a Team, we automatically expand the move order
+/// to include ALL members of that Team (even if only the team anchor was selected).
+/// </summary>
 public class CommandExecutor : MonoBehaviour
 {
     [Header("Refs")]
@@ -12,6 +19,22 @@ public class CommandExecutor : MonoBehaviour
     public bool useFormation = true;
     public float formationSpacing = 1.6f;
     public int formationColumns = 4;
+
+    [Header("Team Move Settings")]
+    [Tooltip("If true, move orders given to any team member will move the entire team.")]
+    public bool expandMoveToWholeTeam = true;
+
+    [Tooltip("If true, agents are ordered deterministically before formation is applied (prevents formation 'shuffling').")]
+    public bool stableFormationOrdering = true;
+
+
+
+    [Header("Move Hints (optional)")]
+    [Tooltip("Show a hint when a move order is issued.")]
+    public bool showMoveHints = true;
+
+    [Tooltip("How long the move hint stays on screen.")]
+    public float moveHintDuration = 1.8f;
 
     [Header("Join Settings")]
     public float joinArriveThreshold = 0.35f; // how close leader must get to target to be "arrived"
@@ -61,20 +84,30 @@ public class CommandExecutor : MonoBehaviour
     {
         if (selection == null || selection.Count == 0) return;
 
-        List<NavMeshAgent> agents = new();
-        for (int i = 0; i < selection.Count; i++)
-        {
-            var go = selection[i];
-            if (go == null) continue;
+        // ✅ Team expansion (team members move together)
+        List<GameObject> expanded = ExpandSelectionForTeams(selection);
 
-            var agent = go.GetComponent<NavMeshAgent>();
-            if (agent == null) agent = go.GetComponentInChildren<NavMeshAgent>();
 
-            if (agent != null && agent.isActiveAndEnabled)
-                agents.Add(agent);
-        }
+        // Hint: team / unit move feedback
+        ShowMoveHint(expanded);
 
+        List<NavMeshAgent> agents = GatherAgents(expanded);
         if (agents.Count == 0) return;
+
+        // Optional stable ordering so formation offsets don't shuffle
+        if (stableFormationOrdering && agents.Count > 1)
+        {
+            agents.Sort((a, b) =>
+            {
+                if (a == null && b == null) return 0;
+                if (a == null) return 1;
+                if (b == null) return -1;
+
+                int ida = a.transform.GetInstanceID();
+                int idb = b.transform.GetInstanceID();
+                return ida.CompareTo(idb);
+            });
+        }
 
         // No formation or single unit
         if (!useFormation || agents.Count == 1)
@@ -120,6 +153,134 @@ public class CommandExecutor : MonoBehaviour
             agent.isStopped = false;
             agent.SetDestination(targetPos);
         }
+    }
+
+
+    private bool TryGetSingleTeamForSelection(IReadOnlyList<GameObject> expandedSelection, out Team team)
+    {
+        team = null;
+        if (expandedSelection == null || expandedSelection.Count == 0) return false;
+        if (TeamManager.Instance == null) return false;
+
+        // Find first ally's team (if any)
+        Team firstTeam = null;
+        for (int i = 0; i < expandedSelection.Count; i++)
+        {
+            var go = expandedSelection[i];
+            if (go == null) continue;
+            if (!go.CompareTag("Ally")) continue;
+
+            firstTeam = TeamManager.Instance.GetTeamOf(go.transform);
+            break;
+        }
+
+        if (firstTeam == null) return false;
+
+        // Ensure every ally in selection is in the same team
+        for (int i = 0; i < expandedSelection.Count; i++)
+        {
+            var go = expandedSelection[i];
+            if (go == null) continue;
+            if (!go.CompareTag("Ally")) continue;
+
+            Team t = TeamManager.Instance.GetTeamOf(go.transform);
+            if (t != firstTeam) return false;
+        }
+
+        team = firstTeam;
+        return true;
+    }
+
+    private void ShowMoveHint(IReadOnlyList<GameObject> expandedSelection)
+    {
+        if (!showMoveHints) return;
+
+        // Prefer "Team X moving to location." if this looks like a team move
+        if (TryGetSingleTeamForSelection(expandedSelection, out Team team) && team != null)
+        {
+            HintSystem.Show($"Team {team.Id} moving to location.", moveHintDuration);
+            return;
+        }
+
+        // Fallback: "Units moving to location."
+        int count = expandedSelection != null ? expandedSelection.Count : 0;
+        if (count > 0)
+            HintSystem.Show($"{count} {(count == 1 ? "unit" : "units")} moving to location.", moveHintDuration);
+        else
+            HintSystem.Show("Moving to location.", moveHintDuration);
+    }
+
+    private List<GameObject> ExpandSelectionForTeams(IReadOnlyList<GameObject> selection)
+    {
+        // If off, just return a cleaned list (unique, non-null).
+        if (!expandMoveToWholeTeam || TeamManager.Instance == null)
+            return UniqueNonNull(selection);
+
+        HashSet<Transform> added = new HashSet<Transform>();
+        List<GameObject> expanded = new List<GameObject>(selection.Count);
+
+        for (int i = 0; i < selection.Count; i++)
+        {
+            var go = selection[i];
+            if (go == null) continue;
+
+            // Only allies participate in Team logic
+            if (go.CompareTag("Ally"))
+            {
+                Team team = TeamManager.Instance.GetTeamOf(go.transform);
+                if (team != null && team.Members != null && team.Members.Count > 0)
+                {
+                    for (int m = 0; m < team.Members.Count; m++)
+                    {
+                        var t = team.Members[m];
+                        if (t == null) continue;
+                        if (added.Add(t))
+                            expanded.Add(t.gameObject);
+                    }
+                    continue;
+                }
+            }
+
+            // Not an ally OR not in a team -> include the object itself
+            if (added.Add(go.transform))
+                expanded.Add(go);
+        }
+
+        return expanded;
+    }
+
+    private static List<GameObject> UniqueNonNull(IReadOnlyList<GameObject> selection)
+    {
+        HashSet<GameObject> set = new HashSet<GameObject>();
+        List<GameObject> list = new List<GameObject>();
+
+        for (int i = 0; i < selection.Count; i++)
+        {
+            var go = selection[i];
+            if (go == null) continue;
+            if (set.Add(go)) list.Add(go);
+        }
+
+        return list;
+    }
+
+    private static List<NavMeshAgent> GatherAgents(IReadOnlyList<GameObject> selection)
+    {
+        List<NavMeshAgent> agents = new List<NavMeshAgent>();
+
+        for (int i = 0; i < selection.Count; i++)
+        {
+            var go = selection[i];
+            if (go == null) continue;
+
+            var agent = go.GetComponent<NavMeshAgent>();
+            if (agent == null) agent = go.GetComponentInChildren<NavMeshAgent>();
+
+            if (agent != null && agent.isActiveAndEnabled)
+                agents.Add(agent);
+        }
+
+        return agents;
     }
 
     private void HandleAddRequested(IReadOnlyList<GameObject> selection, GameObject clickedUnit)
@@ -214,13 +375,6 @@ public class CommandExecutor : MonoBehaviour
             yield return null;
         }
 
-        // Arrived (or one got destroyed)
-        if (leaderGO != null && targetGO != null)
-        {
-            // Optional: snap to exact position if you want tight join
-            // leaderT.position = targetT.position;
-        }
-
         // Clear marker
         if (marker != null)
         {
@@ -231,7 +385,6 @@ public class CommandExecutor : MonoBehaviour
         joinMoveRoutine = null;
         ClearJoinRouteState();
     }
-
 
     private void ClearJoinRouteState()
     {

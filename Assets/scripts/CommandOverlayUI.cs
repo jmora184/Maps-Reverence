@@ -15,6 +15,11 @@ public class CommandOverlayUI : MonoBehaviour
     public Camera commandCam;
     public RectTransform canvasRoot;
 
+
+    [Header("Crosshair (UI)")]
+    [Tooltip("Optional: drag your Canvas Crosshair GameObject here so it hides in command view.")]
+    public GameObject crosshairUI;
+
     [Header("Icon Prefabs (UI)")]
     public RectTransform allyIconPrefab;
     public RectTransform enemyIconPrefab;
@@ -69,6 +74,10 @@ public class CommandOverlayUI : MonoBehaviour
     public RectTransform commandButtonPanel;
     public Vector2 buttonPanelScreenOffset = new Vector2(0f, 0f);
 
+    [Header("Player Context Panel (optional)")]
+    [Tooltip("Optional separate panel shown when clicking the Player icon (personal commands like Follow Me, Hold Fire, etc.).")]
+    public PlayerContextCommandPanelUI playerContextPanel;
+
     [Header("Hint Toast (auto-found if not assigned)")]
     public HintToastUI hintToastUI;
     public float defaultHintDuration = 2f;
@@ -113,6 +122,8 @@ public class CommandOverlayUI : MonoBehaviour
 
         if (commandButtonPanel != null)
             commandButtonPanel.gameObject.SetActive(false);
+
+        AutoFindPlayerContextPanel();
     }
 
     private void OnEnable()
@@ -130,6 +141,8 @@ public class CommandOverlayUI : MonoBehaviour
         }
 
         AutoFindHintToastUI();
+        AutoFindPlayerContextPanel();
+        SetupPlayerIconClick();
     }
 
     private void OnDisable()
@@ -147,6 +160,7 @@ public class CommandOverlayUI : MonoBehaviour
     private void Start()
     {
         AutoFindHintToastUI();
+        AutoFindPlayerContextPanel();
 
         if (playerTarget == null)
         {
@@ -160,7 +174,63 @@ public class CommandOverlayUI : MonoBehaviour
             if (b != null) bossTarget = b.transform;
         }
 
+        SetupPlayerIconClick();
         BuildIcons();
+    }
+
+    // -------------------- PLAYER CONTEXT PANEL --------------------
+
+    private void AutoFindPlayerContextPanel()
+    {
+        if (playerContextPanel != null) return;
+
+        // Finds disabled objects too.
+        var all = Resources.FindObjectsOfTypeAll<PlayerContextCommandPanelUI>();
+        for (int i = 0; i < all.Length; i++)
+        {
+            var p = all[i];
+            if (p == null) continue;
+            if (!p.gameObject.scene.IsValid()) continue; // scene objects only
+
+            playerContextPanel = p;
+            return;
+        }
+    }
+
+    private void SetupPlayerIconClick()
+    {
+        if (playerIcon == null) return;
+
+        AutoFindPlayerContextPanel();
+
+        var btn = playerIcon.GetComponent<Button>();
+        if (btn == null) return;
+
+        btn.onClick.RemoveAllListeners();
+        btn.onClick.AddListener(OnPlayerIconClicked);
+    }
+
+    private void OnPlayerIconClicked()
+    {
+        AutoFindPlayerContextPanel();
+
+        if (playerContextPanel == null)
+        {
+            Debug.LogWarning("[CommandOverlayUI] PlayerContextCommandPanelUI not found/assigned.");
+            return;
+        }
+
+        if (playerIcon == null)
+            return;
+
+        // Toggle behavior: click again to close.
+        if (playerContextPanel.IsVisible())
+        {
+            playerContextPanel.HideImmediate();
+            return;
+        }
+
+        playerContextPanel.ShowUnder(playerIcon, playerTarget);
     }
 
     // -------------------- HINT TOAST --------------------
@@ -228,7 +298,6 @@ public class CommandOverlayUI : MonoBehaviour
 
             allyIconByUnit[go.transform] = icon;
 
-
             // Bind ally UI helpers (health bar, team tag, etc.)
             var allyUI = icon.GetComponent<AllyHealthIcon>();
             if (allyUI != null) allyUI.Bind(go.transform);
@@ -279,6 +348,20 @@ public class CommandOverlayUI : MonoBehaviour
     {
         if (canvasRoot == null) return;
 
+
+        // Hide crosshair in command view, show it in FPS view
+        if (crosshairUI != null && commandCam != null)
+        {
+            bool inCommandView = commandCam.enabled;
+            // if in command view, crosshair should be OFF
+            if (crosshairUI.activeSelf == inCommandView)
+                crosshairUI.SetActive(!inCommandView);
+        }
+
+        // If we leave command mode, hide the player panel (prevents it lingering in FPS mode).
+        if (playerContextPanel != null && playerContextPanel.IsVisible() && commandCam != null && !commandCam.enabled)
+            playerContextPanel.HideImmediate();
+
         Camera uiCam = canvas != null ? canvas.worldCamera : null;
         if (uiCam == null) uiCam = Camera.main;
 
@@ -315,6 +398,9 @@ public class CommandOverlayUI : MonoBehaviour
         // Sync team stars & disable teamed unit icons
         SyncTeamsAndStars(uiCam);
         UpdateAllyIconClickability();
+
+        // Keep team stars rendered above ally icons
+        EnsureTeamStarsRenderOnTopOfAllyIcons();
 
         // Selection ring highlight
         UpdateSelectionHighlight();
@@ -521,6 +607,23 @@ public class CommandOverlayUI : MonoBehaviour
         return 0f;
     }
 
+    /// <summary>
+    /// Ensures Team Star icons render above Ally (and Enemy) icons by pushing them to the end of the sibling list.
+    /// Call this after any icon rebuild/updates that might instantiate icons under the same parent.
+    /// </summary>
+    private void EnsureTeamStarsRenderOnTopOfAllyIcons()
+    {
+        if (teamStarByTeamId == null || teamStarByTeamId.Count == 0) return;
+
+        // Pushing each star to last sibling guarantees stars draw above ally/enemy icons.
+        foreach (var kvp in teamStarByTeamId)
+        {
+            var star = kvp.Value;
+            if (star == null) continue;
+            star.SetAsLastSibling();
+        }
+    }
+
     // -------------------- TEAM STARS --------------------
 
     private void SyncTeamsAndStars(Camera uiCam)
@@ -656,6 +759,11 @@ public class CommandOverlayUI : MonoBehaviour
             if (sm != null && sm.CurrentState == CommandStateMachine.State.AddTargeting)
                 allowClick = true;
 
+            // If the ally icon is not supposed to be clickable (e.g., it belongs to a team),
+            // also disable its raycast target so it won't "block" clicks intended for the Team Star icon above it.
+            var img = icon.GetComponent<UnityEngine.UI.Image>();
+            if (img != null) img.raycastTarget = allowClick;
+
             btn.interactable = allowClick;
             btn.enabled = allowClick;
         }
@@ -714,7 +822,6 @@ public class CommandOverlayUI : MonoBehaviour
 
         if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
         if (sm == null) return;
-
 
         // If we're currently choosing a JOIN target, do NOT auto-select the whole team.
         // We need the click to pass through so CommandStateMachine can fire OnAddRequested.

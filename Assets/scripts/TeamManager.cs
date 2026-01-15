@@ -10,6 +10,32 @@ public class TeamManager : MonoBehaviour
 
     private int nextId = 1;
 
+
+
+    [Header("Hints (optional)")]
+    [Tooltip("Show a hint toast when a team is formed or its member count changes.")]
+    public bool showTeamHints = true;
+
+    [Tooltip("How long the team hint stays on screen.")]
+    public float teamHintDuration = 2.5f;
+
+    private void ShowTeamHint(Team team, string prefix)
+    {
+        if (!showTeamHints) return;
+        if (team == null) return;
+
+        // Count only non-null members (defensive)
+        int count = 0;
+        if (team.Members != null)
+        {
+            for (int i = 0; i < team.Members.Count; i++)
+                if (team.Members[i] != null) count++;
+        }
+
+        // Uses HintSystem (auto-bootstraps) to show a toast if present in scene.
+        // Example: "Team formed! Team 2 has 3 allies"
+        HintSystem.Show($"{prefix} Team {team.Id} has {count} {(count == 1 ? "ally" : "allies")}.", teamHintDuration);
+    }
     private void Awake()
     {
         if (Instance != null && Instance != this)
@@ -54,6 +80,7 @@ public class TeamManager : MonoBehaviour
         {
             var created = CreateTeam(leader, joinTarget);
             created.Anchor = joinTarget; // ✅
+            ShowTeamHint(created, "Team formed!");
             return created;
         }
 
@@ -62,6 +89,7 @@ public class TeamManager : MonoBehaviour
         {
             teamA.Add(joinTarget);
             teamA.Anchor = joinTarget; // ✅
+            ShowTeamHint(teamA, "Team updated!");
             return teamA;
         }
 
@@ -69,6 +97,7 @@ public class TeamManager : MonoBehaviour
         {
             teamB.Add(leader);
             teamB.Anchor = joinTarget; // ✅
+            ShowTeamHint(teamB, "Team updated!");
             return teamB;
         }
 
@@ -81,6 +110,7 @@ public class TeamManager : MonoBehaviour
             teams.Remove(teamB);
 
             teamA.Anchor = joinTarget; // ✅
+            ShowTeamHint(teamA, "Teams merged!");
             return teamA;
         }
 
