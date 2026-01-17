@@ -34,6 +34,9 @@ public class AllyController : MonoBehaviour
     // NEW: per-ally stats (team size -> multipliers)
     private AllyCombatStats combatStats;
 
+    // NEW: pinned state (v1 driven by 'chasing')
+    private AllyPinnedStatus pinnedStatus;
+
     private void Awake()
     {
         if (agent == null) agent = GetComponent<NavMeshAgent>();
@@ -41,6 +44,7 @@ public class AllyController : MonoBehaviour
         if (soldierAnimator == null) soldierAnimator = GetComponentInChildren<Animator>();
 
         combatStats = GetComponent<AllyCombatStats>();
+        pinnedStatus = GetComponent<AllyPinnedStatus>();
     }
 
     void Start()
@@ -161,5 +165,9 @@ public class AllyController : MonoBehaviour
                 }
             }
         }
+
+        // Update pinned state after processing enemies (v1: pinned while chasing).
+        if (pinnedStatus != null)
+            pinnedStatus.SetPinned(chasing);
     }
 }

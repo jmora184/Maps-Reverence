@@ -36,6 +36,20 @@ public class CommandOverlayUI : MonoBehaviour
     public string playerHoverHint = "Player";
     public string bossHoverHint = "Boss";
 
+    [Tooltip("Shown when an ally/team is pinned (engaged) and cannot be commanded.")]
+    public string pinnedHoverHint = "<color=#ff3b30>Pinned:</color> Ally engaged in combat";
+
+
+
+    [Header("Pinned (Team clustering)")]
+    [Tooltip("Team becomes pinned only if a pinned member is within this radius of the team's main cluster center.")]
+    public float teamPinRadiusMeters = 20f;
+
+    [Tooltip("Radius used to identify the team's main cluster (ignores far-away outliers/joiners).")]
+    public float teamClusterRadiusMeters = 30f;
+
+    [Tooltip("Minimum number of members considered part of the 'main cluster' before the team can be pinned.")]
+    public int teamPinMinClusterMembers = 2;
     [Header("Icon Prefabs (UI)")]
     public RectTransform allyIconPrefab;
     public RectTransform enemyIconPrefab;
@@ -847,6 +861,23 @@ public class CommandOverlayUI : MonoBehaviour
             if (teamUI != null)
                 teamUI.Bind(team, OnTeamStarClicked);
 
+            // Pinned teams (Option 1 - main cluster rule):
+            // The team is pinned only if a pinned member is near the team's MAIN CLUSTER center.
+            // This prevents a far-away joiner getting into combat from locking the whole team.
+            bool teamPinned = IsTeamPinnedByClusterRule(team);
+
+            // Update team star tooltip message.
+            var starHint = star.GetComponent<UIHoverHintTarget>();
+            if (starHint != null)
+                starHint.message = teamPinned ? pinnedHoverHint : teamHoverHint;
+
+            // Disable clicking pinned teams (but keep raycast so tooltip still works).
+            var starBtn = star.GetComponent<Button>();
+            if (starBtn != null)
+            {
+                starBtn.interactable = !teamPinned;
+                starBtn.enabled = !teamPinned;
+            }
             Transform anchor = team.Anchor;
             if (anchor == null && team.Members.Count > 0) anchor = team.Members[0];
 
@@ -944,6 +975,18 @@ public class CommandOverlayUI : MonoBehaviour
             // While join-targeting, allow clicking teamed allies so they can be chosen as the JOIN target.
             if (sm != null && sm.CurrentState == CommandStateMachine.State.AddTargeting)
                 allowClick = true;
+
+            // Pinned units cannot be selected/commanded (v1 driven by AllyController.chasing).
+            // We still allow hover (tooltip) even when pinned.
+            var pinned = unit.GetComponent<AllyPinnedStatus>();
+            bool isPinned = (pinned != null && pinned.IsPinned);
+            if (isPinned)
+                allowClick = false;
+
+            // Update tooltip message for pinned/non-pinned.
+            var hint = icon.GetComponent<UIHoverHintTarget>();
+            if (hint != null)
+                hint.message = isPinned ? pinnedHoverHint : allyHoverHint;
 
             // If the ally icon is not supposed to be clickable (e.g., it belongs to a team),
             // also disable its raycast target so it won't "block" clicks intended for the Team Star icon above it.
@@ -1256,4 +1299,114 @@ public class CommandOverlayUI : MonoBehaviour
             if (kvp.Value != null) Destroy(kvp.Value.gameObject);
         teamStarByTeamId.Clear();
     }
+    // --- Team clustering helpers (used for pinned team logic) ---
+
+    private Vector3 ComputeTeamMainClusterCenter(Team team, out int clusterCount)
+    {
+        clusterCount = 0;
+
+        if (team == null || team.Members == null || team.Members.Count == 0)
+            return Vector3.zero;
+
+        var members = team.Members;
+
+        // Count non-null members
+        int nonNull = 0;
+        for (int i = 0; i < members.Count; i++)
+            if (members[i] != null) nonNull++;
+
+        if (nonNull == 0) return Vector3.zero;
+
+        if (nonNull == 1)
+        {
+            for (int i = 0; i < members.Count; i++)
+            {
+                if (members[i] != null)
+                {
+                    clusterCount = 1;
+                    return members[i].position;
+                }
+            }
+        }
+
+        // Pick an anchor member representing the "main blob":
+        // choose the member with the most neighbors within teamClusterRadiusMeters.
+        Transform best = null;
+        int bestNeighbors = -1;
+
+        for (int i = 0; i < members.Count; i++)
+        {
+            var a = members[i];
+            if (a == null) continue;
+
+            int neighbors = 0;
+            for (int j = 0; j < members.Count; j++)
+            {
+                if (i == j) continue;
+                var b = members[j];
+                if (b == null) continue;
+
+                if (Vector3.Distance(a.position, b.position) <= teamClusterRadiusMeters)
+                    neighbors++;
+            }
+
+            if (neighbors > bestNeighbors)
+            {
+                bestNeighbors = neighbors;
+                best = a;
+            }
+        }
+
+        if (best == null) return Vector3.zero;
+
+        // Compute centroid of the cluster around the anchor.
+        Vector3 sum = Vector3.zero;
+        int count = 0;
+
+        for (int i = 0; i < members.Count; i++)
+        {
+            var m = members[i];
+            if (m == null) continue;
+
+            if (Vector3.Distance(best.position, m.position) <= teamClusterRadiusMeters)
+            {
+                sum += m.position;
+                count++;
+            }
+        }
+
+        clusterCount = Mathf.Max(0, count);
+        if (count <= 0) return best.position;
+
+        return sum / count;
+    }
+
+    private bool IsTeamPinnedByClusterRule(Team team)
+    {
+        if (team == null || team.Members == null)
+            return false;
+
+        Vector3 center = ComputeTeamMainClusterCenter(team, out int clusterCount);
+
+        // Require the "main cluster" to have at least N members before allowing team-level pinning.
+        // Prevents a lone, far-away joiner from pinning the whole team.
+        if (clusterCount < teamPinMinClusterMembers)
+            return false;
+
+        for (int i = 0; i < team.Members.Count; i++)
+        {
+            var mem = team.Members[i];
+            if (mem == null) continue;
+
+            var pinned = mem.GetComponent<AllyPinnedStatus>();
+            if (pinned != null && pinned.IsPinned)
+            {
+                if (Vector3.Distance(mem.position, center) <= teamPinRadiusMeters)
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
 }
