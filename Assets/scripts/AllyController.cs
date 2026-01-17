@@ -8,6 +8,7 @@ using UnityEngine.AI;
 
 public class AllyController : MonoBehaviour
 {
+    [Header("Movement")]
     public float moveSpeed;
     public Rigidbody theRB;
     public Transform target;
@@ -17,24 +18,61 @@ public class AllyController : MonoBehaviour
     public float keepChasingTime = 2f;
     private float chaseCounter;
 
+    [Header("Combat")]
     public GameObject bullet;
     public Transform firePoint;
 
     public float fireRate;
     private float fireCount;
+
     private GameObject[] objs;
     private Vector3 targetPoint, startPoint;
 
-    // Reference to the Animator component
+    [Header("Animation")]
     public Animator soldierAnimator;
+
+    // NEW: per-ally stats (team size -> multipliers)
+    private AllyCombatStats combatStats;
+
+    private void Awake()
+    {
+        if (agent == null) agent = GetComponent<NavMeshAgent>();
+        if (theRB == null) theRB = GetComponent<Rigidbody>();
+        if (soldierAnimator == null) soldierAnimator = GetComponentInChildren<Animator>();
+
+        combatStats = GetComponent<AllyCombatStats>();
+    }
 
     void Start()
     {
         startPoint = transform.position;
+
+        // Initialize agent speed from AllyCombatStats if present,
+        // otherwise fall back to the legacy moveSpeed field.
+        if (agent != null)
+        {
+            if (combatStats != null)
+            {
+                // If you were previously tuning moveSpeed in the inspector,
+                // use it as baseMoveSpeed (only if baseMoveSpeed isn't already set).
+                if (combatStats.baseMoveSpeed <= 0f && moveSpeed > 0f)
+                    combatStats.baseMoveSpeed = moveSpeed;
+
+                combatStats.ApplyToAgent(agent);
+            }
+            else if (moveSpeed > 0f)
+            {
+                agent.speed = moveSpeed;
+            }
+        }
     }
 
     void Update()
     {
+        // Keep agent speed in sync with team size (cheap + simple).
+        if (agent != null && combatStats != null)
+            agent.speed = combatStats.GetMoveSpeed();
+
         objs = GameObject.FindGameObjectsWithTag("Enemy");
         foreach (var x in objs)
         {
@@ -51,7 +89,7 @@ public class AllyController : MonoBehaviour
                 if (chaseCounter > 0)
                 {
                     chaseCounter -= Time.deltaTime;
-                    if (chaseCounter <= 0)
+                    if (chaseCounter <= 0 && agent != null)
                     {
                         agent.destination = startPoint;
                     }
@@ -59,13 +97,16 @@ public class AllyController : MonoBehaviour
             }
             else
             {
-                if (Vector3.Distance(transform.position, targetPoint) > distanceToStop)
+                if (agent != null)
                 {
-                    agent.destination = targetPoint;
-                }
-                else
-                {
-                    agent.destination = transform.position;
+                    if (Vector3.Distance(transform.position, targetPoint) > distanceToStop)
+                    {
+                        agent.destination = targetPoint;
+                    }
+                    else
+                    {
+                        agent.destination = transform.position;
+                    }
                 }
 
                 if (Vector3.Distance(transform.position, targetPoint) > distanceToLose)
@@ -80,27 +121,44 @@ public class AllyController : MonoBehaviour
                 {
                     fireCount = fireRate;
 
-                    firePoint.LookAt(targetPoint + new Vector3(0f, 0.5f, 0f));
+                    if (firePoint != null)
+                        firePoint.LookAt(targetPoint + new Vector3(0f, 0.5f, 0f));
 
                     // Check the angle to the enemy
                     Vector3 targetDir = targetPoint - transform.position;
                     float angle = Vector3.SignedAngle(targetDir, transform.forward, Vector3.up);
                     if (Mathf.Abs(angle) < 30f)
                     {
-                        Instantiate(bullet, firePoint.position, firePoint.rotation);
-                        soldierAnimator.SetTrigger("Shoot"); // Trigger shooting animation
+                        if (bullet != null && firePoint != null)
+                        {
+                            GameObject spawned = Instantiate(bullet, firePoint.position, firePoint.rotation);
+
+                            // NEW: Set bullet damage from AllyCombatStats (team size scaling).
+                            if (combatStats != null)
+                            {
+                                BulletController bc = spawned.GetComponent<BulletController>();
+                                if (bc != null)
+                                    bc.Damage = combatStats.GetDamageInt();
+                            }
+                        }
+
+                        if (soldierAnimator != null)
+                            soldierAnimator.SetTrigger("Shoot"); // Trigger shooting animation
                     }
                 }
             }
 
             // Check if the agent is moving and update the running animation
-            if (agent.velocity.magnitude > 0.1f)
+            if (soldierAnimator != null && agent != null)
             {
-                soldierAnimator.SetBool("isRunning", true); // Start running animation
-            }
-            else
-            {
-                soldierAnimator.SetBool("isRunning", false); // Stop running animation
+                if (agent.velocity.magnitude > 0.1f)
+                {
+                    soldierAnimator.SetBool("isRunning", true); // Start running animation
+                }
+                else
+                {
+                    soldierAnimator.SetBool("isRunning", false); // Stop running animation
+                }
             }
         }
     }

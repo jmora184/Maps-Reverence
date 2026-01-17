@@ -1,3 +1,4 @@
+
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.AI;
@@ -14,7 +15,7 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
     [Tooltip("A world-space marker prefab (SpriteRenderer on a GameObject).")]
     public SpriteRenderer markerPrefab;
 
-    [Tooltip("Optional parent for spawned markers (keeps Hierarchy clean).")]
+    [Tooltip("Optional parent for spawned markers (keeps Hierarchy clean). If empty, a MarkerHolder will be created automatically.")]
     public Transform markerParent;
 
     [Header("Raycast")]
@@ -27,10 +28,10 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
     [Tooltip("Hover marker follows mouse only while StateMachine is MoveTargeting.")]
     public bool showHoverWhileMoveTargeting = true;
 
-    [Tooltip("Pinned markers remain until you leave Command Mode (your request).")]
+    [Tooltip("Pinned markers remain until you leave Command Mode.")]
     public bool keepPinnedUntilExitCommandMode = true;
 
-    [Tooltip("If true, pinned markers hide once the unit arrives. (OFF for your request)")]
+    [Tooltip("If true, pinned markers hide once the unit arrives.")]
     public bool hidePinnedWhenArrived = false;
 
     [Tooltip("Arrival threshold (only used if hidePinnedWhenArrived = true).")]
@@ -40,10 +41,13 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
     public float heightOffset = 0.03f;
     public Vector3 flatEuler = new Vector3(90f, 0f, 0f);
 
+    [Header("Visual")]
+    [Tooltip("Uniform scale applied to spawned markers (1 = prefab scale).")]
+    public float markerScale = 1f;
+
     // ---- internals ----
     private SpriteRenderer hoverMarker;
 
-    // per-unit pinned marker
     private class Pinned
     {
         public Transform unit;
@@ -53,9 +57,16 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
     }
 
     private readonly Dictionary<Transform, Pinned> pinnedByUnit = new();
+    private bool lastInCommandMode = true;
 
     private void Awake()
     {
+        if (Instance != null && Instance != this)
+        {
+            enabled = false;
+            return;
+        }
+
         Instance = this;
 
         if (commandCam == null && CommandCamToggle.Instance != null)
@@ -64,6 +75,8 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
         if (stateMachine == null)
             stateMachine = FindObjectOfType<CommandStateMachine>();
 
+        EnsureMarkerParent();
+
         // Create a hover marker instance right away (so it appears instantly)
         if (markerPrefab != null)
         {
@@ -71,46 +84,74 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
             hoverMarker.name = "MouseHoverMarker";
             hoverMarker.gameObject.SetActive(false);
             hoverMarker.transform.rotation = Quaternion.Euler(flatEuler);
+            ApplyMarkerScale(hoverMarker.transform);
         }
         else
         {
             Debug.LogWarning("MoveDestinationMarkerSystem: markerPrefab is not assigned.");
         }
+
+        lastInCommandMode = IsInCommandMode();
+    }
+
+    private void EnsureMarkerParent()
+    {
+        if (markerParent != null) return;
+
+        // Auto-create a holder to keep hierarchy clean.
+        var holder = GameObject.Find("MarkerHolder");
+        if (holder == null)
+        {
+            holder = new GameObject("MarkerHolder");
+            holder.transform.SetParent(transform, false);
+        }
+
+        markerParent = holder.transform;
+    }
+
+    private void ApplyMarkerScale(Transform t)
+    {
+        if (t == null) return;
+        if (markerScale <= 0f) markerScale = 1f;
+        t.localScale = Vector3.one * markerScale;
     }
 
     private void Update()
     {
+        bool inCommandMode = IsInCommandMode();
+
         // Gate by command mode
-        if (onlyShowInCommandMode && !IsInCommandMode())
+        if (onlyShowInCommandMode && !inCommandMode)
         {
-            // Hide hover
             if (hoverMarker != null) hoverMarker.gameObject.SetActive(false);
 
-            // Either hide or clear pinned markers when leaving command mode
+            // Clear pinned only ONCE when transitioning from command mode -> not command mode.
             if (keepPinnedUntilExitCommandMode)
             {
-                // Leaving command mode => clear pinned markers
-                ClearAllPinned();
+                if (lastInCommandMode)
+                    ClearAllPinned();
             }
             else
             {
                 HideAllPinned();
             }
 
+            lastInCommandMode = inCommandMode;
             return;
         }
 
-        // Hover marker logic
-        UpdateHoverMarker();
+        lastInCommandMode = inCommandMode;
 
-        // Pinned markers logic
+        UpdateHoverMarker();
         UpdatePinnedMarkers();
     }
 
-    // Called by your CommandStateMachine when you click the ground
+    // Called by CommandStateMachine when a move is confirmed
     public void PlaceFor(GameObject[] units, Vector3 destination)
     {
         if (units == null || units.Length == 0 || markerPrefab == null) return;
+
+        EnsureMarkerParent();
 
         foreach (var go in units)
         {
@@ -122,6 +163,7 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
                 var sr = Instantiate(markerPrefab, markerParent);
                 sr.name = $"PinnedMarker_{t.name}";
                 sr.transform.rotation = Quaternion.Euler(flatEuler);
+                ApplyMarkerScale(sr.transform);
 
                 pinned = new Pinned
                 {
@@ -141,7 +183,6 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
                     pinned.agent = go.GetComponent<NavMeshAgent>();
             }
 
-            // Show immediately at destination
             pinned.marker.transform.position = destination + Vector3.up * heightOffset;
             pinned.marker.gameObject.SetActive(true);
         }
@@ -178,7 +219,6 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
 
     private void UpdatePinnedMarkers()
     {
-        // Clean up dead units / markers
         List<Transform> dead = null;
 
         foreach (var kvp in pinnedByUnit)
@@ -193,7 +233,6 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
                 continue;
             }
 
-            // Keep marker at the last ordered destination
             pinned.marker.transform.position = pinned.destination + Vector3.up * heightOffset;
 
             if (!hidePinnedWhenArrived)
@@ -202,7 +241,6 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
                 continue;
             }
 
-            // Optional: hide when arrived
             if (pinned.agent != null)
             {
                 bool hasPath = pinned.agent.hasPath && !pinned.agent.pathPending;
@@ -213,7 +251,6 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
             }
             else
             {
-                // No agent => just keep visible
                 pinned.marker.gameObject.SetActive(true);
             }
         }
@@ -251,10 +288,15 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
 
     private bool IsInCommandMode()
     {
+        // Prefer CommandCamToggle when available, but don't let it hide pins if cameras/states disagree.
+        bool toggleSays = false;
         if (CommandCamToggle.Instance != null)
-            return CommandCamToggle.Instance.IsCommandMode;
+            toggleSays = CommandCamToggle.Instance.IsCommandMode;
 
-        // fallback
-        return commandCam != null && commandCam.enabled;
+        bool camSays = (commandCam != null && commandCam.enabled);
+
+        bool stateSays = (stateMachine != null && stateMachine.CurrentState != CommandStateMachine.State.Inactive);
+
+        return toggleSays || camSays || stateSays;
     }
 }

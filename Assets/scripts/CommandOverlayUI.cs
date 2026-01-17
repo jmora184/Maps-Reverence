@@ -5,6 +5,7 @@ using System.Reflection;
 using UnityEngine;
 using UnityEngine.AI;
 using UnityEngine.UI;
+using UnityEngine.EventSystems;
 
 public class CommandOverlayUI : MonoBehaviour
 {
@@ -19,6 +20,21 @@ public class CommandOverlayUI : MonoBehaviour
     [Header("Crosshair (UI)")]
     [Tooltip("Optional: drag your Canvas Crosshair GameObject here so it hides in command view.")]
     public GameObject crosshairUI;
+
+    [Header("Move Cursor Icon (UI)")]
+    [Tooltip("UI Image that follows the mouse during MoveTargeting and swaps sprites for move/attack.")]
+    public HoverCursorIconUI hoverCursorIcon;
+
+
+    [Header("Hover Hint (tooltip)")]
+    [Tooltip("Optional tooltip UI shown when hovering over icons.")]
+    public bool enableHoverHints = true;
+    [Tooltip("Default tooltip messages (used if the prefab doesn't already have UIHoverHintTarget).")]
+    public string allyHoverHint = "Select Ally";
+    public string enemyHoverHint = "Select Enemy";
+    public string teamHoverHint = "Select Team";
+    public string playerHoverHint = "Player";
+    public string bossHoverHint = "Boss";
 
     [Header("Icon Prefabs (UI)")]
     public RectTransform allyIconPrefab;
@@ -124,6 +140,7 @@ public class CommandOverlayUI : MonoBehaviour
             commandButtonPanel.gameObject.SetActive(false);
 
         AutoFindPlayerContextPanel();
+        AutoFindHoverCursorIcon();
     }
 
     private void OnEnable()
@@ -142,6 +159,7 @@ public class CommandOverlayUI : MonoBehaviour
 
         AutoFindHintToastUI();
         AutoFindPlayerContextPanel();
+        AutoFindHoverCursorIcon();
         SetupPlayerIconClick();
     }
 
@@ -161,6 +179,7 @@ public class CommandOverlayUI : MonoBehaviour
     {
         AutoFindHintToastUI();
         AutoFindPlayerContextPanel();
+        AutoFindHoverCursorIcon();
 
         if (playerTarget == null)
         {
@@ -175,6 +194,10 @@ public class CommandOverlayUI : MonoBehaviour
         }
 
         SetupPlayerIconClick();
+
+        if (playerIcon != null) EnsureHoverHint(playerIcon, playerHoverHint);
+        if (bossIcon != null) EnsureHoverHint(bossIcon, bossHoverHint);
+
         BuildIcons();
     }
 
@@ -197,11 +220,32 @@ public class CommandOverlayUI : MonoBehaviour
         }
     }
 
+    private void AutoFindHoverCursorIcon()
+    {
+        if (hoverCursorIcon != null) return;
+
+        // Finds disabled objects too.
+        var all = Resources.FindObjectsOfTypeAll<HoverCursorIconUI>();
+        for (int i = 0; i < all.Length; i++)
+        {
+            var h = all[i];
+            if (h == null) continue;
+            if (!h.gameObject.scene.IsValid()) continue;
+
+            hoverCursorIcon = h;
+            break;
+        }
+
+        if (hoverCursorIcon != null && hoverCursorIcon.canvasRoot == null)
+            hoverCursorIcon.canvasRoot = canvasRoot;
+    }
+
     private void SetupPlayerIconClick()
     {
         if (playerIcon == null) return;
 
         AutoFindPlayerContextPanel();
+        AutoFindHoverCursorIcon();
 
         var btn = playerIcon.GetComponent<Button>();
         if (btn == null) return;
@@ -213,6 +257,7 @@ public class CommandOverlayUI : MonoBehaviour
     private void OnPlayerIconClicked()
     {
         AutoFindPlayerContextPanel();
+        AutoFindHoverCursorIcon();
 
         if (playerContextPanel == null)
         {
@@ -296,6 +341,8 @@ public class CommandOverlayUI : MonoBehaviour
             var icon = Instantiate(allyIconPrefab, canvasRoot);
             icon.gameObject.SetActive(true);
 
+            EnsureHoverHint(icon, allyHoverHint);
+
             allyIconByUnit[go.transform] = icon;
 
             // Bind ally UI helpers (health bar, team tag, etc.)
@@ -321,28 +368,133 @@ public class CommandOverlayUI : MonoBehaviour
             var icon = Instantiate(enemyIconPrefab, canvasRoot);
             icon.gameObject.SetActive(true);
 
+            EnsureHoverHint(icon, enemyHoverHint);
+
             enemyIconByUnit[go.transform] = icon;
 
+            // When MoveTargeting, swap hover marker sprite to attack while hovering an enemy icon.
+            HookEnemyHoverEvents(icon);
+
+            // Flank bonus hint: bind this enemy transform to the hover-hint component (if present on the prefab).
+            icon.GetComponent<EnemyFlankBonusHoverHint>()?.Bind(go.transform);
+
+            // Ensure enemy icons are clickable (even if the prefab has no Button/Image on the root).
             var btn = icon.GetComponent<Button>();
+            if (btn == null) btn = icon.gameObject.AddComponent<Button>();
+
+            var rootImg = icon.GetComponent<Image>();
+            if (rootImg == null)
+            {
+                rootImg = icon.gameObject.AddComponent<Image>();
+                // Invisible raycast catcher; visuals live on children under IconVisual.
+                rootImg.color = new Color(1f, 1f, 1f, 0f);
+            }
+            rootImg.raycastTarget = true;
+            // Make sure the Button has a target graphic (required by some Unity versions).
+            btn.targetGraphic = rootImg;
+
             if (btn != null)
             {
                 btn.onClick.RemoveAllListeners();
                 Transform captured = go.transform;
+                btn.onClick.AddListener(() =>
+                {
+                    if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
 
-                if (enemyIconsClickable)
-                {
-                    btn.onClick.AddListener(() => OnUnitClicked(captured));
-                    btn.interactable = true;
-                    btn.enabled = true;
-                }
-                else
-                {
-                    btn.interactable = false;
-                    btn.enabled = false;
-                }
+                    // If we're currently choosing a MOVE destination, clicking an enemy icon should
+                    // submit a move target at that enemy's position.
+                    if (sm != null && sm.CurrentState == CommandStateMachine.State.MoveTargeting)
+                    {
+                        sm.SubmitFollowTarget(captured.gameObject);
+                        return;
+                    }
+
+                    // Otherwise, only allow normal click behavior if enabled.
+                    if (enemyIconsClickable)
+                        OnUnitClicked(captured);
+                });
+
+                // Keep the button enabled so MoveTargeting clicks always work.
+                btn.interactable = true;
+                btn.enabled = true;
+
             }
         }
     }
+
+    // -------------------- ENEMY HOVER (attack icon preview) --------------------
+
+    private void HookEnemyHoverEvents(RectTransform enemyIcon)
+    {
+        if (enemyIcon == null) return;
+
+        // Ensure the icon can receive pointer events.
+        var img = enemyIcon.GetComponent<Image>();
+        if (img != null) img.raycastTarget = true;
+
+        var trigger = enemyIcon.GetComponent<EventTrigger>();
+        if (trigger == null) trigger = enemyIcon.gameObject.AddComponent<EventTrigger>();
+
+        if (trigger.triggers == null)
+            trigger.triggers = new List<EventTrigger.Entry>();
+
+        // Replace any existing entries for these event types (prevents duplicates after rebuilds).
+        RemoveEventTrigger(trigger, EventTriggerType.PointerEnter);
+        RemoveEventTrigger(trigger, EventTriggerType.PointerExit);
+
+        var enter = new EventTrigger.Entry { eventID = EventTriggerType.PointerEnter };
+        enter.callback.AddListener(_ =>
+        {
+            AutoFindHoverCursorIcon();
+            if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
+            if (hoverCursorIcon != null && sm != null && sm.CurrentState == CommandStateMachine.State.MoveTargeting)
+                hoverCursorIcon.SetOverEnemy(true);
+        });
+        trigger.triggers.Add(enter);
+
+        var exit = new EventTrigger.Entry { eventID = EventTriggerType.PointerExit };
+        exit.callback.AddListener(_ =>
+        {
+            AutoFindHoverCursorIcon();
+            if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
+            if (hoverCursorIcon != null && sm != null && sm.CurrentState == CommandStateMachine.State.MoveTargeting)
+                hoverCursorIcon.SetOverEnemy(false);
+        });
+        trigger.triggers.Add(exit);
+    }
+
+    private void RemoveEventTrigger(EventTrigger trigger, EventTriggerType type)
+    {
+        if (trigger == null || trigger.triggers == null) return;
+
+        for (int i = trigger.triggers.Count - 1; i >= 0; i--)
+        {
+            if (trigger.triggers[i] != null && trigger.triggers[i].eventID == type)
+                trigger.triggers.RemoveAt(i);
+        }
+    }
+
+    // -------------------- HOVER HINT (tooltip) --------------------
+
+    private void EnsureHoverHint(RectTransform rt, string message)
+    {
+        if (!enableHoverHints) return;
+        if (rt == null) return;
+
+        // Use existing target if present, otherwise add it.
+        var t = rt.GetComponent<UIHoverHintTarget>();
+        if (t == null) t = rt.gameObject.AddComponent<UIHoverHintTarget>();
+
+        t.message = message;
+
+        // Only show in command view if commandCam exists (prevents FPS UI tooltips).
+        if (commandCam != null)
+            t.onlyWhenCameraEnabled = commandCam;
+
+        // By default anchor to itself.
+        t.anchorOverride = null;
+    }
+
 
     private void LateUpdate()
     {
@@ -383,6 +535,8 @@ public class CommandOverlayUI : MonoBehaviour
             lastSmState = sm.CurrentState;
         }
 
+        UpdateHoverCursorIcon();
+
         // Update ally/enemy icons
         UpdateIcons(allyIconByUnit, iconWorldHeight, uiCam);
         UpdateIcons(enemyIconByUnit, iconWorldHeight, uiCam);
@@ -407,6 +561,36 @@ public class CommandOverlayUI : MonoBehaviour
 
         // Optional command button panel anchoring
         UpdateCommandButtonPanel(uiCam);
+    }
+
+    private void UpdateHoverCursorIcon()
+    {
+        AutoFindHoverCursorIcon();
+        if (hoverCursorIcon == null) return;
+
+        // Always drive the cursor icon off this overlay's canvasRoot.
+        if (canvasRoot != null)
+            hoverCursorIcon.canvasRoot = canvasRoot;
+
+        // Ensure the cursor icon is under the SAME parent as the rest of the overlay UI,
+        // so it can render above enemy icons.
+        if (canvasRoot != null && hoverCursorIcon.transform.parent != canvasRoot)
+            hoverCursorIcon.transform.SetParent(canvasRoot, worldPositionStays: false);
+
+        // Pass Canvas reference (helps ScreenSpaceCamera / WorldSpace conversion).
+        if (hoverCursorIcon.canvas == null)
+            hoverCursorIcon.canvas = canvas;
+
+        bool show = (sm != null && sm.CurrentState == CommandStateMachine.State.MoveTargeting);
+        hoverCursorIcon.SetVisible(show);
+
+        // Make absolutely sure it renders on top.
+        var rt = hoverCursorIcon.transform as RectTransform;
+        if (rt != null)
+            rt.SetAsLastSibling();
+
+        if (!show)
+            hoverCursorIcon.SetOverEnemy(false);
     }
 
     private void UpdateIcons(Dictionary<Transform, RectTransform> dict, float worldHeight, Camera uiCam)
@@ -653,6 +837,8 @@ public class CommandOverlayUI : MonoBehaviour
                 star = Instantiate(teamStarIconPrefab, canvasRoot);
                 star.gameObject.SetActive(true);
                 teamStarByTeamId[team.Id] = star;
+
+                EnsureHoverHint(star, teamHoverHint);
             }
 
             star.SetAsLastSibling();

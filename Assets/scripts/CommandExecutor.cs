@@ -18,6 +18,16 @@ public class CommandExecutor : MonoBehaviour
     [Header("Move Settings")]
     public bool useFormation = true;
     public float formationSpacing = 1.6f;
+
+
+    [Header("Follow (Move-to-Target)")]
+    [Tooltip("How often to refresh destinations while following a moving target. Lower = tighter follow, higher = fewer path recalcs.")]
+    public float followUpdateInterval = 0.15f;
+
+    // Agent -> follow coroutine + target + optional offset (for keeping formation while following)
+    private readonly Dictionary<NavMeshAgent, Coroutine> followRoutines = new Dictionary<NavMeshAgent, Coroutine>();
+    private readonly Dictionary<NavMeshAgent, Transform> followTargets = new Dictionary<NavMeshAgent, Transform>();
+    private readonly Dictionary<NavMeshAgent, Vector3> followOffsets = new Dictionary<NavMeshAgent, Vector3>();
     public int formationColumns = 4;
 
     [Header("Team Move Settings")]
@@ -59,6 +69,7 @@ public class CommandExecutor : MonoBehaviour
         if (sm != null)
         {
             sm.OnMoveRequested += HandleMoveRequested;
+            sm.OnFollowRequested += HandleFollowRequested;
             sm.OnAddRequested += HandleAddRequested;
             sm.OnSplitRequested += HandleSplitRequested;
         }
@@ -69,15 +80,25 @@ public class CommandExecutor : MonoBehaviour
         if (sm != null)
         {
             sm.OnMoveRequested -= HandleMoveRequested;
+            sm.OnFollowRequested -= HandleFollowRequested;
             sm.OnAddRequested -= HandleAddRequested;
             sm.OnSplitRequested -= HandleSplitRequested;
         }
+
+        StopAllFollows();
     }
 
     private void HandleMoveRequested(IReadOnlyList<GameObject> selection, Vector3 destination)
     {
         ExecuteMoveOrder(selection, destination);
     }
+
+    private void HandleFollowRequested(IReadOnlyList<GameObject> selection, GameObject targetUnit)
+    {
+        if (targetUnit == null) return;
+        ExecuteFollowOrder(selection, targetUnit.transform);
+    }
+
 
     // ✅ Needed by CommandQueue.FlushMoves(executor)
     public void ExecuteMoveOrder(IReadOnlyList<GameObject> selection, Vector3 destination)
@@ -93,6 +114,11 @@ public class CommandExecutor : MonoBehaviour
 
         List<NavMeshAgent> agents = GatherAgents(expanded);
         if (agents.Count == 0) return;
+
+
+        // If any of these units were following a target, stop that follow now.
+        for (int i = 0; i < agents.Count; i++)
+            StopFollow(agents[i]);
 
         // Optional stable ordering so formation offsets don't shuffle
         if (stableFormationOrdering && agents.Count > 1)
@@ -153,6 +179,151 @@ public class CommandExecutor : MonoBehaviour
             agent.isStopped = false;
             agent.SetDestination(targetPos);
         }
+    }
+
+
+
+    // -------------------- FOLLOW (move-to-target) --------------------
+
+    public void ExecuteFollowOrder(IReadOnlyList<GameObject> selection, Transform target)
+    {
+        if (selection == null || selection.Count == 0) return;
+        if (target == null) return;
+
+        // ✅ Team expansion (team members follow together)
+        List<GameObject> expanded = ExpandSelectionForTeams(selection);
+
+        List<NavMeshAgent> agents = GatherAgents(expanded);
+        if (agents.Count == 0) return;
+
+        // Optional stable ordering so formation offsets don't shuffle
+        if (stableFormationOrdering && agents.Count > 1)
+        {
+            agents.Sort((a, b) =>
+            {
+                if (a == null && b == null) return 0;
+                if (a == null) return 1;
+                if (b == null) return -1;
+
+                int ida = a.transform.GetInstanceID();
+                int idb = b.transform.GetInstanceID();
+                return ida.CompareTo(idb);
+            });
+        }
+
+        // Compute per-agent offsets for follow (so groups keep formation around the target)
+        // If formation is disabled, offsets are zero.
+        List<Vector3> offsets = new List<Vector3>(agents.Count);
+        if (!useFormation || agents.Count == 1)
+        {
+            for (int i = 0; i < agents.Count; i++)
+                offsets.Add(Vector3.zero);
+        }
+        else
+        {
+            int cols = Mathf.Max(1, formationColumns);
+            float spacing = Mathf.Max(0.1f, formationSpacing);
+
+            int count = agents.Count;
+            int rows = Mathf.CeilToInt(count / (float)cols);
+
+            float width = (cols - 1) * spacing;
+            float height = (rows - 1) * spacing;
+
+            for (int i = 0; i < agents.Count; i++)
+            {
+                int row = i / cols;
+                int col = i % cols;
+
+                float x = (col * spacing) - (width * 0.5f);
+                float z = (row * spacing) - (height * 0.5f);
+                offsets.Add(new Vector3(x, 0f, z));
+            }
+        }
+
+        for (int i = 0; i < agents.Count; i++)
+        {
+            NavMeshAgent agent = agents[i];
+            if (agent == null) continue;
+
+            Vector3 offset = (i >= 0 && i < offsets.Count) ? offsets[i] : Vector3.zero;
+
+            StartFollow(agent, target, offset);
+        }
+    }
+
+    private void StartFollow(NavMeshAgent agent, Transform target, Vector3 offset)
+    {
+        if (agent == null) return;
+
+        // Replace any existing follow
+        StopFollow(agent);
+
+        if (target == null) return;
+
+        followTargets[agent] = target;
+        followOffsets[agent] = offset;
+        followRoutines[agent] = StartCoroutine(FollowRoutine(agent));
+    }
+
+    private void StopFollow(NavMeshAgent agent)
+    {
+        if (agent == null) return;
+
+        if (followRoutines.TryGetValue(agent, out Coroutine routine) && routine != null)
+            StopCoroutine(routine);
+
+        followRoutines.Remove(agent);
+        followTargets.Remove(agent);
+        followOffsets.Remove(agent);
+    }
+
+    private void StopAllFollows()
+    {
+        // Stop coroutines first
+        foreach (var kv in followRoutines)
+        {
+            if (kv.Value != null)
+                StopCoroutine(kv.Value);
+        }
+
+        followRoutines.Clear();
+        followTargets.Clear();
+        followOffsets.Clear();
+    }
+
+    private IEnumerator FollowRoutine(NavMeshAgent agent)
+    {
+        // Reuse wait object to reduce GC
+        WaitForSeconds wait = new WaitForSeconds(Mathf.Max(0.02f, followUpdateInterval));
+
+        while (agent != null)
+        {
+            if (!followTargets.TryGetValue(agent, out Transform target) || target == null)
+                break;
+
+            // If the target gets disabled, treat it as gone.
+            if (!target.gameObject.activeInHierarchy)
+                break;
+
+            Vector3 offset = Vector3.zero;
+            followOffsets.TryGetValue(agent, out offset);
+
+            Vector3 desired = target.position + offset;
+
+            // Snap to navmesh if possible
+            if (NavMesh.SamplePosition(desired, out NavMeshHit hit, 2.5f, NavMesh.AllAreas))
+                desired = hit.position;
+
+            agent.isStopped = false;
+            agent.SetDestination(desired);
+
+            yield return wait;
+        }
+
+        // Cleanup (agent may be null if destroyed)
+        if (agent != null)
+            StopFollow(agent);
     }
 
 

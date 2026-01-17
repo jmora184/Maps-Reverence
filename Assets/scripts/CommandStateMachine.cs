@@ -63,6 +63,7 @@ public class CommandStateMachine : MonoBehaviour
     public GameObject JoinSource { get; private set; }
 
     public event Action<IReadOnlyList<GameObject>, Vector3> OnMoveRequested;
+    public event Action<IReadOnlyList<GameObject>, GameObject> OnFollowRequested;
     // Fires whenever the player clicks a ground point in MoveTargeting (even if moves are queued)
     public event Action<IReadOnlyList<GameObject>, Vector3> OnMoveTargetChosen;
     public event Action<IReadOnlyList<GameObject>, GameObject> OnAddRequested;
@@ -132,25 +133,7 @@ public class CommandStateMachine : MonoBehaviour
             {
                 if (Physics.Raycast(r, out RaycastHit hit, raycastMaxDistance, groundMask))
                 {
-                    // Notify UI about the chosen destination (even if the move is queued)
-                    OnMoveTargetChosen?.Invoke(selection, hit.point);
-
-                    if (queueMovesInCommandMode && CommandQueue.Instance != null)
-                        CommandQueue.Instance.EnqueueMove(selection, hit.point);
-                    else
-                        OnMoveRequested?.Invoke(selection, hit.point);
-
-                    if (MoveDestinationMarkerSystem.Instance != null)
-                        MoveDestinationMarkerSystem.Instance.PlaceFor(selection.ToArray(), hit.point);
-
-                    if (!keepSelectionAfterMove)
-                    {
-                        ClearSelectionInternal();
-                    }
-                    // Always leave targeting mode after confirming the move.
-                    // We return to AwaitSelection so other UIs don\'t immediately pop the panel back up.
-                    SetState(State.AwaitSelection);
-                    buttonsUI?.Refresh(CurrentState, selection.Count);
+                    SubmitMoveTarget(hit.point);
                 }
             }
             return;
@@ -353,6 +336,70 @@ public class CommandStateMachine : MonoBehaviour
 
         SelectUnit(clickedUnit, additive: false);
     }
+
+    /// <summary>
+    /// Confirm a MOVE target at the given world point. This is the same path used when clicking the ground
+    /// in MoveTargeting, but can also be called by UI (ex: clicking an enemy icon).
+    /// </summary>
+    public void SubmitMoveTarget(Vector3 worldPoint)
+    {
+        if (CurrentState != State.MoveTargeting) return;
+        if (selection.Count == 0) return;
+
+        // Notify UI about the chosen destination (even if the move is queued)
+        OnMoveTargetChosen?.Invoke(selection, worldPoint);
+
+        if (queueMovesInCommandMode && CommandQueue.Instance != null)
+            CommandQueue.Instance.EnqueueMove(selection, worldPoint);
+        else
+            OnMoveRequested?.Invoke(selection, worldPoint);
+
+        if (MoveDestinationMarkerSystem.Instance != null)
+            MoveDestinationMarkerSystem.Instance.PlaceFor(selection.ToArray(), worldPoint);
+
+        if (!keepSelectionAfterMove)
+            ClearSelectionInternal();
+
+        // Always leave targeting mode after confirming the move.
+        // We return to AwaitSelection so other UIs don't immediately pop the panel back up.
+        SetState(State.AwaitSelection);
+        buttonsUI?.Refresh(CurrentState, selection.Count);
+    }
+
+
+    /// <summary>
+    /// Confirm a MOVE target as a FOLLOW order (dynamic). Used when clicking an enemy icon while in MoveTargeting.
+    /// The executor will keep updating destinations to the target's current position until the target is destroyed
+    /// or a new order is issued.
+    /// </summary>
+    public void SubmitFollowTarget(GameObject targetUnit)
+    {
+        if (CurrentState != State.MoveTargeting) return;
+        if (selection.Count == 0) return;
+        if (targetUnit == null) return;
+
+        // Place a marker at the target's current projected ground position (visual feedback).
+        Vector3 target = targetUnit.transform.position;
+        Ray downRay = new Ray(target + Vector3.up * 50f, Vector3.down);
+        if (Physics.Raycast(downRay, out RaycastHit hit, 200f, groundMask))
+            target = hit.point;
+
+        OnMoveTargetChosen?.Invoke(selection, target);
+
+        // Follow is not queued (for now). It is an active order that tracks a moving target.
+        OnFollowRequested?.Invoke(selection, targetUnit);
+
+        if (MoveDestinationMarkerSystem.Instance != null)
+            MoveDestinationMarkerSystem.Instance.PlaceFor(selection.ToArray(), target);
+
+        if (!keepSelectionAfterMove)
+            ClearSelectionInternal();
+
+        // Leave targeting mode after confirming.
+        SetState(State.AwaitSelection);
+        buttonsUI?.Refresh(CurrentState, selection.Count);
+    }
+
 
     // ---------- buttons ----------
     public void ArmMoveFromCurrentSelection()
