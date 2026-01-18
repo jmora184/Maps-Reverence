@@ -438,6 +438,11 @@ public class CommandStateMachine : MonoBehaviour
         if (CurrentState != State.MoveTargeting) return;
         if (selection.Count == 0) return;
 
+        // If we are issuing a NON-attack command (move), clear any committed attack indicators
+        // for these units so counts don't linger on enemies.
+        if (AttackTargetIndicatorSystem.Instance != null)
+            AttackTargetIndicatorSystem.Instance.UnregisterAttackers(selection);
+
         // Notify UI about the chosen destination (even if the move is queued)
         OnMoveTargetChosen?.Invoke(selection, worldPoint);
 

@@ -1,4 +1,3 @@
-
 using System;
 using System.Collections.Generic;
 using System.Reflection;
@@ -58,6 +57,19 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
     [Tooltip("Uniform scale applied to spawned markers (1 = prefab scale).")]
     public float markerScale = 1f;
 
+    [Header("Labels")]
+    [Tooltip("If true, pins will set a label (via DestinationMarkerLabel) to show who the pin belongs to.")]
+    public bool showLabels = true;
+
+    [Tooltip("If true, the hover marker will show a label too.")]
+    public bool labelHoverMarker = false;
+
+    [Tooltip("Text to use for the hover marker label (only if labelHoverMarker is true).")]
+    public string hoverMarkerLabelText = "MOVE";
+
+    [Tooltip("If true, when the selected unit(s) belong to a Team, we will prefer planting a single TEAM pin and label it with the Team name (instead of labeling as Ally 7/Ally 8).")]
+    public bool preferTeamPinsForTeamedUnits = true;
+
     // ---- internals ----
     private SpriteRenderer hoverMarker;
 
@@ -107,6 +119,9 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
             hoverMarker.gameObject.SetActive(false);
             hoverMarker.transform.rotation = Quaternion.Euler(flatEuler);
             ApplyMarkerScale(hoverMarker.transform);
+
+            if (showLabels)
+                ApplyLabel(hoverMarker, labelHoverMarker ? hoverMarkerLabelText : string.Empty);
         }
         else
         {
@@ -137,6 +152,26 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
         if (t == null) return;
         if (markerScale <= 0f) markerScale = 1f;
         t.localScale = Vector3.one * markerScale;
+    }
+
+    private void ApplyLabel(SpriteRenderer marker, string text)
+    {
+        if (!showLabels || marker == null) return;
+
+        // Label component can be on the root or a child.
+        var label = marker.GetComponent<DestinationMarkerLabel>();
+        if (label == null)
+            label = marker.GetComponentInChildren<DestinationMarkerLabel>(true);
+
+        if (label != null)
+            label.SetText(text);
+    }
+
+    private Team GetTeamOf(Transform unit)
+    {
+        if (unit == null) return null;
+        if (TeamManager.Instance == null) return null;
+        return TeamManager.Instance.GetTeamOf(unit);
     }
 
     private void Update()
@@ -187,7 +222,41 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
         }
     }
 
-    // (single helper overload is enough)
+    private static string TryGetTeamString(Team team)
+    {
+        if (team == null) return "Team";
+
+        try
+        {
+            var t = team.GetType();
+
+            // Common patterns: team.Name / team.DisplayName
+            var pName = t.GetProperty("Name", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (pName != null && pName.PropertyType == typeof(string))
+            {
+                var val = pName.GetValue(team) as string;
+                if (!string.IsNullOrWhiteSpace(val)) return val;
+            }
+
+            var pDisplay = t.GetProperty("DisplayName", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (pDisplay != null && pDisplay.PropertyType == typeof(string))
+            {
+                var val = pDisplay.GetValue(team) as string;
+                if (!string.IsNullOrWhiteSpace(val)) return val;
+            }
+
+            // Field fallback
+            var fName = t.GetField("Name", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (fName != null && fName.FieldType == typeof(string))
+            {
+                var val = fName.GetValue(team) as string;
+                if (!string.IsNullOrWhiteSpace(val)) return val;
+            }
+        }
+        catch { }
+
+        return $"Team {team.Id}";
+    }
 
     // Called by CommandStateMachine when a TEAM move is confirmed
     public void PlaceForTeam(Team team, Vector3 destination)
@@ -222,6 +291,8 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
 
         pinned.marker.transform.position = destination + Vector3.up * heightOffset;
         pinned.marker.gameObject.SetActive(true);
+
+        ApplyLabel(pinned.marker, TryGetTeamString(team));
     }
 
     /// <summary>
@@ -268,12 +339,70 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
         }
     }
 
+
+    private bool TryGetCommonTeam(GameObject[] units, out Team team)
+    {
+        team = null;
+        if (units == null || units.Length == 0) return false;
+
+        for (int i = 0; i < units.Length; i++)
+        {
+            var go = units[i];
+            if (go == null) return false;
+
+            var t = go.transform;
+            if (t == null) return false;
+
+            var thisTeam = GetTeamOf(t);
+            if (thisTeam == null) return false;
+
+            if (team == null)
+            {
+                team = thisTeam;
+            }
+            else
+            {
+                // Prefer reference equality, but also allow same Id.
+                if (!ReferenceEquals(team, thisTeam) && team.Id != thisTeam.Id)
+                    return false;
+            }
+        }
+
+        return team != null;
+    }
+
     // Called by CommandStateMachine when a move is confirmed
     public void PlaceFor(GameObject[] units, Vector3 destination)
     {
         if (units == null || units.Length == 0 || markerPrefab == null) return;
 
         EnsureMarkerParent();
+
+        // If the user selected the TEAM star (or a team selection), the state machine may pass
+        // one or more member GameObjects here. That can cause the pin label to alternate
+        // between "Ally 7" and "Ally 8" depending on which member is first.
+        // Prefer a single TEAM pin with the Team name in that case.
+        if (preferTeamPinsForTeamedUnits && TryGetCommonTeam(units, out Team commonTeam) && commonTeam != null)
+        {
+            bool treatAsTeam = units.Length > 1;
+
+            // If only one unit was passed but that unit belongs to a multi-member team, still treat as Team.
+            try
+            {
+                if (!treatAsTeam && commonTeam.Members != null && commonTeam.Members.Count > 1)
+                    treatAsTeam = true;
+            }
+            catch { }
+
+            if (treatAsTeam)
+            {
+                PlaceForTeam(commonTeam, destination);
+
+                // Clear any per-unit pins for these members to avoid clutter/confusion.
+                ClearForUnits(units);
+                return;
+            }
+        }
 
         foreach (var go in units)
         {
@@ -307,6 +436,8 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
 
             pinned.marker.transform.position = destination + Vector3.up * heightOffset;
             pinned.marker.gameObject.SetActive(true);
+
+            ApplyLabel(pinned.marker, t != null ? t.name : "Unit");
         }
     }
 
@@ -332,6 +463,9 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
         {
             hoverMarker.gameObject.SetActive(true);
             hoverMarker.transform.position = hit.point + Vector3.up * heightOffset;
+
+            if (showLabels)
+                ApplyLabel(hoverMarker, labelHoverMarker ? hoverMarkerLabelText : string.Empty);
         }
         else
         {
@@ -356,6 +490,9 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
             }
 
             pinned.marker.transform.position = pinned.destination + Vector3.up * heightOffset;
+
+            // Keep label correct (in case names change at runtime)
+            ApplyLabel(pinned.marker, unit.name);
 
             if (!hidePinnedWhenArrived)
             {
@@ -408,6 +545,9 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
             }
 
             pinned.marker.transform.position = pinned.destination + Vector3.up * heightOffset;
+
+            // Keep label correct
+            ApplyLabel(pinned.marker, TryGetTeamString(pinned.team));
 
             // Team pins have their own lifetime rule (separate from single-unit pins).
             if (!hideTeamPinnedWhenArrived)

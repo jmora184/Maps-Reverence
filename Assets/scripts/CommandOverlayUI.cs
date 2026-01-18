@@ -131,6 +131,17 @@ public class CommandOverlayUI : MonoBehaviour
     // Track state transitions (for move confirm suppression in setups that return to UnitSelected)
     private CommandStateMachine.State lastSmState = CommandStateMachine.State.AwaitSelection;
 
+    // Exposed for UI indicator systems (attack targeting, etc.)
+    public bool TryGetEnemyIcon(Transform enemy, out RectTransform icon)
+    {
+        if (enemy != null && enemyIconByUnit != null && enemyIconByUnit.TryGetValue(enemy, out icon))
+            return true;
+
+        icon = null;
+        return false;
+    }
+
+
     private void Awake()
     {
         Instance = this;
@@ -383,8 +394,10 @@ public class CommandOverlayUI : MonoBehaviour
 
             enemyIconByUnit[go.transform] = icon;
 
+            AttackTargetIndicatorSystem.Instance?.RegisterEnemyIcon(go.transform, icon);
+
             // When MoveTargeting, swap hover marker sprite to attack while hovering an enemy icon.
-            HookEnemyHoverEvents(icon);
+            HookEnemyHoverEvents(icon, go.transform);
 
             // Flank bonus hint: bind this enemy transform to the hover-hint component (if present on the prefab).
             icon.GetComponent<EnemyFlankBonusHoverHint>()?.Bind(go.transform);
@@ -416,6 +429,7 @@ public class CommandOverlayUI : MonoBehaviour
                     // submit a move target at that enemy's position.
                     if (sm != null && sm.CurrentState == CommandStateMachine.State.MoveTargeting)
                     {
+                        AttackTargetIndicatorSystem.Instance?.RegisterCommittedAttack(sm.CurrentSelection, captured);
                         sm.SubmitFollowTarget(captured.gameObject);
                         return;
                     }
@@ -435,7 +449,7 @@ public class CommandOverlayUI : MonoBehaviour
 
     // -------------------- ENEMY HOVER (attack icon preview) --------------------
 
-    private void HookEnemyHoverEvents(RectTransform enemyIcon)
+    private void HookEnemyHoverEvents(RectTransform enemyIcon, Transform enemyTarget)
     {
         if (enemyIcon == null) return;
 
@@ -460,6 +474,9 @@ public class CommandOverlayUI : MonoBehaviour
             if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
             if (hoverCursorIcon != null && sm != null && sm.CurrentState == CommandStateMachine.State.MoveTargeting)
                 hoverCursorIcon.SetOverEnemy(true);
+            int _previewCount = 1;
+            if (sm != null && sm.CurrentSelection != null) _previewCount = Mathf.Max(1, sm.CurrentSelection.Count);
+            AttackTargetIndicatorSystem.Instance?.SetPreview(enemyTarget, _previewCount);
         });
         trigger.triggers.Add(enter);
 
@@ -470,6 +487,7 @@ public class CommandOverlayUI : MonoBehaviour
             if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
             if (hoverCursorIcon != null && sm != null && sm.CurrentState == CommandStateMachine.State.MoveTargeting)
                 hoverCursorIcon.SetOverEnemy(false);
+            AttackTargetIndicatorSystem.Instance?.ClearPreview(enemyTarget);
         });
         trigger.triggers.Add(exit);
     }
