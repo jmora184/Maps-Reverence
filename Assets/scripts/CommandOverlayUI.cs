@@ -91,14 +91,8 @@ public class CommandOverlayUI : MonoBehaviour
 
     private readonly Dictionary<int, float> teamStarBobSeedByTeamId = new();
 
-    [Header("Team Star Snap To Move Destination")]
-    [Tooltip("If true, when issuing a move order for a team, the team star jumps to the chosen destination immediately in command view.")]
-    public bool teamStarSnapToIssuedMoveDestination = true;
-    [Tooltip("How close the team anchor must get to the last issued destination before the star snaps back onto the anchor (world units).")]
-    public float teamStarSnapClearDistance = 1.0f;
-
-    // Last issued move destination per team (world position on ground). When set, star renders at this point until cleared.
-    private readonly Dictionary<int, Vector3> teamStarForcedWorldPosByTeamId = new();
+    // NOTE: Team destination visuals are handled by MoveDestinationMarkerSystem now (single pin per team).
+    // The team star remains anchored to the team's Anchor member.
 
     [Header("Button Panel (optional)")]
     public RectTransform commandButtonPanel;
@@ -166,9 +160,11 @@ public class CommandOverlayUI : MonoBehaviour
             sm.OnAddRequested += HandleAddRequested_ForButtonPanel;
             sm.OnSelectionChanged += HandleSelectionChanged_ForButtonPanel;
 
+            sm.OnMoveTargetChosen += HandleMoveTargetChosen_SuppressPanel;
+
             // Snap star on move target chosen (works for queued or immediate moves)
-            sm.OnMoveRequested += HandleMoveRequested_SnapTeamStar;
-            sm.OnMoveTargetChosen += HandleMoveRequested_SnapTeamStar;
+            // Team destination visuals are handled by MoveDestinationMarkerSystem (single team pin)
+            // and DirectionArrowPreview (optional team arrow when selected).
         }
 
         AutoFindHintToastUI();
@@ -184,8 +180,9 @@ public class CommandOverlayUI : MonoBehaviour
             sm.OnAddRequested -= HandleAddRequested_ForButtonPanel;
             sm.OnSelectionChanged -= HandleSelectionChanged_ForButtonPanel;
 
-            sm.OnMoveRequested -= HandleMoveRequested_SnapTeamStar;
-            sm.OnMoveTargetChosen -= HandleMoveRequested_SnapTeamStar;
+            sm.OnMoveTargetChosen -= HandleMoveTargetChosen_SuppressPanel;
+
+            // (no team-star snap subscriptions)
         }
     }
 
@@ -892,18 +889,11 @@ public class CommandOverlayUI : MonoBehaviour
                     teamStarBobSeedByTeamId[team.Id] = seed;
                 }
 
-                // forced move destination?
-                if (teamStarSnapToIssuedMoveDestination && teamStarForcedWorldPosByTeamId.TryGetValue(team.Id, out var forcedPos))
-                {
-                    UpdateWorldAnchoredUI_Point(star, forcedPos, teamStarWorldHeight, uiCam);
-
-                    if (!IsTeamStillMovingToward(team, forcedPos))
-                        teamStarForcedWorldPosByTeamId.Remove(team.Id);
-                }
-                else
-                {
-                    UpdateWorldAnchoredUI(star, anchor, teamStarWorldHeight, uiCam);
-                }
+                // Team star stays anchored to the team's Anchor ally (the "second ally clicked" in your join flow).
+                // The destination is represented by the pinned destination marker + optional arrow.
+                // (We are NOT snapping the star to the issued move destination.)
+                Vector3 teamPos = anchor.position;
+                UpdateWorldAnchoredUI_Point(star, teamPos, teamStarWorldHeight, uiCam);
 
                 if (teamStarBobEnabled)
                 {
@@ -937,7 +927,6 @@ public class CommandOverlayUI : MonoBehaviour
                 Destroy(rt.gameObject);
             teamStarByTeamId.Remove(id);
             teamStarBobSeedByTeamId.Remove(id);
-            teamStarForcedWorldPosByTeamId.Remove(id);
         }
     }
 
@@ -1205,56 +1194,16 @@ public class CommandOverlayUI : MonoBehaviour
         commandButtonPanel.anchoredPosition = lp + buttonPanelScreenOffset;
     }
 
-    // -------------------- TEAM STAR SNAP --------------------
+    // -------------------- MOVE TARGET CHOSEN (PANEL SUPPRESSION) --------------------
 
-    private void HandleMoveRequested_SnapTeamStar(IReadOnlyList<GameObject> selection, Vector3 destination)
+    // Keep the button panel from instantly popping back up after a move click.
+    private void HandleMoveTargetChosen_SuppressPanel(IReadOnlyList<GameObject> selection, Vector3 destination)
     {
-        if (!teamStarSnapToIssuedMoveDestination) return;
-        if (selection == null || selection.Count == 0) return;
-        if (TeamManager.Instance == null) return;
-
-        Transform primary = selection[0] != null ? selection[0].transform : null;
-        if (primary == null) return;
-
-        Team team = TeamManager.Instance.GetTeamOf(primary);
-        if (team == null) return;
-
-        teamStarForcedWorldPosByTeamId[team.Id] = destination;
-
-        // Also suppress the panel until selection changes (so panel doesn't pop back immediately after click)
         suppressButtonPanelAfterMoveTargetChosen = true;
-        suppressButtonPanelPrimarySelectionRef_Move = sm != null ? sm.PrimarySelected : selection[0];
-        if (commandButtonPanel != null) commandButtonPanel.gameObject.SetActive(false);
-    }
+        suppressButtonPanelPrimarySelectionRef_Move = sm != null ? sm.PrimarySelected : (selection != null && selection.Count > 0 ? selection[0] : null);
 
-    private bool IsTeamStillMovingToward(Team team, Vector3 destination)
-    {
-        if (team == null) return false;
-
-        Transform anchor = team.Anchor != null ? team.Anchor : (team.Members.Count > 0 ? team.Members[0] : null);
-        if (anchor == null) return false;
-
-        if (Vector3.Distance(anchor.position, destination) <= Mathf.Max(0.1f, teamStarSnapClearDistance))
-            return false;
-
-        var agent = anchor.GetComponent<NavMeshAgent>();
-        if (agent == null) agent = anchor.GetComponentInChildren<NavMeshAgent>();
-        if (agent != null && agent.isActiveAndEnabled)
-        {
-            if (agent.pathPending) return true;
-            if (agent.hasPath && agent.remainingDistance > Mathf.Max(agent.stoppingDistance, 0.05f) + 0.2f)
-                return true;
-        }
-
-        for (int i = 0; i < team.Members.Count; i++)
-        {
-            var m = team.Members[i];
-            if (m == null) continue;
-            if (Vector3.Distance(m.position, destination) > Mathf.Max(0.1f, teamStarSnapClearDistance) + 0.25f)
-                return true;
-        }
-
-        return false;
+        if (commandButtonPanel != null)
+            commandButtonPanel.gameObject.SetActive(false);
     }
 
     // -------------------- PANEL EVENTS --------------------
@@ -1300,6 +1249,30 @@ public class CommandOverlayUI : MonoBehaviour
         teamStarByTeamId.Clear();
     }
     // --- Team clustering helpers (used for pinned team logic) ---
+
+    private Vector3 ComputeTeamCentroid(Team team, Vector3 fallback)
+    {
+        if (team == null || team.Members == null || team.Members.Count == 0)
+            return fallback;
+
+        Vector3 sum = Vector3.zero;
+        int count = 0;
+
+        for (int i = 0; i < team.Members.Count; i++)
+        {
+            var m = team.Members[i];
+            if (m == null) continue;
+            sum += m.position;
+            count++;
+        }
+
+        if (count <= 0)
+            return fallback;
+
+        return sum / count;
+    }
+
+
 
     private Vector3 ComputeTeamMainClusterCenter(Team team, out int clusterCount)
     {

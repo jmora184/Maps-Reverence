@@ -70,6 +70,82 @@ public class CommandStateMachine : MonoBehaviour
     public event Action<IReadOnlyList<GameObject>> OnSplitRequested;
     public event Action<IReadOnlyList<GameObject>> OnSelectionChanged;
 
+    // ---- Team pin helpers ----
+    // We place Team destination pins as either:
+    //  1) a dedicated Team pin (PlaceForTeam / ClearForTeam)
+    //  2) OR (older behavior) a per-member pin (PlaceFor / ClearForUnits).
+    //
+    // To be safe, whenever a Team commits a new non-move action (Join, etc.),
+    // we clear BOTH the Team pin and any per-member pins that might exist.
+
+    private void ClearAllPinsForTeam(Team team)
+    {
+        if (team == null) return;
+        if (MoveDestinationMarkerSystem.Instance == null) return;
+
+        // Clear dedicated Team pin (if used)
+        MoveDestinationMarkerSystem.Instance.ClearForTeam(team);
+
+        // Also clear any per-member pins (if selection-based PlaceFor was used)
+        if (team.Members == null || team.Members.Count == 0) return;
+
+        var gos = new List<GameObject>(team.Members.Count);
+        for (int i = 0; i < team.Members.Count; i++)
+        {
+            var m = team.Members[i];
+            if (m == null) continue;
+            gos.Add(m.gameObject);
+        }
+
+        if (gos.Count > 0)
+            MoveDestinationMarkerSystem.Instance.ClearForUnits(gos.ToArray());
+    }
+
+    private void ClearTeamPinsForSelection(IReadOnlyList<GameObject> units)
+    {
+        if (units == null || units.Count == 0) return;
+        if (MoveDestinationMarkerSystem.Instance == null) return;
+        if (TeamManager.Instance == null) return;
+
+        // Clear each affected team's pins (dedupe by team Id)
+        HashSet<int> cleared = null;
+        for (int i = 0; i < units.Count; i++)
+        {
+            var go = units[i];
+            if (go == null) continue;
+
+            var team = TeamManager.Instance.GetTeamOf(go.transform);
+            if (team == null) continue;
+
+            cleared ??= new HashSet<int>();
+            if (!cleared.Add(team.Id)) continue;
+
+            ClearAllPinsForTeam(team);
+        }
+    }
+
+    private void ClearTeamPinsForTransforms(params Transform[] units)
+    {
+        if (units == null || units.Length == 0) return;
+        if (MoveDestinationMarkerSystem.Instance == null) return;
+        if (TeamManager.Instance == null) return;
+
+        HashSet<int> cleared = null;
+        for (int i = 0; i < units.Length; i++)
+        {
+            var tr = units[i];
+            if (tr == null) continue;
+
+            var team = TeamManager.Instance.GetTeamOf(tr);
+            if (team == null) continue;
+
+            cleared ??= new HashSet<int>();
+            if (!cleared.Add(team.Id)) continue;
+
+            ClearAllPinsForTeam(team);
+        }
+    }
+
     private void Awake()
     {
         if (buttonsUI == null) buttonsUI = FindObjectOfType<CommandModeButtonsUI>();
@@ -147,6 +223,15 @@ public class CommandStateMachine : MonoBehaviour
                 if (TryGetClickedUnit(r, out GameObject clicked))
                 {
                     bool wasJoin = JoinArmed;
+
+                    // ✅ If we are executing a JOIN (team action), clear any existing team pin(s)
+                    // so the destination marker doesn't linger after a different action is committed.
+                    if (wasJoin)
+                    {
+                        // JoinSource = the unit that armed Join (often the team anchor)
+                        ClearTeamPinsForTransforms(JoinSource != null ? JoinSource.transform : null,
+                                                  clicked != null ? clicked.transform : null);
+                    }
 
                     OnAddRequested?.Invoke(selection, clicked);
 
@@ -315,6 +400,13 @@ public class CommandStateMachine : MonoBehaviour
         if (CurrentState == State.AddTargeting)
         {
             bool wasJoin = JoinArmed;
+
+            // ✅ If we are executing a JOIN (team action), clear any existing team pin(s)
+            if (wasJoin)
+            {
+                ClearTeamPinsForTransforms(JoinSource != null ? JoinSource.transform : null,
+                                          clickedUnit != null ? clickedUnit.transform : null);
+            }
 
             OnAddRequested?.Invoke(selection, clickedUnit);
 

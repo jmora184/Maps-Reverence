@@ -18,16 +18,6 @@ public class CommandExecutor : MonoBehaviour
     [Header("Move Settings")]
     public bool useFormation = true;
     public float formationSpacing = 1.6f;
-
-
-    [Header("Follow (Move-to-Target)")]
-    [Tooltip("How often to refresh destinations while following a moving target. Lower = tighter follow, higher = fewer path recalcs.")]
-    public float followUpdateInterval = 0.15f;
-
-    // Agent -> follow coroutine + target + optional offset (for keeping formation while following)
-    private readonly Dictionary<NavMeshAgent, Coroutine> followRoutines = new Dictionary<NavMeshAgent, Coroutine>();
-    private readonly Dictionary<NavMeshAgent, Transform> followTargets = new Dictionary<NavMeshAgent, Transform>();
-    private readonly Dictionary<NavMeshAgent, Vector3> followOffsets = new Dictionary<NavMeshAgent, Vector3>();
     public int formationColumns = 4;
 
     [Header("Team Move Settings")]
@@ -37,7 +27,9 @@ public class CommandExecutor : MonoBehaviour
     [Tooltip("If true, agents are ordered deterministically before formation is applied (prevents formation 'shuffling').")]
     public bool stableFormationOrdering = true;
 
-
+    [Header("Follow Settings")]
+    [Tooltip("If true, FOLLOW orders given to any team member will apply to the entire team.")]
+    public bool expandFollowToWholeTeam = true;
 
     [Header("Move Hints (optional)")]
     [Tooltip("Show a hint when a move order is issued.")]
@@ -48,7 +40,6 @@ public class CommandExecutor : MonoBehaviour
 
     [Header("Join Settings")]
     public float joinArriveThreshold = 0.35f; // how close leader must get to target to be "arrived"
-
 
     // -------------------- JOIN ROUTE (for DirectionArrowPreview) --------------------
     // DirectionArrowPreview.cs looks for these names (via reflection) to show an arrow while a join leader is in-route.
@@ -84,8 +75,6 @@ public class CommandExecutor : MonoBehaviour
             sm.OnAddRequested -= HandleAddRequested;
             sm.OnSplitRequested -= HandleSplitRequested;
         }
-
-        StopAllFollows();
     }
 
     private void HandleMoveRequested(IReadOnlyList<GameObject> selection, Vector3 destination)
@@ -95,10 +84,8 @@ public class CommandExecutor : MonoBehaviour
 
     private void HandleFollowRequested(IReadOnlyList<GameObject> selection, GameObject targetUnit)
     {
-        if (targetUnit == null) return;
-        ExecuteFollowOrder(selection, targetUnit.transform);
+        ExecuteFollowOrder(selection, targetUnit);
     }
-
 
     // ✅ Needed by CommandQueue.FlushMoves(executor)
     public void ExecuteMoveOrder(IReadOnlyList<GameObject> selection, Vector3 destination)
@@ -108,17 +95,14 @@ public class CommandExecutor : MonoBehaviour
         // ✅ Team expansion (team members move together)
         List<GameObject> expanded = ExpandSelectionForTeams(selection);
 
+        // IMPORTANT: a point-move replaces any "follow" travel targets.
+        ClearTravelFollowTargets(expanded);
 
         // Hint: team / unit move feedback
         ShowMoveHint(expanded);
 
         List<NavMeshAgent> agents = GatherAgents(expanded);
         if (agents.Count == 0) return;
-
-
-        // If any of these units were following a target, stop that follow now.
-        for (int i = 0; i < agents.Count; i++)
-            StopFollow(agents[i]);
 
         // Optional stable ordering so formation offsets don't shuffle
         if (stableFormationOrdering && agents.Count > 1)
@@ -181,151 +165,72 @@ public class CommandExecutor : MonoBehaviour
         }
     }
 
-
-
-    // -------------------- FOLLOW (move-to-target) --------------------
-
-    public void ExecuteFollowOrder(IReadOnlyList<GameObject> selection, Transform target)
+    /// <summary>
+    /// Follow a moving target (enemy) by setting each selected ally's AllyController.target.
+    /// The AllyController will update the NavMesh destination toward the target's current position.
+    /// </summary>
+    public void ExecuteFollowOrder(IReadOnlyList<GameObject> selection, GameObject targetUnit)
     {
         if (selection == null || selection.Count == 0) return;
-        if (target == null) return;
+        if (targetUnit == null) return;
 
-        // ✅ Team expansion (team members follow together)
-        List<GameObject> expanded = ExpandSelectionForTeams(selection);
+        // Expand selection to whole team if requested
+        List<GameObject> expanded = (expandFollowToWholeTeam ? ExpandSelectionForTeams(selection) : UniqueNonNull(selection));
 
-        List<NavMeshAgent> agents = GatherAgents(expanded);
-        if (agents.Count == 0) return;
+        Transform targetT = targetUnit != null ? targetUnit.transform : null;
+        if (targetT == null) return;
 
-        // Optional stable ordering so formation offsets don't shuffle
-        if (stableFormationOrdering && agents.Count > 1)
+        // If a follow starts, it should cancel any join-route coroutine (so arrows/state don't lie).
+        // (Optional safety; doesn't change join team membership.)
+        if (joinMoveRoutine != null)
         {
-            agents.Sort((a, b) =>
-            {
-                if (a == null && b == null) return 0;
-                if (a == null) return 1;
-                if (b == null) return -1;
-
-                int ida = a.transform.GetInstanceID();
-                int idb = b.transform.GetInstanceID();
-                return ida.CompareTo(idb);
-            });
+            StopCoroutine(joinMoveRoutine);
+            joinMoveRoutine = null;
+            ClearJoinRouteState();
         }
 
-        // Compute per-agent offsets for follow (so groups keep formation around the target)
-        // If formation is disabled, offsets are zero.
-        List<Vector3> offsets = new List<Vector3>(agents.Count);
-        if (!useFormation || agents.Count == 1)
+        // Set travel follow target on allies, and kick the agent once.
+        for (int i = 0; i < expanded.Count; i++)
         {
-            for (int i = 0; i < agents.Count; i++)
-                offsets.Add(Vector3.zero);
-        }
-        else
-        {
-            int cols = Mathf.Max(1, formationColumns);
-            float spacing = Mathf.Max(0.1f, formationSpacing);
+            var go = expanded[i];
+            if (go == null) continue;
+            if (!go.CompareTag("Ally")) continue;
 
-            int count = agents.Count;
-            int rows = Mathf.CeilToInt(count / (float)cols);
+            var ally = go.GetComponent<AllyController>();
+            if (ally != null)
+                ally.target = targetT;
 
-            float width = (cols - 1) * spacing;
-            float height = (rows - 1) * spacing;
-
-            for (int i = 0; i < agents.Count; i++)
+            var agent = go.GetComponent<NavMeshAgent>();
+            if (agent == null) agent = go.GetComponentInChildren<NavMeshAgent>();
+            if (agent != null && agent.isActiveAndEnabled)
             {
-                int row = i / cols;
-                int col = i % cols;
-
-                float x = (col * spacing) - (width * 0.5f);
-                float z = (row * spacing) - (height * 0.5f);
-                offsets.Add(new Vector3(x, 0f, z));
+                agent.isStopped = false;
+                agent.SetDestination(targetT.position);
             }
         }
 
-        for (int i = 0; i < agents.Count; i++)
+        if (showMoveHints)
         {
-            NavMeshAgent agent = agents[i];
-            if (agent == null) continue;
-
-            Vector3 offset = (i >= 0 && i < offsets.Count) ? offsets[i] : Vector3.zero;
-
-            StartFollow(agent, target, offset);
+            // Keep it simple; reuse moveHintDuration.
+            HintSystem.Show("Following target.", moveHintDuration);
         }
     }
 
-    private void StartFollow(NavMeshAgent agent, Transform target, Vector3 offset)
+    private void ClearTravelFollowTargets(IReadOnlyList<GameObject> expanded)
     {
-        if (agent == null) return;
+        if (expanded == null) return;
 
-        // Replace any existing follow
-        StopFollow(agent);
-
-        if (target == null) return;
-
-        followTargets[agent] = target;
-        followOffsets[agent] = offset;
-        followRoutines[agent] = StartCoroutine(FollowRoutine(agent));
-    }
-
-    private void StopFollow(NavMeshAgent agent)
-    {
-        if (agent == null) return;
-
-        if (followRoutines.TryGetValue(agent, out Coroutine routine) && routine != null)
-            StopCoroutine(routine);
-
-        followRoutines.Remove(agent);
-        followTargets.Remove(agent);
-        followOffsets.Remove(agent);
-    }
-
-    private void StopAllFollows()
-    {
-        // Stop coroutines first
-        foreach (var kv in followRoutines)
+        for (int i = 0; i < expanded.Count; i++)
         {
-            if (kv.Value != null)
-                StopCoroutine(kv.Value);
+            var go = expanded[i];
+            if (go == null) continue;
+            if (!go.CompareTag("Ally")) continue;
+
+            var ally = go.GetComponent<AllyController>();
+            if (ally != null && ally.target != null)
+                ally.target = null;
         }
-
-        followRoutines.Clear();
-        followTargets.Clear();
-        followOffsets.Clear();
     }
-
-    private IEnumerator FollowRoutine(NavMeshAgent agent)
-    {
-        // Reuse wait object to reduce GC
-        WaitForSeconds wait = new WaitForSeconds(Mathf.Max(0.02f, followUpdateInterval));
-
-        while (agent != null)
-        {
-            if (!followTargets.TryGetValue(agent, out Transform target) || target == null)
-                break;
-
-            // If the target gets disabled, treat it as gone.
-            if (!target.gameObject.activeInHierarchy)
-                break;
-
-            Vector3 offset = Vector3.zero;
-            followOffsets.TryGetValue(agent, out offset);
-
-            Vector3 desired = target.position + offset;
-
-            // Snap to navmesh if possible
-            if (NavMesh.SamplePosition(desired, out NavMeshHit hit, 2.5f, NavMesh.AllAreas))
-                desired = hit.position;
-
-            agent.isStopped = false;
-            agent.SetDestination(desired);
-
-            yield return wait;
-        }
-
-        // Cleanup (agent may be null if destroyed)
-        if (agent != null)
-            StopFollow(agent);
-    }
-
 
     private bool TryGetSingleTeamForSelection(IReadOnlyList<GameObject> expandedSelection, out Team team)
     {
@@ -536,15 +441,38 @@ public class CommandExecutor : MonoBehaviour
         agent.isStopped = false;
         agent.SetDestination(targetT.position);
 
+        // If the leader has an AllyController, set its 'target' so it will keep following a moving join target.
+        // This also allows resuming the join movement after temporary combat engagement.
+        var leaderAlly = leaderGO.GetComponent<AllyController>();
+        if (leaderAlly != null)
+            leaderAlly.target = targetT;
+
         float threshold = Mathf.Max(joinArriveThreshold, agent.stoppingDistance + 0.05f);
+
+        float joinFollowRefreshTimer = 0f;
 
         while (leaderGO != null && targetGO != null)
         {
             float d = Vector3.Distance(leaderT.position, targetT.position);
             if (d <= threshold) break;
 
+            // If we don't have AllyController driving follow, refresh the destination periodically.
+            if (leaderAlly == null)
+            {
+                joinFollowRefreshTimer -= Time.deltaTime;
+                if (joinFollowRefreshTimer <= 0f)
+                {
+                    agent.SetDestination(targetT.position);
+                    joinFollowRefreshTimer = 0.15f;
+                }
+            }
+
             yield return null;
         }
+
+        // Stop following the join target once we arrived or the join ended.
+        if (leaderAlly != null && leaderAlly.target == targetT)
+            leaderAlly.target = null;
 
         // Clear marker
         if (marker != null)

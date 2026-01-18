@@ -1,6 +1,9 @@
-// 1/4/2026 AI-Tag
+﻿// 1/4/2026 AI-Tag
 // This was created with the help of Assistant, a Unity Artificial Intelligence product.
 
+using System;
+using System.Collections;
+using System.Reflection;
 using UnityEngine;
 using UnityEngine.AI;
 
@@ -8,9 +11,12 @@ public class AllyController : MonoBehaviour
 {
     [Header("Movement")]
     public float moveSpeed;
+    [Tooltip("If target is set (e.g., joining a team), we will keep updating destination to follow it.")]
+    public float travelFollowUpdateInterval = 0.15f;
     public Rigidbody theRB;
-    public Transform target; // (unused legacy)
+    public Transform target; // (used for dynamic travel follow, e.g., join in-route)
     private bool chasing;
+    private float travelFollowTimer;
     public float distanceToChase = 10f, distanceToLose = 15f, distanceToStop = 2f;
     public NavMeshAgent agent;
 
@@ -29,12 +35,15 @@ public class AllyController : MonoBehaviour
     // Pinned state (v1 driven by 'chasing')
     private AllyPinnedStatus pinnedStatus;
 
-    // NEW: track one enemy target so we don't fight every enemy in the scene at once
+    // Track one enemy target so we don't fight every enemy in the scene at once
     private Transform currentEnemy;
 
-    // NEW: remember where we were going before we got pulled into combat
+    // Remember where we were going before we got pulled into combat
+    // NOTE: for TEAM moves, the "current" destination can change while we are fighting.
+    // So we prefer to resume using the latest pinned destination from MoveDestinationMarkerSystem when available.
     private Vector3 resumeDestination;
     private bool hasResumeDestination;
+    private bool resumeWasFollowing;
 
     private void Awake()
     {
@@ -104,6 +113,17 @@ public class AllyController : MonoBehaviour
             }
         }
 
+        // Follow travel target when not chasing (e.g., join in-route following a moving team)
+        if (!chasing && target != null && agent != null)
+        {
+            travelFollowTimer -= Time.deltaTime;
+            if (travelFollowTimer <= 0f)
+            {
+                agent.SetDestination(target.position);
+                travelFollowTimer = Mathf.Max(0.05f, travelFollowUpdateInterval);
+            }
+        }
+
         // Running animation
         if (soldierAnimator != null && agent != null)
             soldierAnimator.SetBool("isRunning", agent.velocity.magnitude > 0.1f);
@@ -136,6 +156,7 @@ public class AllyController : MonoBehaviour
         if (best != null)
         {
             // entering chase: remember where we were going before combat
+            resumeWasFollowing = (target != null);
             if (agent != null)
             {
                 resumeDestination = agent.destination;
@@ -152,12 +173,119 @@ public class AllyController : MonoBehaviour
         chasing = false;
         currentEnemy = null;
 
-        // Resume the previously commanded destination (e.g., moving to join the team).
-        if (agent != null && hasResumeDestination)
+        // If we were following a dynamic target (e.g., joining a moving team),
+        // don't restore a stale point destination; the follow logic below will resume naturally.
+        if (resumeWasFollowing && target != null)
         {
-            agent.destination = resumeDestination;
+            hasResumeDestination = false;
+            return;
+        }
+
+        if (agent == null) { hasResumeDestination = false; return; }
+
+        // ✅ KEY FIX:
+        // If this unit has a pinned move destination (team/ally move pins), resume to the LATEST pinned destination.
+        // This solves: "ally resumes to original team spot after combat even if team destination was updated".
+        if (TryGetLatestPinnedDestination(out Vector3 pinnedDest))
+        {
+            agent.isStopped = false;
+            agent.SetDestination(pinnedDest);
+            hasResumeDestination = false;
+            return;
+        }
+
+        // Otherwise, resume the previously commanded destination (e.g., move-to-point).
+        if (hasResumeDestination)
+        {
+            agent.isStopped = false;
+            agent.SetDestination(resumeDestination);
             hasResumeDestination = false;
         }
+    }
+
+    private bool TryGetLatestPinnedDestination(out Vector3 dest)
+    {
+        dest = default;
+
+        // If your marker system isn't present, nothing to do.
+        if (MoveDestinationMarkerSystem.Instance == null) return false;
+
+        var inst = MoveDestinationMarkerSystem.Instance;
+        var type = inst.GetType();
+
+        // 1) If a public method exists, prefer it (future-proof).
+        // We try common names without requiring you to change other files.
+        // bool TryGetPinnedDestination(Transform unit, out Vector3 destination)
+        // bool TryGetDestinationFor(Transform unit, out Vector3 destination)
+        try
+        {
+            MethodInfo mi =
+                type.GetMethod("TryGetPinnedDestination", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                ?? type.GetMethod("TryGetDestinationFor", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                ?? type.GetMethod("TryGetPinnedFor", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+            if (mi != null)
+            {
+                object[] args = new object[] { this.transform, dest };
+                // out param comes back in args[1]
+                object okObj = mi.Invoke(inst, args);
+                if (okObj is bool ok && ok)
+                {
+                    if (args[1] is Vector3 v)
+                    {
+                        dest = v;
+                        return true;
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // ignore and fall back to reflection on fields
+        }
+
+        // 2) Fallback: reflect private Dictionary<Transform, Pinned> pinnedByUnit and read pinned.destination
+        try
+        {
+            var field = type.GetField("pinnedByUnit", BindingFlags.Instance | BindingFlags.NonPublic);
+            if (field == null) return false;
+
+            var dictObj = field.GetValue(inst);
+            if (dictObj == null) return false;
+
+            // Dictionary<TKey,TValue> implements non-generic IDictionary
+            var dict = dictObj as IDictionary;
+            if (dict == null) return false;
+
+            if (!dict.Contains(this.transform)) return false;
+
+            var pinned = dict[this.transform];
+            if (pinned == null) return false;
+
+            var pType = pinned.GetType();
+
+            // destination is a field in your current MoveDestinationMarkerSystem.Pinned class
+            var destField = pType.GetField("destination", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (destField != null && destField.FieldType == typeof(Vector3))
+            {
+                dest = (Vector3)destField.GetValue(pinned);
+                return true;
+            }
+
+            // or destination as a property
+            var destProp = pType.GetProperty("destination", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (destProp != null && destProp.PropertyType == typeof(Vector3))
+            {
+                dest = (Vector3)destProp.GetValue(pinned);
+                return true;
+            }
+        }
+        catch
+        {
+            // ignore
+        }
+
+        return false;
     }
 
     private void ChaseAndShoot(Transform enemy)

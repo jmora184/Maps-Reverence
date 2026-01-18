@@ -46,6 +46,13 @@ public class TeamManager : MonoBehaviour
         Instance = this;
     }
 
+    private void ClearTeamPin(Team team)
+    {
+        if (team == null) return;
+        if (MoveDestinationMarkerSystem.Instance != null)
+            MoveDestinationMarkerSystem.Instance.ClearForTeam(team);
+    }
+
     public Team GetTeamOf(Transform unit)
     {
         if (unit == null) return null;
@@ -81,6 +88,7 @@ public class TeamManager : MonoBehaviour
             var created = CreateTeam(leader, joinTarget);
             created.Anchor = joinTarget; // ✅
             ShowTeamHint(created, "Team formed!");
+            ClearTeamPin(created);
             return created;
         }
 
@@ -90,6 +98,7 @@ public class TeamManager : MonoBehaviour
             teamA.Add(joinTarget);
             teamA.Anchor = joinTarget; // ✅
             ShowTeamHint(teamA, "Team updated!");
+            ClearTeamPin(teamA);
             return teamA;
         }
 
@@ -98,6 +107,7 @@ public class TeamManager : MonoBehaviour
             teamB.Add(leader);
             teamB.Anchor = joinTarget; // ✅
             ShowTeamHint(teamB, "Team updated!");
+            ClearTeamPin(teamB);
             return teamB;
         }
 
@@ -111,6 +121,8 @@ public class TeamManager : MonoBehaviour
 
             teamA.Anchor = joinTarget; // ✅
             ShowTeamHint(teamA, "Teams merged!");
+            ClearTeamPin(teamA);
+            ClearTeamPin(teamB);
             return teamA;
         }
 

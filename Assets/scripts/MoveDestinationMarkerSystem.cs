@@ -1,5 +1,7 @@
 
+using System;
 using System.Collections.Generic;
+using System.Reflection;
 using UnityEngine;
 using UnityEngine.AI;
 
@@ -28,14 +30,25 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
     [Tooltip("Hover marker follows mouse only while StateMachine is MoveTargeting.")]
     public bool showHoverWhileMoveTargeting = true;
 
-    [Tooltip("Pinned markers remain until you leave Command Mode.")]
-    public bool keepPinnedUntilExitCommandMode = true;
+    [Tooltip("If true, we clear pinned markers when exiting Command Mode. If false, markers are simply hidden and will reappear when re-entering Command Mode.")]
+    public bool clearPinnedOnExitCommandMode = false;
 
     [Tooltip("If true, pinned markers hide once the unit arrives.")]
     public bool hidePinnedWhenArrived = false;
 
+    [Header("Team pin lifetime")]
+    [Tooltip("Team pins stay visible until a new team order replaces them OR the team arrives at the destination.")]
+    public bool hideTeamPinnedWhenArrived = true;
+
+    [Tooltip("If true, we destroy & forget the Team pin marker on arrival (recommended).")]
+    public bool destroyTeamPinOnArrive = true;
+
     [Tooltip("Arrival threshold (only used if hidePinnedWhenArrived = true).")]
     public float arriveDistance = 0.5f;
+
+    [Header("Team marker")]
+    [Tooltip("Arrival threshold used for Team markers (world units).")]
+    public float teamArriveDistance = 1.0f;
 
     [Header("Placement")]
     public float heightOffset = 0.03f;
@@ -57,6 +70,15 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
     }
 
     private readonly Dictionary<Transform, Pinned> pinnedByUnit = new();
+
+    private class PinnedTeam
+    {
+        public Team team;
+        public SpriteRenderer marker;
+        public Vector3 destination;
+    }
+
+    private readonly Dictionary<int, PinnedTeam> pinnedByTeamId = new();
     private bool lastInCommandMode = true;
 
     private void Awake()
@@ -101,10 +123,11 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
         // Auto-create a holder to keep hierarchy clean.
         var holder = GameObject.Find("MarkerHolder");
         if (holder == null)
-        {
             holder = new GameObject("MarkerHolder");
-            holder.transform.SetParent(transform, false);
-        }
+
+        // IMPORTANT: Keep MarkerHolder at scene root so markers don't inherit movement
+        // from GameManagers / units / cameras that might be parented under something moving.
+        holder.transform.SetParent(null);
 
         markerParent = holder.transform;
     }
@@ -125,16 +148,13 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
         {
             if (hoverMarker != null) hoverMarker.gameObject.SetActive(false);
 
-            // Clear pinned only ONCE when transitioning from command mode -> not command mode.
-            if (keepPinnedUntilExitCommandMode)
-            {
-                if (lastInCommandMode)
-                    ClearAllPinned();
-            }
-            else
-            {
-                HideAllPinned();
-            }
+            // Hide pins while out of Command Mode, but DON'T destroy them.
+            // This makes pins persist across enter/exit Command Mode (your desired behavior).
+            HideAllPinned();
+
+            // Optional: if you really want pins cleared on exit, enable this.
+            if (clearPinnedOnExitCommandMode && lastInCommandMode)
+                ClearAllPinned();
 
             lastInCommandMode = inCommandMode;
             return;
@@ -144,6 +164,108 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
 
         UpdateHoverMarker();
         UpdatePinnedMarkers();
+        UpdatePinnedTeamMarkers();
+    }
+
+    // ---- Team method compatibility (avoids hard dependency on Team API) ----
+
+    private static bool TryInvokeTeamMethod(Team team, string methodName, params object[] args)
+    {
+        if (team == null) return false;
+
+        try
+        {
+            var t = team.GetType();
+            var mi = t.GetMethod(methodName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (mi == null) return false;
+            mi.Invoke(team, args);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    // (single helper overload is enough)
+
+    // Called by CommandStateMachine when a TEAM move is confirmed
+    public void PlaceForTeam(Team team, Vector3 destination)
+    {
+        if (team == null || markerPrefab == null) return;
+        EnsureMarkerParent();
+
+        // Store on the Team too (optional; some projects may not have this API)
+        TryInvokeTeamMethod(team, "SetMoveTarget", destination);
+
+        if (!pinnedByTeamId.TryGetValue(team.Id, out var pinned) || pinned == null || pinned.marker == null)
+        {
+            var sr = Instantiate(markerPrefab, markerParent);
+            sr.name = $"PinnedTeamMarker_{team.Id}";
+            sr.transform.rotation = Quaternion.Euler(flatEuler);
+            ApplyMarkerScale(sr.transform);
+
+            pinned = new PinnedTeam
+            {
+                team = team,
+                marker = sr,
+                destination = destination
+            };
+
+            pinnedByTeamId[team.Id] = pinned;
+        }
+        else
+        {
+            pinned.team = team;
+            pinned.destination = destination;
+        }
+
+        pinned.marker.transform.position = destination + Vector3.up * heightOffset;
+        pinned.marker.gameObject.SetActive(true);
+    }
+
+    /// <summary>
+    /// Clear (destroy) the pinned destination marker for a Team immediately.
+    /// Use this when a Team commits a new non-move action (ex: Join) so the last move pin doesn't linger.
+    /// </summary>
+    public void ClearForTeam(Team team)
+    {
+        if (team == null) return;
+
+        // Clear any remembered move target on the Team too (optional).
+        TryInvokeTeamMethod(team, "ClearMoveTarget");
+
+        if (pinnedByTeamId.TryGetValue(team.Id, out var pinned) && pinned != null)
+        {
+            if (pinned.marker != null)
+                Destroy(pinned.marker.gameObject);
+
+            pinnedByTeamId.Remove(team.Id);
+        }
+    }
+
+    /// <summary>
+    /// Clear pinned markers for specific units (non-team pins).
+    /// </summary>
+    public void ClearForUnits(GameObject[] units)
+    {
+        if (units == null || units.Length == 0) return;
+
+        for (int i = 0; i < units.Length; i++)
+        {
+            var go = units[i];
+            if (go == null) continue;
+
+            var tr = go.transform;
+            if (tr == null) continue;
+
+            if (pinnedByUnit.TryGetValue(tr, out var pinned) && pinned != null)
+            {
+                if (pinned.marker != null)
+                    Destroy(pinned.marker.gameObject);
+                pinnedByUnit.Remove(tr);
+            }
+        }
     }
 
     // Called by CommandStateMachine when a move is confirmed
@@ -267,6 +389,103 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
         }
     }
 
+    private void UpdatePinnedTeamMarkers()
+    {
+        if (pinnedByTeamId.Count == 0) return;
+
+        List<int> dead = null;
+
+        foreach (var kvp in pinnedByTeamId)
+        {
+            int teamId = kvp.Key;
+            var pinned = kvp.Value;
+
+            if (pinned == null || pinned.marker == null || pinned.team == null)
+            {
+                dead ??= new List<int>();
+                dead.Add(teamId);
+                continue;
+            }
+
+            pinned.marker.transform.position = pinned.destination + Vector3.up * heightOffset;
+
+            // Team pins have their own lifetime rule (separate from single-unit pins).
+            if (!hideTeamPinnedWhenArrived)
+            {
+                pinned.marker.gameObject.SetActive(true);
+                continue;
+            }
+
+            bool arrived = !IsTeamStillMovingToward(pinned.team, pinned.destination);
+
+            if (!arrived)
+            {
+                pinned.marker.gameObject.SetActive(true);
+                continue;
+            }
+
+            // Arrived: clear the Team's remembered move target and optionally remove the pin.
+            TryInvokeTeamMethod(pinned.team, "ClearMoveTarget");
+
+            if (destroyTeamPinOnArrive)
+            {
+                dead ??= new List<int>();
+                dead.Add(teamId);
+            }
+            else
+            {
+                pinned.marker.gameObject.SetActive(false);
+            }
+        }
+
+        if (dead != null)
+        {
+            for (int i = 0; i < dead.Count; i++)
+            {
+                int id = dead[i];
+                if (pinnedByTeamId.TryGetValue(id, out var p) && p != null)
+                {
+                    if (p.marker != null) Destroy(p.marker.gameObject);
+                    if (p != null) TryInvokeTeamMethod(p.team, "ClearMoveTarget");
+                }
+                pinnedByTeamId.Remove(id);
+            }
+        }
+    }
+
+    private bool IsTeamStillMovingToward(Team team, Vector3 destination)
+    {
+        if (team == null) return false;
+
+        Transform anchor = team.Anchor != null ? team.Anchor : (team.Members != null && team.Members.Count > 0 ? team.Members[0] : null);
+        if (anchor == null) return false;
+
+        if (Vector3.Distance(anchor.position, destination) <= Mathf.Max(0.1f, teamArriveDistance))
+            return false;
+
+        var agent = anchor.GetComponent<NavMeshAgent>();
+        if (agent == null) agent = anchor.GetComponentInChildren<NavMeshAgent>();
+        if (agent != null && agent.isActiveAndEnabled)
+        {
+            if (agent.pathPending) return true;
+            if (agent.hasPath && agent.remainingDistance > Mathf.Max(agent.stoppingDistance, 0.05f) + 0.2f)
+                return true;
+        }
+
+        if (team.Members != null)
+        {
+            for (int i = 0; i < team.Members.Count; i++)
+            {
+                var m = team.Members[i];
+                if (m == null) continue;
+                if (Vector3.Distance(m.position, destination) > Mathf.Max(0.1f, teamArriveDistance) + 0.25f)
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
     private void ClearAllPinned()
     {
         foreach (var kvp in pinnedByUnit)
@@ -275,11 +494,25 @@ public class MoveDestinationMarkerSystem : MonoBehaviour
                 Destroy(kvp.Value.marker.gameObject);
         }
         pinnedByUnit.Clear();
+
+        foreach (var kvp in pinnedByTeamId)
+        {
+            if (kvp.Value?.marker != null)
+                Destroy(kvp.Value.marker.gameObject);
+            if (kvp.Value != null) TryInvokeTeamMethod(kvp.Value.team, "ClearMoveTarget");
+        }
+        pinnedByTeamId.Clear();
     }
 
     private void HideAllPinned()
     {
         foreach (var kvp in pinnedByUnit)
+        {
+            if (kvp.Value?.marker != null)
+                kvp.Value.marker.gameObject.SetActive(false);
+        }
+
+        foreach (var kvp in pinnedByTeamId)
         {
             if (kvp.Value?.marker != null)
                 kvp.Value.marker.gameObject.SetActive(false);
