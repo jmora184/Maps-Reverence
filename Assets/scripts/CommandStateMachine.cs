@@ -397,6 +397,11 @@ public class CommandStateMachine : MonoBehaviour
             return;
         }
 
+        // ✅ While choosing a MOVE destination, ignore unit icon clicks so selection doesn't change mid-order.
+        // (Enemy icon clicks during MoveTargeting are handled via SubmitFollowTarget instead.)
+        if (CurrentState == State.MoveTargeting)
+            return;
+
         if (CurrentState == State.AddTargeting)
         {
             bool wasJoin = JoinArmed;

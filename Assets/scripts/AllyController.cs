@@ -29,6 +29,14 @@ public class AllyController : MonoBehaviour
     [Header("Animation")]
     public Animator soldierAnimator;
 
+
+    [Header("Move Marker Auto-Clear")]
+    [Tooltip("When close enough to the pinned destination, auto-clear the move marker for this ally.")]
+    public bool autoClearMoveMarkerOnArrival = true;
+
+    [Tooltip("Extra distance beyond stoppingDistance to consider 'arrived' for marker clearing.")]
+    public float markerArrivalBuffer = 0.15f;
+
     // Per-ally stats (team size -> multipliers)
     private AllyCombatStats combatStats;
 
@@ -57,14 +65,19 @@ public class AllyController : MonoBehaviour
 
     private void Start()
     {
-        // Initialize agent speed from AllyCombatStats if present,
-        // otherwise fall back to the legacy moveSpeed field.
+        // Initialize agent speed.
+        // IMPORTANT: don't accidentally override a NavMeshAgent speed you tuned in the Inspector.
+        // If moveSpeed is 0, we treat the agent's current speed as the baseline.
         if (agent != null)
         {
             if (combatStats != null)
             {
-                if (combatStats.baseMoveSpeed <= 0f && moveSpeed > 0f)
-                    combatStats.baseMoveSpeed = moveSpeed;
+                // Prefer explicit moveSpeed if you set it, otherwise keep the current agent.speed.
+                float baseline = agent.speed;
+                if (moveSpeed > 0f) baseline = moveSpeed;
+
+                if (combatStats.baseMoveSpeed <= 0f)
+                    combatStats.baseMoveSpeed = baseline;
 
                 combatStats.ApplyToAgent(agent);
             }
@@ -77,9 +90,14 @@ public class AllyController : MonoBehaviour
 
     private void Update()
     {
-        // Keep agent speed in sync with team size (cheap + simple).
+        // Keep agent speed in sync with team size (only when it changes).
+        // (Prevents unexpected slowdowns if you tune speed in the Inspector.)
         if (agent != null && combatStats != null)
-            agent.speed = combatStats.GetMoveSpeed();
+        {
+            float desired = combatStats.GetMoveSpeed();
+            if (!Mathf.Approximately(agent.speed, desired))
+                agent.speed = desired;
+        }
 
         // If we were chasing but the enemy was destroyed, stop chasing and resume.
         if (chasing && currentEnemy == null)
@@ -125,8 +143,36 @@ public class AllyController : MonoBehaviour
         }
 
         // Running animation
+        // NOTE: NavMeshAgent.velocity can stay ~0 briefly while path is pending / accelerating,
+        // which makes the unit "slide" in Idle before switching to Run. Use desiredVelocity + path state instead.
         if (soldierAnimator != null && agent != null)
-            soldierAnimator.SetBool("isRunning", agent.velocity.magnitude > 0.1f);
+        {
+            bool wantsToMove = !agent.isStopped && !agent.pathPending && agent.hasPath;
+            bool farEnough = wantsToMove && agent.remainingDistance > (Mathf.Max(agent.stoppingDistance, 0.05f) + 0.05f);
+            bool shouldRun = farEnough && (agent.desiredVelocity.sqrMagnitude > 0.01f || agent.velocity.sqrMagnitude > 0.01f);
+            soldierAnimator.SetBool("isRunning", shouldRun);
+        }
+
+
+        // Auto-clear the pinned move marker when we arrive at our pinned destination (fixed-point moves).
+        // This avoids leaving move pins behind after the ally finishes moving.
+        if (autoClearMoveMarkerOnArrival && !chasing && target == null && agent != null && !agent.pathPending)
+        {
+            // Only clear when we actually have a pinned destination for this unit.
+            if (TryGetLatestPinnedDestination(out Vector3 pinnedDest))
+            {
+                float arriveDist = Mathf.Max(agent.stoppingDistance, 0.05f) + Mathf.Max(0f, markerArrivalBuffer);
+                float d = Vector3.Distance(transform.position, pinnedDest);
+
+                // We also require the agent to have effectively stopped to avoid clearing too early.
+                bool stopped = agent.velocity.sqrMagnitude < 0.01f && agent.desiredVelocity.sqrMagnitude < 0.01f;
+                if (d <= arriveDist && stopped)
+                {
+                    TryClearPinnedMoveMarker();
+                }
+            }
+        }
+
 
         // Update pinned state (v1: pinned while chasing).
         if (pinnedStatus != null)
@@ -287,6 +333,87 @@ public class AllyController : MonoBehaviour
 
         return false;
     }
+
+
+    private void TryClearPinnedMoveMarker()
+    {
+        if (MoveDestinationMarkerSystem.Instance == null) return;
+
+        var inst = MoveDestinationMarkerSystem.Instance;
+        var type = inst.GetType();
+
+        // Try a few common method signatures without hard dependencies.
+        // Preferred (your project has used this pattern):
+        //   ClearForUnits(GameObject[] units)
+        // Also supports:
+        //   ClearForUnit(Transform unit)
+        //   ClearForUnits(Transform[] units)
+        //   ClearFor(Transform unit)
+        //   Unpin(Transform unit)
+        try
+        {
+            // 1) ClearForUnits(GameObject[])
+            var m = type.GetMethod("ClearForUnits", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (m != null)
+            {
+                var p = m.GetParameters();
+                if (p.Length == 1)
+                {
+                    if (p[0].ParameterType == typeof(GameObject[]))
+                    {
+                        m.Invoke(inst, new object[] { new[] { this.gameObject } });
+                        return;
+                    }
+                    if (p[0].ParameterType == typeof(Transform[]))
+                    {
+                        m.Invoke(inst, new object[] { new[] { this.transform } });
+                        return;
+                    }
+                }
+            }
+
+            // 2) ClearForUnit(Transform)
+            m = type.GetMethod("ClearForUnit", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (m != null)
+            {
+                var p = m.GetParameters();
+                if (p.Length == 1 && p[0].ParameterType == typeof(Transform))
+                {
+                    m.Invoke(inst, new object[] { this.transform });
+                    return;
+                }
+            }
+
+            // 3) ClearFor(Transform)
+            m = type.GetMethod("ClearFor", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (m != null)
+            {
+                var p = m.GetParameters();
+                if (p.Length == 1 && p[0].ParameterType == typeof(Transform))
+                {
+                    m.Invoke(inst, new object[] { this.transform });
+                    return;
+                }
+            }
+
+            // 4) Unpin(Transform)
+            m = type.GetMethod("Unpin", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (m != null)
+            {
+                var p = m.GetParameters();
+                if (p.Length == 1 && p[0].ParameterType == typeof(Transform))
+                {
+                    m.Invoke(inst, new object[] { this.transform });
+                    return;
+                }
+            }
+        }
+        catch
+        {
+            // If reflection fails, do nothing. Marker will remain until cleared elsewhere.
+        }
+    }
+
 
     private void ChaseAndShoot(Transform enemy)
     {

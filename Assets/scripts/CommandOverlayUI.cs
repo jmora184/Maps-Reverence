@@ -960,9 +960,7 @@ public class CommandOverlayUI : MonoBehaviour
             if (unit == null || icon == null) continue;
 
             var btn = icon.GetComponent<Button>();
-            if (btn == null) continue;
-
-            var team = TeamManager.Instance.GetTeamOf(unit);
+            if (btn == null) continue; var team = TeamManager.Instance.GetTeamOf(unit);
             bool isTeamed = team != null;
 
             bool allowClick = !isTeamed;
@@ -982,7 +980,6 @@ public class CommandOverlayUI : MonoBehaviour
             // While join-targeting, allow clicking teamed allies so they can be chosen as the JOIN target.
             if (sm != null && sm.CurrentState == CommandStateMachine.State.AddTargeting)
                 allowClick = true;
-
             // Pinned units cannot be selected/commanded (v1 driven by AllyController.chasing).
             // We still allow hover (tooltip) even when pinned.
             var pinned = unit.GetComponent<AllyPinnedStatus>();
@@ -990,6 +987,11 @@ public class CommandOverlayUI : MonoBehaviour
             if (isPinned)
                 allowClick = false;
 
+
+            // While choosing a MOVE destination, lock selection (no selecting other allies).
+            bool inMoveTargeting = (sm != null && sm.CurrentState == CommandStateMachine.State.MoveTargeting);
+            if (inMoveTargeting)
+                allowClick = false;
             // Update tooltip message for pinned/non-pinned.
             var hint = icon.GetComponent<UIHoverHintTarget>();
             if (hint != null)
@@ -998,7 +1000,12 @@ public class CommandOverlayUI : MonoBehaviour
             // If the ally icon is not supposed to be clickable (e.g., it belongs to a team),
             // also disable its raycast target so it won't "block" clicks intended for the Team Star icon above it.
             var img = icon.GetComponent<UnityEngine.UI.Image>();
-            if (img != null) img.raycastTarget = allowClick;
+            if (img != null)
+            {
+                // During MoveTargeting we keep ally icons as raycast targets (even though they are not clickable)
+                // so they still count as UI and won't accidentally submit a ground move underneath them.
+                img.raycastTarget = inMoveTargeting ? true : allowClick;
+            }
 
             btn.interactable = allowClick;
             btn.enabled = allowClick;
@@ -1058,6 +1065,11 @@ public class CommandOverlayUI : MonoBehaviour
 
         if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
         if (sm == null) return;
+
+        // While choosing a MOVE target, ignore ally icon clicks so the current selection stays locked
+        // until a destination (or enemy follow) is chosen.
+        if (sm.CurrentState == CommandStateMachine.State.MoveTargeting)
+            return;
 
         // If we're currently choosing a JOIN target, do NOT auto-select the whole team.
         // We need the click to pass through so CommandStateMachine can fire OnAddRequested.
