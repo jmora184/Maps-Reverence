@@ -38,6 +38,9 @@ public class AttackTargetIndicatorSystem : MonoBehaviour
     [Tooltip("If true, preview badge shows selection count while hovering an enemy during MoveTargeting.")]
     public bool enablePreview = true;
 
+    [Tooltip("If true, badges are only rendered while in Command Mode (prevents lingering badges in FPS mode).")]
+    public bool onlyShowInCommandMode = true;
+
     [Tooltip("If true, when an enemy icon is not available the badge follows enemy world position on the HUD.")]
     public bool worldFollowWhenNoIcon = true;
 
@@ -119,6 +122,44 @@ public class AttackTargetIndicatorSystem : MonoBehaviour
     {
         if (enemy == null) return;
         iconByEnemy.Remove(enemy);
+    }
+
+
+    /// <summary>Fully removes all tracking + destroys any badge for this enemy.</summary>
+    public void UnregisterEnemy(Transform enemy)
+    {
+        if (enemy == null) return;
+
+        iconByEnemy.Remove(enemy);
+
+        if (badgeByEnemy.TryGetValue(enemy, out var badge) && badge != null)
+            Destroy(badge.gameObject);
+        badgeByEnemy.Remove(enemy);
+
+        attackersByEnemy.Remove(enemy);
+
+        if (previewEnemy == enemy)
+        {
+            previewEnemy = null;
+            previewCount = 0;
+        }
+
+        // Remove any attacker mappings pointing to this enemy.
+        List<Transform> attackers = null;
+        foreach (var pair in enemyByAttacker)
+        {
+            if (pair.Key == null) continue;
+            if (pair.Value == enemy)
+            {
+                attackers ??= new List<Transform>();
+                attackers.Add(pair.Key);
+            }
+        }
+        if (attackers != null)
+        {
+            for (int i = 0; i < attackers.Count; i++)
+                enemyByAttacker.Remove(attackers[i]);
+        }
     }
 
     public void SetPreview(Transform enemy, int count)
@@ -290,12 +331,65 @@ public class AttackTargetIndicatorSystem : MonoBehaviour
         return badge;
     }
 
+    private bool IsCommandMode()
+    {
+        if (CommandCamToggle.Instance != null)
+            return CommandCamToggle.Instance.IsCommandMode;
+
+        if (CommandOverlayUI.Instance != null && CommandOverlayUI.Instance.commandCam != null)
+            return CommandOverlayUI.Instance.commandCam.enabled;
+
+        return true;
+    }
+
     private void LateUpdate()
     {
         if (persistentRoot == null || badgePrefab == null) return;
 
         if (worldCamera == null) worldCamera = Camera.main;
         CacheHudCanvas();
+
+        bool commandMode = !onlyShowInCommandMode || IsCommandMode();
+
+        // Cleanup dead enemies + bad badges up-front (prevents "badge at center" artifacts).
+        List<Transform> enemiesToRemove = null;
+        foreach (var kvp in badgeByEnemy)
+        {
+            if (kvp.Key == null || kvp.Value == null)
+            {
+                enemiesToRemove ??= new List<Transform>();
+                enemiesToRemove.Add(kvp.Key);
+            }
+        }
+        if (enemiesToRemove != null)
+        {
+            for (int i = 0; i < enemiesToRemove.Count; i++)
+            {
+                var enemy = enemiesToRemove[i];
+                if (enemy != null)
+                    UnregisterEnemy(enemy);
+                else
+                {
+                    // Remove null-key entries (rare but possible)
+                    badgeByEnemy.Remove(enemy);
+                    iconByEnemy.Remove(enemy);
+                    attackersByEnemy.Remove(enemy);
+                }
+            }
+        }
+
+        // If we don't want badges in FPS, hard-hide them while not in command mode.
+        if (!commandMode)
+        {
+            foreach (var kvp in badgeByEnemy)
+            {
+                var badge = kvp.Value;
+                if (badge == null) continue;
+                if (badge.gameObject.activeSelf)
+                    badge.gameObject.SetActive(false);
+            }
+            return;
+        }
 
         // Update badge positions every frame so they can survive icon rebuilds/hides.
         foreach (var kvp in badgeByEnemy)
@@ -307,13 +401,16 @@ public class AttackTargetIndicatorSystem : MonoBehaviour
             var rt = badge.transform as RectTransform;
             if (rt == null) continue;
 
+            // If badge should be visible (count>0) but was force-hidden (FPS), re-enable it.
+            if (!badge.gameObject.activeSelf && badge.CurrentCount > 0)
+                badge.gameObject.SetActive(true);
+
             // If badge UI decided to hide (count=0), skip positioning.
             if (!badge.gameObject.activeInHierarchy) continue;
 
             // Prefer icon positioning if the icon exists and is active.
             if (iconByEnemy.TryGetValue(enemy, out var icon) && icon != null && icon.gameObject.activeInHierarchy)
             {
-                // Get icon screen position reliably based on its canvas
                 Vector3 screen = GetIconScreenPoint(icon);
                 screen.x += badgeOffset.x;
                 screen.y += badgeOffset.y;

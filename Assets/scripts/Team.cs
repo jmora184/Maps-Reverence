@@ -8,8 +8,11 @@ public class Team
     // Members of the team
     public List<Transform> Members { get; private set; } = new();
 
-    // ✅ NEW: where the star should appear (we anchor it to the "second ally" on join)
+    // Where the star should appear (anchored to the "second ally" on join)
     public Transform Anchor { get; set; }
+
+    // Preferred spacing radius (meters) around Anchor for members (non-anchor members get slotted around the leader)
+    public float FormationRadius { get; set; } = 2.4f;
 
     public Team(int id, Transform a, Transform b)
     {
@@ -35,8 +38,6 @@ public class Team
             Members.Add(t);
     }
 
-    // ✅ Required by your TeamIconUI.cs
-    // You can change this string format any time.
     public string GetDisplayLabel()
     {
         int count = Members != null ? Members.Count : 0;

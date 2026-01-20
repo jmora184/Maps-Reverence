@@ -22,6 +22,8 @@ public class AttackTargetIndicatorBadgeUI : MonoBehaviour
 
     private bool isPreview;
 
+    public int CurrentCount { get; private set; }
+
     private void Reset()
     {
         iconImage = GetComponentInChildren<Image>(true);
@@ -38,6 +40,7 @@ public class AttackTargetIndicatorBadgeUI : MonoBehaviour
 
     public void SetCount(int count)
     {
+        CurrentCount = count;
         if (countText != null)
         {
             if (count <= 1)

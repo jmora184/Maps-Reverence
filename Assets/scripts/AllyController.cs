@@ -6,11 +6,14 @@ using System.Collections;
 using System.Reflection;
 using UnityEngine;
 using UnityEngine.AI;
+using Random = UnityEngine.Random;
 
 public class AllyController : MonoBehaviour
 {
     [Header("Movement")]
     public float moveSpeed;
+    [Tooltip("How quickly the ally turns to face its movement direction when not in combat.")]
+    public float moveTurnSpeed = 12f;
     [Tooltip("If target is set (e.g., joining a team), we will keep updating destination to follow it.")]
     public float travelFollowUpdateInterval = 0.15f;
     public Rigidbody theRB;
@@ -26,8 +29,49 @@ public class AllyController : MonoBehaviour
     public float fireRate = 0.5f;
     private float fireCount;
 
+    [Header("Combat Range")]
+    [Tooltip("Preferred distance to keep from the enemy while fighting.")]
+    public float desiredAttackRange = 6f;
+
+    [Tooltip("Small buffer around desiredAttackRange to prevent jitter (hysteresis).")]
+    public float attackRangeBuffer = 0.75f;
+
+    [Tooltip("NavMesh sample radius used when backing away from a target.")]
+    public float backoffSampleRadius = 2.5f;
+
+    [Tooltip("How quickly the unit turns to face the target while fighting.")]
+    public float faceTargetTurnSpeed = 12f;
+
+    [Header("Combat Dodge / Strafing")]
+    [Tooltip("If true, the unit will strafe/circle while shooting instead of standing still at ideal range.")]
+    public bool enableCombatStrafe = true;
+
+    [Tooltip("How often (seconds) we pick a new strafe point around the target.")]
+    public float strafeRepathInterval = 0.35f;
+
+    [Tooltip("Seconds between changing strafe direction/angle.")]
+    public float strafeChangeInterval = 1.25f;
+
+    [Tooltip("Max random angle jitter added to the strafe direction (degrees).")]
+    public float strafeAngleJitter = 25f;
+
+    [Tooltip("NavMesh sample radius used when picking a strafe point.")]
+    public float strafeSampleRadius = 2.5f;
     [Header("Animation")]
     public Animator soldierAnimator;
+
+    [Header("Animation Params")]
+    [Tooltip("Bool parameter used to drive Idle/Run transitions (optional). Set to match your Animator Controller.")]
+    public string runBoolParam = "isRunning";
+
+    [Tooltip("Float parameter used for blend trees (optional). Set to match your Animator Controller.")]
+    public string speedFloatParam = "Speed";
+
+    // Animator parameter caching (avoids spamming errors if a param doesn't exist)
+    private bool _animHasIsRunning;
+    private int _animIsRunningHash;
+    private bool _animHasSpeed;
+    private int _animSpeedHash;
 
 
     [Header("Move Marker Auto-Clear")]
@@ -36,6 +80,12 @@ public class AllyController : MonoBehaviour
 
     [Tooltip("Extra distance beyond stoppingDistance to consider 'arrived' for marker clearing.")]
     public float markerArrivalBuffer = 0.15f;
+
+    [Tooltip("If true, allies that are currently in a team will use a larger arrival buffer (helps prevent stacking when moving a newly formed team).")]
+    public bool useTeamArrivalBufferMultiplier = true;
+
+    [Tooltip("Multiplier applied to markerArrivalBuffer when this ally is in a team. Set to 2 to double the buffer area.")]
+    public float teamArrivalBufferMultiplier = 2f;
 
     // Per-ally stats (team size -> multipliers)
     private AllyCombatStats combatStats;
@@ -46,6 +96,11 @@ public class AllyController : MonoBehaviour
     // Track one enemy target so we don't fight every enemy in the scene at once
     private Transform currentEnemy;
 
+    // Combat strafe runtime
+    private float _strafeRepathTimer;
+    private float _strafeChangeTimer;
+    private int _strafeSide = 1; // 1 = right, -1 = left
+    private float _strafeAngleOffset;
     // Remember where we were going before we got pulled into combat
     // NOTE: for TEAM moves, the "current" destination can change while we are fighting.
     // So we prefer to resume using the latest pinned destination from MoveDestinationMarkerSystem when available.
@@ -59,8 +114,49 @@ public class AllyController : MonoBehaviour
         if (theRB == null) theRB = GetComponent<Rigidbody>();
         if (soldierAnimator == null) soldierAnimator = GetComponentInChildren<Animator>();
 
+        // Root motion can "pin" the character in place (idle) even when a NavMeshAgent is trying to move it.
+        // Disable it so the agent fully controls translation.
+        if (soldierAnimator != null)
+            soldierAnimator.applyRootMotion = false;
+
+        // We'll handle rotation ourselves:
+        // - normal travel: face movement direction
+        // - combat: face the target smoothly
+        if (agent != null)
+            agent.updateRotation = false;
+
+        CacheAnimatorParams();
+
         combatStats = GetComponent<AllyCombatStats>();
         pinnedStatus = GetComponent<AllyPinnedStatus>();
+
+        // De-sync strafing so squads don't move in unison when they start attacking on the same frame.
+        _strafeRepathTimer = Random.Range(0f, Mathf.Max(0.05f, strafeRepathInterval));
+        _strafeChangeTimer = Random.Range(0f, Mathf.Max(0.1f, strafeChangeInterval));
+        _strafeSide = (Random.value < 0.5f) ? -1 : 1;
+        _strafeAngleOffset = Random.Range(-strafeAngleJitter, strafeAngleJitter);
+    }
+
+    private void CacheAnimatorParams()
+    {
+        _animHasIsRunning = false;
+        _animHasSpeed = false;
+
+        if (soldierAnimator == null) return;
+
+        _animIsRunningHash = Animator.StringToHash(string.IsNullOrEmpty(runBoolParam) ? "isRunning" : runBoolParam);
+        _animSpeedHash = Animator.StringToHash(string.IsNullOrEmpty(speedFloatParam) ? "Speed" : speedFloatParam);
+
+        // Cache whether these parameters exist so we don't log errors every frame.
+        var ps = soldierAnimator.parameters;
+        for (int i = 0; i < ps.Length; i++)
+        {
+            var p = ps[i];
+            if (!_animHasIsRunning && p.type == AnimatorControllerParameterType.Bool && p.name == (string.IsNullOrEmpty(runBoolParam) ? "isRunning" : runBoolParam))
+                _animHasIsRunning = true;
+            if (!_animHasSpeed && p.type == AnimatorControllerParameterType.Float && p.name == (string.IsNullOrEmpty(speedFloatParam) ? "Speed" : speedFloatParam))
+                _animHasSpeed = true;
+        }
     }
 
     private void Start()
@@ -90,6 +186,26 @@ public class AllyController : MonoBehaviour
 
     private void Update()
     {
+        // Rotation:
+        // If we let the agent rotate while we also rotate to face targets in combat,
+        // the character can end up "running backwards" or snapping.
+        // So we always rotate manually.
+        if (agent != null)
+        {
+            agent.updateRotation = false;
+
+            if (!chasing)
+            {
+                Vector3 vel = agent.desiredVelocity;
+                vel.y = 0f;
+                if (vel.sqrMagnitude > 0.001f)
+                {
+                    Quaternion look = Quaternion.LookRotation(vel.normalized, Vector3.up);
+                    transform.rotation = Quaternion.Slerp(transform.rotation, look, Time.deltaTime * moveTurnSpeed);
+                }
+            }
+        }
+
         // Keep agent speed in sync with team size (only when it changes).
         // (Prevents unexpected slowdowns if you tune speed in the Inspector.)
         if (agent != null && combatStats != null)
@@ -142,15 +258,42 @@ public class AllyController : MonoBehaviour
             }
         }
 
+        // Face movement direction while traveling (prevents "running backwards" when agent rotation is off).
+        if (!chasing && agent != null)
+        {
+            Vector3 v = agent.desiredVelocity;
+            v.y = 0f;
+            if (v.sqrMagnitude > 0.001f)
+            {
+                Quaternion look = Quaternion.LookRotation(v.normalized, Vector3.up);
+                transform.rotation = Quaternion.Slerp(transform.rotation, look, Time.deltaTime * moveTurnSpeed);
+            }
+        }
+
         // Running animation
-        // NOTE: NavMeshAgent.velocity can stay ~0 briefly while path is pending / accelerating,
-        // which makes the unit "slide" in Idle before switching to Run. Use desiredVelocity + path state instead.
+        // IMPORTANT:
+        // During combat strafing we keep stoppingDistance ~= desiredAttackRange (ex: 6m).
+        // That means agent.remainingDistance is often <= stoppingDistance even while the agent is moving,
+        // which made "isRunning" stay false and the ally looked Idle while strafing.
+        // Drive running from actual movement (velocity) instead.
         if (soldierAnimator != null && agent != null)
         {
-            bool wantsToMove = !agent.isStopped && !agent.pathPending && agent.hasPath;
-            bool farEnough = wantsToMove && agent.remainingDistance > (Mathf.Max(agent.stoppingDistance, 0.05f) + 0.05f);
-            bool shouldRun = farEnough && (agent.desiredVelocity.sqrMagnitude > 0.01f || agent.velocity.sqrMagnitude > 0.01f);
-            soldierAnimator.SetBool("isRunning", shouldRun);
+            // Use actual movement to drive locomotion animation (works for combat strafing)
+            float speed = 0f;
+            if (!agent.isStopped)
+            {
+                // desiredVelocity leads during acceleration; velocity is actual.
+                speed = Mathf.Max(agent.desiredVelocity.magnitude, agent.velocity.magnitude);
+            }
+
+            bool isMoving = speed > 0.05f;
+
+            if (_animHasIsRunning)
+                soldierAnimator.SetBool(_animIsRunningHash, isMoving);
+
+            // If your controller uses a Speed float blend-tree, support that too.
+            if (_animHasSpeed)
+                soldierAnimator.SetFloat(_animSpeedHash, speed);
         }
 
 
@@ -161,7 +304,12 @@ public class AllyController : MonoBehaviour
             // Only clear when we actually have a pinned destination for this unit.
             if (TryGetLatestPinnedDestination(out Vector3 pinnedDest))
             {
-                float arriveDist = Mathf.Max(agent.stoppingDistance, 0.05f) + Mathf.Max(0f, markerArrivalBuffer);
+                float buffer = Mathf.Max(0f, markerArrivalBuffer);
+                if (useTeamArrivalBufferMultiplier && TeamManager.Instance != null && TeamManager.Instance.GetTeamOf(this.transform) != null)
+                {
+                    buffer *= Mathf.Max(0.1f, teamArrivalBufferMultiplier);
+                }
+                float arriveDist = Mathf.Max(agent.stoppingDistance, 0.05f) + buffer;
                 float d = Vector3.Distance(transform.position, pinnedDest);
 
                 // We also require the agent to have effectively stopped to avoid clearing too early.
@@ -421,13 +569,100 @@ public class AllyController : MonoBehaviour
 
         Vector3 targetPoint = enemy.position;
 
-        // Move toward enemy (stop close)
+        // Maintain a stable standoff distance instead of running into the target's center.
+        // NOTE: We manage standoff in code; do NOT set agent.stoppingDistance = desiredAttackRange.
+        // If stoppingDistance is huge (ex: 24), the agent will think it's "already arrived" at most strafe points
+        // and it won't move (and your run animation never triggers). Keep stoppingDistance small.
         if (agent != null)
         {
-            if (Vector3.Distance(transform.position, targetPoint) > distanceToStop)
-                agent.destination = targetPoint;
+            float range = Mathf.Max(0.5f, desiredAttackRange);
+
+            // Let the agent actually travel to strafe points.
+            // We still maintain standoff ourselves via range/buffer logic.
+            float combatStop = Mathf.Max(0.1f, range * 0.25f);
+            if (!Mathf.Approximately(agent.stoppingDistance, combatStop))
+                agent.stoppingDistance = combatStop;
+
+            // Face target (flat) while fighting.
+            Vector3 flatDir = targetPoint - transform.position;
+            flatDir.y = 0f;
+            if (flatDir.sqrMagnitude > 0.001f)
+            {
+                Quaternion look = Quaternion.LookRotation(flatDir.normalized, Vector3.up);
+                transform.rotation = Quaternion.Slerp(transform.rotation, look, Time.deltaTime * faceTargetTurnSpeed);
+            }
+
+            float dist = Vector3.Distance(transform.position, targetPoint);
+
+            // Too far: move in toward a ring around the enemy (not the exact center).
+            if (dist > range + attackRangeBuffer)
+            {
+                agent.isStopped = false;
+                Vector3 toward = (targetPoint - transform.position);
+                toward.y = 0f;
+                if (toward.sqrMagnitude < 0.001f) toward = transform.forward;
+
+                Vector3 ringPoint = targetPoint - toward.normalized * range;
+                agent.SetDestination(ringPoint);
+            }
+            // Too close: back off a bit.
+            else if (dist < range - attackRangeBuffer)
+            {
+                Vector3 away = (transform.position - targetPoint);
+                away.y = 0f;
+                away = away.sqrMagnitude < 0.001f ? transform.forward : away.normalized;
+
+                float push = (range - dist) + 0.5f;
+                Vector3 desired = transform.position + away * push;
+
+                if (NavMesh.SamplePosition(desired, out NavMeshHit hit, backoffSampleRadius, NavMesh.AllAreas))
+                    desired = hit.position;
+
+                agent.isStopped = false;
+                agent.SetDestination(desired);
+            }
+            // In range: optionally strafe/circle while shooting (more dynamic combat).
             else
-                agent.destination = transform.position;
+            {
+                if (enableCombatStrafe)
+                {
+                    _strafeRepathTimer -= Time.deltaTime;
+                    _strafeChangeTimer -= Time.deltaTime;
+
+                    if (_strafeChangeTimer <= 0f)
+                    {
+                        // Occasionally flip sides so it doesn't look too robotic.
+                        if (Random.value < 0.35f) _strafeSide *= -1;
+                        _strafeAngleOffset = Random.Range(-strafeAngleJitter, strafeAngleJitter);
+                        _strafeChangeTimer = Mathf.Max(0.1f, strafeChangeInterval);
+                    }
+
+                    if (_strafeRepathTimer <= 0f)
+                    {
+                        Vector3 fromTarget = (transform.position - targetPoint);
+                        fromTarget.y = 0f;
+                        if (fromTarget.sqrMagnitude < 0.001f)
+                            fromTarget = transform.forward;
+
+                        // Tangent around the target (left/right) plus small random angle jitter.
+                        Quaternion rot = Quaternion.AngleAxis((_strafeSide * 90f) + _strafeAngleOffset, Vector3.up);
+                        Vector3 strafeDir = rot * fromTarget.normalized;
+
+                        Vector3 desired = targetPoint + strafeDir.normalized * range;
+                        if (NavMesh.SamplePosition(desired, out NavMeshHit hit, strafeSampleRadius, NavMesh.AllAreas))
+                            desired = hit.position;
+
+                        agent.isStopped = false;
+                        agent.SetDestination(desired);
+                        _strafeRepathTimer = Mathf.Max(0.05f, strafeRepathInterval);
+                    }
+                }
+                else
+                {
+                    agent.isStopped = true;
+                    agent.ResetPath();
+                }
+            }
         }
 
         // Fire

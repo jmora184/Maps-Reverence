@@ -548,6 +548,22 @@ public class CommandOverlayUI : MonoBehaviour
 
         if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
 
+        // If we're not in command view, hard-hide the entire overlay icon layer.
+        // This prevents enemy/ally/team icons (and hover attack cursor) from appearing in FPS mode.
+        bool inCmd = IsInCommandView();
+        SetOverlayVisible(inCmd);
+        if (!inCmd)
+        {
+            // Make absolutely sure the hover cursor is hidden.
+            AutoFindHoverCursorIcon();
+            if (hoverCursorIcon != null)
+            {
+                hoverCursorIcon.SetVisible(false);
+                hoverCursorIcon.SetOverEnemy(false);
+            }
+            return;
+        }
+
         // Detect MOVE confirmation moment: MoveTargeting -> UnitSelected (some setups)
         if (sm != null)
         {
@@ -567,8 +583,8 @@ public class CommandOverlayUI : MonoBehaviour
         UpdateHoverCursorIcon();
 
         // Update ally/enemy icons
-        UpdateIcons(allyIconByUnit, iconWorldHeight, uiCam);
-        UpdateIcons(enemyIconByUnit, iconWorldHeight, uiCam);
+        UpdateIcons(allyIconByUnit, iconWorldHeight, uiCam, false);
+        UpdateIcons(enemyIconByUnit, iconWorldHeight, uiCam, true);
 
         // Update persistent player icon
         if (playerIcon != null && playerTarget != null)
@@ -592,6 +608,53 @@ public class CommandOverlayUI : MonoBehaviour
         UpdateCommandButtonPanel(uiCam);
     }
 
+    private bool IsInCommandView()
+    {
+        // Prefer CommandCamToggle when available.
+        if (CommandCamToggle.Instance != null)
+            return CommandCamToggle.Instance.IsCommandMode;
+
+        bool camSays = (commandCam != null && commandCam.enabled);
+        bool stateSays = (sm != null && sm.CurrentState != CommandStateMachine.State.Inactive);
+        return camSays || stateSays;
+    }
+
+    private void SetOverlayVisible(bool visible)
+    {
+        // Ally/enemy icons
+        SetDictIconsActive(allyIconByUnit, visible);
+        SetDictIconsActive(enemyIconByUnit, visible);
+
+        // Team stars
+        if (teamStarByTeamId != null)
+        {
+            foreach (var kvp in teamStarByTeamId)
+            {
+                if (kvp.Value != null)
+                    kvp.Value.gameObject.SetActive(visible);
+            }
+        }
+
+        // Persistent icons
+        if (playerIcon != null) playerIcon.gameObject.SetActive(visible);
+        if (bossIcon != null) bossIcon.gameObject.SetActive(visible);
+
+        // Command button panel should never linger in FPS.
+        if (!visible && commandButtonPanel != null)
+            commandButtonPanel.gameObject.SetActive(false);
+    }
+
+    private void SetDictIconsActive(Dictionary<Transform, RectTransform> dict, bool active)
+    {
+        if (dict == null) return;
+        foreach (var kvp in dict)
+        {
+            var rt = kvp.Value;
+            if (rt != null && rt.gameObject.activeSelf != active)
+                rt.gameObject.SetActive(active);
+        }
+    }
+
     private void UpdateHoverCursorIcon()
     {
         AutoFindHoverCursorIcon();
@@ -610,7 +673,8 @@ public class CommandOverlayUI : MonoBehaviour
         if (hoverCursorIcon.canvas == null)
             hoverCursorIcon.canvas = canvas;
 
-        bool show = (sm != null && sm.CurrentState == CommandStateMachine.State.MoveTargeting);
+        bool inCmd = IsInCommandView();
+        bool show = inCmd && (sm != null && sm.CurrentState == CommandStateMachine.State.MoveTargeting);
         hoverCursorIcon.SetVisible(show);
 
         // Make absolutely sure it renders on top.
@@ -621,10 +685,12 @@ public class CommandOverlayUI : MonoBehaviour
         if (!show)
             hoverCursorIcon.SetOverEnemy(false);
     }
-
-    private void UpdateIcons(Dictionary<Transform, RectTransform> dict, float worldHeight, Camera uiCam)
+    private void UpdateIcons(Dictionary<Transform, RectTransform> dict, float worldHeight, Camera uiCam, bool isEnemy)
     {
-        var toRemove = new List<Transform>();
+        if (dict == null) return;
+
+        List<Transform> toRemove = null;
+        List<RectTransform> toDestroy = null;
 
         foreach (var kvp in dict)
         {
@@ -633,16 +699,40 @@ public class CommandOverlayUI : MonoBehaviour
 
             if (t == null || icon == null)
             {
+                toRemove ??= new List<Transform>();
                 toRemove.Add(t);
+
+                if (icon != null)
+                {
+                    toDestroy ??= new List<RectTransform>();
+                    toDestroy.Add(icon);
+                }
+
+                if (isEnemy && t != null && AttackTargetIndicatorSystem.Instance != null)
+                    AttackTargetIndicatorSystem.Instance.UnregisterEnemyIcon(t);
+
                 continue;
             }
 
             UpdateWorldAnchoredUI(icon, t, worldHeight, uiCam);
         }
 
-        for (int i = 0; i < toRemove.Count; i++)
-            dict.Remove(toRemove[i]);
+        if (toDestroy != null)
+        {
+            for (int i = 0; i < toDestroy.Count; i++)
+            {
+                if (toDestroy[i] != null)
+                    Destroy(toDestroy[i].gameObject);
+            }
+        }
+
+        if (toRemove != null)
+        {
+            for (int i = 0; i < toRemove.Count; i++)
+                dict.Remove(toRemove[i]);
+        }
     }
+
 
     private void UpdateWorldAnchoredUI(RectTransform ui, Transform worldTarget, float height, Camera uiCam)
     {

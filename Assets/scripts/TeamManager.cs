@@ -1,5 +1,6 @@
 ﻿using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.AI;
 
 public class TeamManager : MonoBehaviour
 {
@@ -10,8 +11,6 @@ public class TeamManager : MonoBehaviour
 
     private int nextId = 1;
 
-
-
     [Header("Hints (optional)")]
     [Tooltip("Show a hint toast when a team is formed or its member count changes.")]
     public bool showTeamHints = true;
@@ -19,23 +18,22 @@ public class TeamManager : MonoBehaviour
     [Tooltip("How long the team hint stays on screen.")]
     public float teamHintDuration = 2.5f;
 
-    private void ShowTeamHint(Team team, string prefix)
-    {
-        if (!showTeamHints) return;
-        if (team == null) return;
+    [Header("Formation / Spacing")]
+    [Tooltip("Default spacing radius (meters) around the team leader (Anchor). Larger = more spread.")]
+    public float defaultFormationRadius = 2.4f;
 
-        // Count only non-null members (defensive)
-        int count = 0;
-        if (team.Members != null)
-        {
-            for (int i = 0; i < team.Members.Count; i++)
-                if (team.Members[i] != null) count++;
-        }
+    [Tooltip("Extra radius added per ring when there are more members than one ring can hold.")]
+    public float ringRadiusStep = 1.2f;
 
-        // Uses HintSystem (auto-bootstraps) to show a toast if present in scene.
-        // Example: "Team formed! Team 2 has 3 allies"
-        HintSystem.Show($"{prefix} Team {team.Id} has {count} {(count == 1 ? "ally" : "allies")}.", teamHintDuration);
-    }
+    [Tooltip("How many slots per ring around the leader. 6 is a nice default.")]
+    public int slotsPerRing = 6;
+
+    [Tooltip("NavMesh sample radius for formation slot positions.")]
+    public float navmeshSampleRadius = 2.5f;
+
+    [Tooltip("If true, we immediately issue SetDestination() orders to spread members when teams form/update/merge.")]
+    public bool applyFormationOnTeamChange = true;
+
     private void Awake()
     {
         if (Instance != null && Instance != this)
@@ -44,6 +42,21 @@ public class TeamManager : MonoBehaviour
             return;
         }
         Instance = this;
+    }
+
+    private void ShowTeamHint(Team team, string prefix)
+    {
+        if (!showTeamHints) return;
+        if (team == null) return;
+
+        int count = 0;
+        if (team.Members != null)
+        {
+            for (int i = 0; i < team.Members.Count; i++)
+                if (team.Members[i] != null) count++;
+        }
+
+        HintSystem.Show($"{prefix} Team {team.Id} has {count} {(count == 1 ? "ally" : "allies")}.", teamHintDuration);
     }
 
     private void ClearTeamPin(Team team)
@@ -78,7 +91,8 @@ public class TeamManager : MonoBehaviour
         // Same team already
         if (teamA != null && teamA == teamB)
         {
-            teamA.Anchor = joinTarget; // ✅ keep star on the second ally
+            teamA.Anchor = joinTarget; // keep star on second ally
+            ApplyFormationIfEnabled(teamA);
             return teamA;
         }
 
@@ -86,9 +100,12 @@ public class TeamManager : MonoBehaviour
         if (teamA == null && teamB == null)
         {
             var created = CreateTeam(leader, joinTarget);
-            created.Anchor = joinTarget; // ✅
+            created.Anchor = joinTarget; // keep star on second ally
+            created.FormationRadius = Mathf.Max(0.1f, defaultFormationRadius);
+
             ShowTeamHint(created, "Team formed!");
             ClearTeamPin(created);
+            ApplyFormationIfEnabled(created);
             return created;
         }
 
@@ -96,18 +113,24 @@ public class TeamManager : MonoBehaviour
         if (teamA != null && teamB == null)
         {
             teamA.Add(joinTarget);
-            teamA.Anchor = joinTarget; // ✅
+            teamA.Anchor = joinTarget; // star on second ally
+            teamA.FormationRadius = Mathf.Max(0.1f, teamA.FormationRadius > 0f ? teamA.FormationRadius : defaultFormationRadius);
+
             ShowTeamHint(teamA, "Team updated!");
             ClearTeamPin(teamA);
+            ApplyFormationIfEnabled(teamA);
             return teamA;
         }
 
         if (teamA == null && teamB != null)
         {
             teamB.Add(leader);
-            teamB.Anchor = joinTarget; // ✅
+            teamB.Anchor = joinTarget; // star on second ally
+            teamB.FormationRadius = Mathf.Max(0.1f, teamB.FormationRadius > 0f ? teamB.FormationRadius : defaultFormationRadius);
+
             ShowTeamHint(teamB, "Team updated!");
             ClearTeamPin(teamB);
+            ApplyFormationIfEnabled(teamB);
             return teamB;
         }
 
@@ -119,10 +142,14 @@ public class TeamManager : MonoBehaviour
 
             teams.Remove(teamB);
 
-            teamA.Anchor = joinTarget; // ✅
+            // Keep star on second ally (the one you clicked last)
+            teamA.Anchor = joinTarget;
+            teamA.FormationRadius = Mathf.Max(0.1f, teamA.FormationRadius > 0f ? teamA.FormationRadius : defaultFormationRadius);
+
             ShowTeamHint(teamA, "Teams merged!");
             ClearTeamPin(teamA);
             ClearTeamPin(teamB);
+            ApplyFormationIfEnabled(teamA);
             return teamA;
         }
 
@@ -135,7 +162,81 @@ public class TeamManager : MonoBehaviour
         if (a == b) return null;
 
         Team t = new Team(nextId++, a, b);
+        t.FormationRadius = Mathf.Max(0.1f, defaultFormationRadius);
         teams.Add(t);
         return t;
+    }
+
+    private void ApplyFormationIfEnabled(Team team)
+    {
+        if (!applyFormationOnTeamChange) return;
+        ApplyFormationAroundAnchor(team);
+    }
+
+    /// <summary>
+    /// Spreads non-anchor members around the Anchor using rings of slots.
+    /// Keeps Anchor (leader) in place, so the star stays on the leader (last-clicked ally).
+    /// </summary>
+    private void ApplyFormationAroundAnchor(Team team)
+    {
+        if (team == null) return;
+        if (team.Anchor == null) return;
+        if (team.Members == null || team.Members.Count == 0) return;
+
+        Vector3 center = team.Anchor.position;
+        center.y = 0f;
+
+        float baseRadius = team.FormationRadius > 0f ? team.FormationRadius : defaultFormationRadius;
+        baseRadius = Mathf.Max(0.1f, baseRadius);
+
+        // Build a stable basis around the leader
+        Vector3 right = team.Anchor.right; right.y = 0f;
+        if (right.sqrMagnitude < 0.0001f) right = Vector3.right;
+        right.Normalize();
+
+        Vector3 forward = Vector3.Cross(Vector3.up, right);
+        forward.y = 0f;
+        if (forward.sqrMagnitude < 0.0001f) forward = Vector3.forward;
+        forward.Normalize();
+
+        int slotIndex = 0;
+
+        for (int i = 0; i < team.Members.Count; i++)
+        {
+            Transform m = team.Members[i];
+            if (m == null) continue;
+
+            // Anchor stays where it is
+            if (m == team.Anchor) continue;
+
+            // Ring + angle
+            int ring = slotIndex / Mathf.Max(1, slotsPerRing);
+            int idxInRing = slotIndex % Mathf.Max(1, slotsPerRing);
+
+            float angleStep = 360f / Mathf.Max(1, slotsPerRing);
+            float angle = idxInRing * angleStep * Mathf.Deg2Rad;
+
+            float r = baseRadius + ring * Mathf.Max(0.1f, ringRadiusStep);
+
+            Vector3 dir = (right * Mathf.Cos(angle)) + (forward * Mathf.Sin(angle));
+            dir.y = 0f;
+            if (dir.sqrMagnitude < 0.0001f) dir = right;
+
+            Vector3 desired = center + dir.normalized * r;
+
+            // Snap to navmesh
+            if (NavMesh.SamplePosition(desired, out NavMeshHit hit, Mathf.Max(0.5f, navmeshSampleRadius), NavMesh.AllAreas))
+                desired = hit.position;
+
+            // Issue destination
+            NavMeshAgent agent = m.GetComponent<NavMeshAgent>();
+            if (agent != null && agent.enabled)
+            {
+                agent.isStopped = false;
+                agent.SetDestination(desired);
+            }
+
+            slotIndex++;
+        }
     }
 }

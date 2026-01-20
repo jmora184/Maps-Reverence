@@ -18,6 +18,10 @@ public class CommandExecutor : MonoBehaviour
     [Header("Move Settings")]
     public bool useFormation = true;
     public float formationSpacing = 1.6f;
+
+    [Tooltip("Extra spacing multiplier applied when issuing a move order for a Team (keeps team members from pushing into the same spot).")]
+    public float teamMoveSpacingMultiplier = 2.0f;
+
     public int formationColumns = 4;
 
     [Header("Team Move Settings")]
@@ -31,6 +35,17 @@ public class CommandExecutor : MonoBehaviour
     [Tooltip("If true, FOLLOW orders given to any team member will apply to the entire team.")]
     public bool expandFollowToWholeTeam = true;
 
+    [Header("Follow Formation (Team)")]
+    [Tooltip("If true, team FOLLOW orders keep members in formation while chasing a target (prevents everyone piling onto the same center point).")]
+    public bool useFormationWhileFollowingTeam = true;
+
+    [Tooltip("How often we refresh formation destinations while following a moving target (seconds).")]
+    public float followFormationRefreshInterval = 0.15f;
+
+    [Tooltip("NavMesh sample radius used when placing formation slots while following.")]
+    public float followFormationNavmeshSampleRadius = 2.5f;
+
+
     [Header("Move Hints (optional)")]
     [Tooltip("Show a hint when a move order is issued.")]
     public bool showMoveHints = true;
@@ -38,8 +53,62 @@ public class CommandExecutor : MonoBehaviour
     [Tooltip("How long the move hint stays on screen.")]
     public float moveHintDuration = 1.8f;
 
+    [Header("Destination Pin Auto-Clear")]
+    [Tooltip("If true, clears destination pin markers when the unit/team arrives at its move destination.")]
+    public bool clearDestinationPinsOnArrival = true;
+
+    [Tooltip("If true, clears destination pin markers when a FOLLOW/ATTACK target is destroyed (so pins don't linger after combat).")]
+    public bool clearDestinationPinsOnTargetDestroyed = true;
+
+    [Tooltip("How often we check for arrival to clear pins (seconds).")]
+    public float pinArrivalCheckInterval = 0.15f;
+
+    [Tooltip("Extra buffer added to NavMeshAgent.stoppingDistance when deciding that an agent has arrived.")]
+    public float pinArrivalStopBuffer = 0.6f;
+
+    [Header("Team Arrival Scaling")]
+    [Tooltip("If true, arrival tolerance for TEAM moves grows with team size (helps large teams that can't all fit on the exact center).")]
+    public bool scaleArrivalBufferWithTeamSize = true;
+
+    [Tooltip("Extra arrival buffer added when clearing TEAM pins. The extra grows as: perSqrtMember * sqrt(teamSize - 1).")]
+    public float teamArrivalExtraBufferPerSqrtMember = 0.35f;
+
+    [Tooltip("Clamp for the extra buffer added from team size.")]
+    public float teamArrivalMaxExtraBuffer = 3.0f;
+    [Header("Stop On Arrival")]
+    [Tooltip("If true, when a move is considered complete (pins cleared), we also stop agents and clear their paths to prevent 'running in place' from crowding/avoidance.")]
+    public bool stopAgentsOnArrival = true;
+
+
     [Header("Join Settings")]
-    public float joinArriveThreshold = 0.35f; // how close leader must get to target to be "arrived"
+    [Tooltip("Desired spacing (meters) from the team leader (the last-clicked ally) when joining. Larger = more spread.")]
+    public float joinLeaderRadius = 2.0f;
+
+    [Tooltip("Extra buffer added to stoppingDistance when considering the joiner \"arrived\" at their offset slot.")]
+    public float joinArriveThreshold = 0.35f;
+
+    [Tooltip("How often we refresh the join destination while following a moving leader (seconds).")]
+    public float joinFollowRefreshInterval = 0.15f;
+
+    [Header("Join Scaling")]
+    [Tooltip("If true, join tolerances scale gently with team size (helps larger teams where members bump each other).")]
+    public bool scaleJoinWithTeamSize = true;
+
+    [Tooltip("Extra join leader radius added as: perSqrtMember * sqrt(teamSize - 1).")]
+    public float joinExtraLeaderRadiusPerSqrtMember = 0.25f;
+
+    [Tooltip("Clamp for extra join leader radius from team size.")]
+    public float joinMaxExtraLeaderRadius = 2.0f;
+
+    [Tooltip("Extra arrive threshold added as: perSqrtMember * sqrt(teamSize - 1).")]
+    public float joinExtraArriveThresholdPerSqrtMember = 0.35f;
+
+    [Tooltip("Clamp for extra arrive threshold from team size.")]
+    public float joinMaxExtraArriveThreshold = 2.0f;
+
+    [Header("Join Stop (optional)")]
+    [Tooltip("If true, when the joiner reaches their slot we stop and clear path to prevent running-in-place from crowding/avoidance.")]
+    public bool stopJoinerOnJoinComplete = true;
 
     // -------------------- JOIN ROUTE (for DirectionArrowPreview) --------------------
     // DirectionArrowPreview.cs looks for these names (via reflection) to show an arrow while a join leader is in-route.
@@ -48,6 +117,10 @@ public class CommandExecutor : MonoBehaviour
     public Transform JoinMoveTarget { get; private set; }
 
     private Coroutine joinMoveRoutine;
+
+    private Coroutine followFormationRoutine;
+
+    private Coroutine pinClearRoutine;
 
     private void Awake()
     {
@@ -95,6 +168,12 @@ public class CommandExecutor : MonoBehaviour
         // ✅ Team expansion (team members move together)
         List<GameObject> expanded = ExpandSelectionForTeams(selection);
 
+        // Cancel any ongoing team-follow formation routine (move order overrides follow).
+        StopFollowFormationRoutine();
+
+        // New move order overrides any pending arrival watcher.
+        StopPinClearRoutine();
+
         // IMPORTANT: a point-move replaces any "follow" travel targets.
         ClearTravelFollowTargets(expanded);
 
@@ -103,6 +182,14 @@ public class CommandExecutor : MonoBehaviour
 
         List<NavMeshAgent> agents = GatherAgents(expanded);
         if (agents.Count == 0) return;
+
+        // If this move order is for a single team selection, increase formation spacing so members don't
+        // try to occupy the same center point (especially right after join).
+        float spacing = formationSpacing;
+        if (TeamManager.Instance != null && TryGetSingleTeamForSelection(expanded, out Team selTeam) && selTeam != null)
+        {
+            spacing = formationSpacing * Mathf.Max(1f, teamMoveSpacingMultiplier);
+        }
 
         // Optional stable ordering so formation offsets don't shuffle
         if (stableFormationOrdering && agents.Count > 1)
@@ -130,12 +217,14 @@ public class CommandExecutor : MonoBehaviour
                 a.isStopped = false;
                 a.SetDestination(destination);
             }
+
+            StartPinClearRoutine(expanded, agents);
             return;
         }
 
         // Formation
         int cols = Mathf.Max(1, formationColumns);
-        float spacing = Mathf.Max(0.1f, formationSpacing);
+        spacing = Mathf.Max(0.1f, spacing);
 
         int count = agents.Count;
         int rows = Mathf.CeilToInt(count / (float)cols);
@@ -163,6 +252,8 @@ public class CommandExecutor : MonoBehaviour
             agent.isStopped = false;
             agent.SetDestination(targetPos);
         }
+
+        StartPinClearRoutine(expanded, agents);
     }
 
     /// <summary>
@@ -174,12 +265,41 @@ public class CommandExecutor : MonoBehaviour
         if (selection == null || selection.Count == 0) return;
         if (targetUnit == null) return;
 
+        // New follow order overrides any prior follow-formation routine
+        StopFollowFormationRoutine();
+
+        // Follow order overrides any pending arrival watcher (destination may change).
+        StopPinClearRoutine();
+
         // Expand selection to whole team if requested
         List<GameObject> expanded = (expandFollowToWholeTeam ? ExpandSelectionForTeams(selection) : UniqueNonNull(selection));
 
         Transform targetT = targetUnit != null ? targetUnit.transform : null;
         if (targetT == null) return;
 
+
+        // If we're attacking/following an enemy, make it aggro onto an ally so it doesn't ignore allies and only react to the player.
+        // We'll pick a stable attacker transform (team anchor / first ally in selection).
+        Transform attackerT = null;
+        if (TeamManager.Instance != null && TryGetSingleTeamForSelection(expanded, out Team selTeam) && selTeam != null)
+        {
+            if (selTeam.Anchor != null) attackerT = selTeam.Anchor;
+            else if (selTeam.Members != null && selTeam.Members.Count > 0 && selTeam.Members[0] != null) attackerT = selTeam.Members[0];
+        }
+        if (attackerT == null)
+        {
+            for (int i = 0; i < expanded.Count; i++)
+            {
+                var go = expanded[i];
+                if (go == null) continue;
+                if (!go.CompareTag("Ally")) continue;
+                attackerT = go.transform;
+                break;
+            }
+        }
+
+        if (attackerT != null)
+            TryAggroEnemyToAttacker(targetT, attackerT);
         // If a follow starts, it should cancel any join-route coroutine (so arrows/state don't lie).
         // (Optional safety; doesn't change join team membership.)
         if (joinMoveRoutine != null)
@@ -189,7 +309,35 @@ public class CommandExecutor : MonoBehaviour
             ClearJoinRouteState();
         }
 
-        // Set travel follow target on allies, and kick the agent once.
+        // ✅ Team formation-follow: keep members in formation while chasing to prevent piling onto one center point.
+        if (useFormationWhileFollowingTeam &&
+            TeamManager.Instance != null &&
+            TryGetSingleTeamForSelection(expanded, out Team team) &&
+            team != null)
+        {
+            // Prevent AllyController from forcing everyone to chase the exact same center point.
+            for (int i = 0; i < expanded.Count; i++)
+            {
+                var go = expanded[i];
+                if (go == null) continue;
+                if (!go.CompareTag("Ally")) continue;
+
+                var ally = go.GetComponent<AllyController>();
+                if (ally != null) ally.target = null;
+            }
+
+            followFormationRoutine = StartCoroutine(FollowTargetAsFormationRoutine(team, targetT));
+
+            // Clear the destination pin when the target is destroyed, so attack/follow pins don't linger.
+            StartFollowPinClearRoutine_Team(team, targetT);
+
+            if (showMoveHints)
+                HintSystem.Show("Following target (formation).", moveHintDuration);
+
+            return;
+        }
+
+        // Default single-unit (or non-team) follow: set AllyController.target and kick the agent once.
         for (int i = 0; i < expanded.Count; i++)
         {
             var go = expanded[i];
@@ -209,10 +357,42 @@ public class CommandExecutor : MonoBehaviour
             }
         }
 
+        // For non-team follow, still clear any pin that may have been placed for this attack/follow.
+        StartFollowPinClearRoutine_Units(expanded, targetT);
+
         if (showMoveHints)
         {
             // Keep it simple; reuse moveHintDuration.
             HintSystem.Show("Following target.", moveHintDuration);
+        }
+
+    }
+
+    // -------------------- ENEMY AGGRO HELPERS --------------------
+    /// <summary>
+    /// Ensure an enemy switches its combat target to the attacker (ally) so it doesn't ignore allies and only chase the player.
+    /// Supports both Enemy2Controller and EnemyController (if present).
+    /// </summary>
+    private void TryAggroEnemyToAttacker(Transform enemyTransform, Transform attackerTransform)
+    {
+        if (enemyTransform == null || attackerTransform == null) return;
+
+        // Your project currently uses Enemy2Controller on enemies (per inspector), but we support both just in case.
+        var e2 = enemyTransform.GetComponentInParent<Enemy2Controller>();
+        if (e2 != null)
+        {
+            e2.SetCombatTarget(attackerTransform);
+            return;
+        }
+
+        var e1 = enemyTransform.GetComponentInParent<EnemyController>();
+        if (e1 != null)
+        {
+            // If your EnemyController uses a different API, adjust here.
+            // We try common method names safely via reflection-free direct calls only.
+            // (No-op if missing in this project.)
+            try { e1.SendMessage("SetCombatTarget", attackerTransform, SendMessageOptions.DontRequireReceiver); }
+            catch { /* ignore */ }
         }
     }
 
@@ -438,41 +618,95 @@ public class CommandExecutor : MonoBehaviour
             yield break;
         }
 
+        // ---- JOIN WITH SPACING ----
+        // We keep the team leader as the last-clicked ally (targetGO).
+        // The joiner (leaderGO) moves to an offset "slot" around the leader instead of stacking on top.
+
+        // Scale join tolerances with team size (helps larger teams where agents bump each other).
+        int joinTeamSize = 2;
+        if (scaleJoinWithTeamSize && TeamManager.Instance != null)
+        {
+            Team t = TeamManager.Instance.GetTeamOf(targetT);
+            if (t != null && t.Members != null) joinTeamSize = Mathf.Max(2, t.Members.Count);
+        }
+
+        float scaledJoinLeaderRadius = joinLeaderRadius;
+        float scaledJoinArriveThreshold = joinArriveThreshold;
+        if (scaleJoinWithTeamSize)
+        {
+            float sqrtN = Mathf.Sqrt(Mathf.Max(0, joinTeamSize - 1));
+            float extraR = joinExtraLeaderRadiusPerSqrtMember * sqrtN;
+            extraR = Mathf.Min(extraR, joinMaxExtraLeaderRadius);
+            scaledJoinLeaderRadius += Mathf.Max(0f, extraR);
+
+            float extraA = joinExtraArriveThresholdPerSqrtMember * sqrtN;
+            extraA = Mathf.Min(extraA, joinMaxExtraArriveThreshold);
+            scaledJoinArriveThreshold += Mathf.Max(0f, extraA);
+        }
+        Vector3 approachDir = (leaderT.position - targetT.position);
+        approachDir.y = 0f;
+
+        if (approachDir.sqrMagnitude < 0.0001f)
+        {
+            // Fallback to a stable direction if they start overlapped.
+            approachDir = targetT.right;
+            approachDir.y = 0f;
+            if (approachDir.sqrMagnitude < 0.0001f) approachDir = Vector3.right;
+        }
+
+        approachDir = approachDir.normalized;
+
+        Vector3 GetJoinSlot()
+        {
+            Vector3 desired = targetT.position + approachDir * Mathf.Max(0.1f, scaledJoinLeaderRadius);
+
+            // Snap to nearest navmesh so the joiner doesn't get stuck aiming off-mesh.
+            if (NavMesh.SamplePosition(desired, out NavMeshHit hit, 2.5f, NavMesh.AllAreas))
+                desired = hit.position;
+
+            return desired;
+        }
+
         agent.isStopped = false;
-        agent.SetDestination(targetT.position);
+        Vector3 slotPos = GetJoinSlot();
+        agent.SetDestination(slotPos);
 
-        // If the leader has an AllyController, set its 'target' so it will keep following a moving join target.
-        // This also allows resuming the join movement after temporary combat engagement.
+        // IMPORTANT: Do NOT set AllyController.target here, because that would force the joiner
+        // to chase the leader's exact position and stack on top. We refresh the offset destination instead.
         var leaderAlly = leaderGO.GetComponent<AllyController>();
-        if (leaderAlly != null)
-            leaderAlly.target = targetT;
 
-        float threshold = Mathf.Max(joinArriveThreshold, agent.stoppingDistance + 0.05f);
-
+        float threshold = Mathf.Max(scaledJoinArriveThreshold, agent.stoppingDistance + 0.05f);
         float joinFollowRefreshTimer = 0f;
 
         while (leaderGO != null && targetGO != null)
         {
-            float d = Vector3.Distance(leaderT.position, targetT.position);
-            if (d <= threshold) break;
+            // Recompute the slot (leader may move).
+            slotPos = GetJoinSlot();
 
-            // If we don't have AllyController driving follow, refresh the destination periodically.
-            if (leaderAlly == null)
+            float d = Vector3.Distance(leaderT.position, slotPos);
+            if (d <= threshold)
+                break;
+
+            // Refresh the destination periodically so we keep a stable offset as the leader moves.
+            joinFollowRefreshTimer -= Time.deltaTime;
+            if (joinFollowRefreshTimer <= 0f)
             {
-                joinFollowRefreshTimer -= Time.deltaTime;
-                if (joinFollowRefreshTimer <= 0f)
-                {
-                    agent.SetDestination(targetT.position);
-                    joinFollowRefreshTimer = 0.15f;
-                }
+                agent.SetDestination(slotPos);
+                joinFollowRefreshTimer = Mathf.Max(0.05f, joinFollowRefreshInterval);
             }
 
             yield return null;
         }
 
-        // Stop following the join target once we arrived or the join ended.
-        if (leaderAlly != null && leaderAlly.target == targetT)
-            leaderAlly.target = null;
+        // Stop the joiner so it doesn't "run in place" from crowding/avoidance.
+        if (stopJoinerOnJoinComplete)
+        {
+            agent.isStopped = true;
+            agent.ResetPath();
+            agent.autoBraking = true;
+        }
+
+        // (No AllyController.target follow for join-with-spacing.)
 
         // Clear marker
         if (marker != null)
@@ -490,6 +724,379 @@ public class CommandExecutor : MonoBehaviour
         IsJoinMoveInProgress = false;
         JoinMoveLeader = null;
         JoinMoveTarget = null;
+    }
+
+    private void StopFollowFormationRoutine()
+    {
+        if (followFormationRoutine != null)
+        {
+            StopCoroutine(followFormationRoutine);
+            followFormationRoutine = null;
+        }
+    }
+
+    private void StopPinClearRoutine()
+    {
+        if (pinClearRoutine != null)
+        {
+            StopCoroutine(pinClearRoutine);
+            pinClearRoutine = null;
+        }
+    }
+
+    private void StartPinClearRoutine(List<GameObject> expandedSelection, List<NavMeshAgent> agents)
+    {
+        if (!clearDestinationPinsOnArrival) return;
+        if (MoveDestinationMarkerSystem.Instance == null) return;
+        if (agents == null || agents.Count == 0) return;
+
+        // Prefer team-wide clearing when this move represents a single team.
+        if (TeamManager.Instance != null && TryGetSingleTeamForSelection(expandedSelection, out Team team) && team != null)
+        {
+            pinClearRoutine = StartCoroutine(ClearPinsWhenTeamArrivesRoutine(team, new List<NavMeshAgent>(agents)));
+        }
+        else
+        {
+            // Fallback: clear pins for these units when they arrive.
+            pinClearRoutine = StartCoroutine(ClearPinsWhenUnitsArriveRoutine(expandedSelection, new List<NavMeshAgent>(agents)));
+        }
+    }
+
+    private void StartFollowPinClearRoutine_Team(Team team, Transform targetT)
+    {
+        if (!clearDestinationPinsOnTargetDestroyed) return;
+        if (MoveDestinationMarkerSystem.Instance == null) return;
+        if (team == null) return;
+        if (targetT == null) return;
+
+        // Follow order overrides any pending arrival watcher.
+        StopPinClearRoutine();
+        pinClearRoutine = StartCoroutine(ClearPinsWhenFollowTargetDestroyed_TeamRoutine(team, targetT));
+    }
+
+    private void StartFollowPinClearRoutine_Units(List<GameObject> units, Transform targetT)
+    {
+        if (!clearDestinationPinsOnTargetDestroyed) return;
+        if (MoveDestinationMarkerSystem.Instance == null) return;
+        if (units == null || units.Count == 0) return;
+        if (targetT == null) return;
+
+        // Follow order overrides any pending arrival watcher.
+        StopPinClearRoutine();
+        pinClearRoutine = StartCoroutine(ClearPinsWhenFollowTargetDestroyed_UnitsRoutine(new List<GameObject>(units), targetT));
+    }
+
+    private IEnumerator ClearPinsWhenFollowTargetDestroyed_TeamRoutine(Team team, Transform targetT)
+    {
+        if (team == null) yield break;
+        float interval = Mathf.Max(0.05f, pinArrivalCheckInterval);
+
+        // Wait until the target is destroyed / lost.
+        while (targetT != null)
+            yield return new WaitForSeconds(interval);
+
+        if (MoveDestinationMarkerSystem.Instance != null)
+        {
+            MoveDestinationMarkerSystem.Instance.ClearForTeam(team);
+
+            // Also clear any per-member pins that might have been used.
+            if (team.Members != null && team.Members.Count > 0)
+            {
+                List<GameObject> gos = new List<GameObject>(team.Members.Count);
+                for (int i = 0; i < team.Members.Count; i++)
+                {
+                    var tr = team.Members[i];
+                    if (tr == null) continue;
+                    gos.Add(tr.gameObject);
+                }
+
+                if (gos.Count > 0)
+                    MoveDestinationMarkerSystem.Instance.ClearForUnits(gos.ToArray());
+            }
+        }
+
+        pinClearRoutine = null;
+    }
+
+    private IEnumerator ClearPinsWhenFollowTargetDestroyed_UnitsRoutine(List<GameObject> units, Transform targetT)
+    {
+        float interval = Mathf.Max(0.05f, pinArrivalCheckInterval);
+
+        while (targetT != null)
+            yield return new WaitForSeconds(interval);
+
+        if (MoveDestinationMarkerSystem.Instance != null && units != null && units.Count > 0)
+            MoveDestinationMarkerSystem.Instance.ClearForUnits(units.ToArray());
+
+        pinClearRoutine = null;
+    }
+
+    private IEnumerator ClearPinsWhenTeamArrivesRoutine(Team team, List<NavMeshAgent> agents)
+    {
+        if (team == null) yield break;
+        if (agents == null || agents.Count == 0) yield break;
+
+        float interval = Mathf.Max(0.05f, pinArrivalCheckInterval);
+
+        // Let paths compute first.
+        yield return null;
+
+        while (true)
+        {
+            // If we lost the marker system, abort.
+            if (MoveDestinationMarkerSystem.Instance == null)
+                break;
+
+            // Prune dead/disabled agents.
+            for (int i = agents.Count - 1; i >= 0; i--)
+            {
+                var a = agents[i];
+                if (a == null || !a.isActiveAndEnabled)
+                    agents.RemoveAt(i);
+            }
+
+            if (agents.Count == 0)
+                break;
+
+            float extraStop = 0f;
+            if (scaleArrivalBufferWithTeamSize)
+            {
+                int n = agents.Count;
+                extraStop = teamArrivalExtraBufferPerSqrtMember * Mathf.Sqrt(Mathf.Max(0, n - 1));
+                extraStop = Mathf.Min(extraStop, teamArrivalMaxExtraBuffer);
+            }
+
+            bool allArrived = true;
+            for (int i = 0; i < agents.Count; i++)
+            {
+                if (!IsAgentArrived(agents[i], extraStop))
+                {
+                    allArrived = false;
+                    break;
+                }
+            }
+
+            if (allArrived)
+            {
+                if (stopAgentsOnArrival) StopAgents(agents);
+                break;
+            }
+
+            yield return new WaitForSeconds(interval);
+        }
+
+        // Clear the team's destination pin(s).
+        if (MoveDestinationMarkerSystem.Instance != null)
+        {
+            MoveDestinationMarkerSystem.Instance.ClearForTeam(team);
+
+            // Also clear any per-member pins that might have been used.
+            if (team.Members != null && team.Members.Count > 0)
+            {
+                List<GameObject> gos = new List<GameObject>(team.Members.Count);
+                for (int i = 0; i < team.Members.Count; i++)
+                {
+                    var tr = team.Members[i];
+                    if (tr == null) continue;
+                    gos.Add(tr.gameObject);
+                }
+
+                if (gos.Count > 0)
+                    MoveDestinationMarkerSystem.Instance.ClearForUnits(gos.ToArray());
+            }
+        }
+
+        pinClearRoutine = null;
+    }
+
+    private IEnumerator ClearPinsWhenUnitsArriveRoutine(List<GameObject> units, List<NavMeshAgent> agents)
+    {
+        if (agents == null || agents.Count == 0) yield break;
+        float interval = Mathf.Max(0.05f, pinArrivalCheckInterval);
+
+        // Let paths compute first.
+        yield return null;
+
+        while (true)
+        {
+            if (MoveDestinationMarkerSystem.Instance == null)
+                break;
+
+            // Prune dead/disabled agents.
+            for (int i = agents.Count - 1; i >= 0; i--)
+            {
+                var a = agents[i];
+                if (a == null || !a.isActiveAndEnabled)
+                    agents.RemoveAt(i);
+            }
+
+            if (agents.Count == 0)
+                break;
+
+            bool allArrived = true;
+            for (int i = 0; i < agents.Count; i++)
+            {
+                if (!IsAgentArrived(agents[i], 0f))
+                {
+                    allArrived = false;
+                    break;
+                }
+            }
+
+            if (allArrived)
+            {
+                if (stopAgentsOnArrival) StopAgents(agents);
+                break;
+            }
+
+            yield return new WaitForSeconds(interval);
+        }
+
+        if (MoveDestinationMarkerSystem.Instance != null && units != null && units.Count > 0)
+            MoveDestinationMarkerSystem.Instance.ClearForUnits(units.ToArray());
+
+        pinClearRoutine = null;
+    }
+
+
+    private void StopAgents(List<NavMeshAgent> agents)
+    {
+        if (agents == null) return;
+        for (int i = 0; i < agents.Count; i++)
+        {
+            var a = agents[i];
+            if (a == null || !a.isActiveAndEnabled) continue;
+
+            // Stop movement and clear remaining path so animation/velocity settle.
+            a.isStopped = true;
+            a.ResetPath();
+
+            // Ensure braking is enabled when we stop.
+            a.autoBraking = true;
+        }
+    }
+
+    private bool IsAgentArrived(NavMeshAgent agent)
+    {
+        return IsAgentArrived(agent, 0f);
+    }
+
+    private bool IsAgentArrived(NavMeshAgent agent, float extraStopBuffer)
+    {
+        if (agent == null || !agent.isActiveAndEnabled) return true;
+
+        // If path is still being computed, not arrived.
+        if (agent.pathPending) return false;
+
+        // If no path and not moving, consider arrived.
+        if (!agent.hasPath && agent.velocity.sqrMagnitude < 0.01f) return true;
+
+        float remain = agent.remainingDistance;
+        if (float.IsInfinity(remain) || float.IsNaN(remain))
+            return agent.velocity.sqrMagnitude < 0.01f;
+
+        float threshold = Mathf.Max(agent.stoppingDistance, 0.05f) + pinArrivalStopBuffer + Mathf.Max(0f, extraStopBuffer);
+        return remain <= threshold;
+    }
+
+
+
+    private IEnumerator FollowTargetAsFormationRoutine(Team team, Transform targetT)
+    {
+        if (team == null) yield break;
+
+        // Gather agents from the team (not from selection), so merges/joins stay consistent.
+        List<NavMeshAgent> agents = new List<NavMeshAgent>();
+        if (team.Members != null)
+        {
+            for (int i = 0; i < team.Members.Count; i++)
+            {
+                var m = team.Members[i];
+                if (m == null) continue;
+
+                var a = m.GetComponent<NavMeshAgent>();
+                if (a == null) a = m.GetComponentInChildren<NavMeshAgent>();
+                if (a != null && a.isActiveAndEnabled)
+                    agents.Add(a);
+            }
+        }
+
+        if (agents.Count <= 1) yield break;
+
+        // Stable ordering so slots don't shuffle as you chase
+        if (stableFormationOrdering)
+        {
+            agents.Sort((a, b) =>
+            {
+                if (a == null && b == null) return 0;
+                if (a == null) return 1;
+                if (b == null) return -1;
+                return a.transform.GetInstanceID().CompareTo(b.transform.GetInstanceID());
+            });
+        }
+
+        float spacing = formationSpacing * Mathf.Max(1f, teamMoveSpacingMultiplier);
+        spacing = Mathf.Max(0.25f, spacing);
+
+        int cols = Mathf.Max(1, formationColumns);
+        float interval = Mathf.Max(0.05f, followFormationRefreshInterval);
+        float sampleR = Mathf.Max(0.5f, followFormationNavmeshSampleRadius);
+
+        // While target exists, keep nudging the team into formation slots around the target position.
+        while (targetT != null)
+        {
+            Vector3 center = targetT.position;
+            center.y = 0f;
+
+            ApplyGridFormationToAgents(agents, center, spacing, cols, sampleR, forceUnstop: false);
+
+            yield return new WaitForSeconds(interval);
+        }
+
+        // Target was destroyed / lost: "settle" the team into a spaced formation around the current anchor
+        // to prevent everyone trying to occupy the same center point after combat.
+        Vector3 settle = (team.Anchor != null ? team.Anchor.position : agents[0].transform.position);
+        settle.y = 0f;
+
+        ApplyGridFormationToAgents(agents, settle, spacing, cols, sampleR, forceUnstop: true);
+
+        followFormationRoutine = null;
+    }
+
+    private static void ApplyGridFormationToAgents(List<NavMeshAgent> agents, Vector3 center, float spacing, int cols, float sampleRadius, bool forceUnstop)
+    {
+        if (agents == null || agents.Count == 0) return;
+
+        cols = Mathf.Max(1, cols);
+        spacing = Mathf.Max(0.1f, spacing);
+
+        int count = agents.Count;
+        int rows = Mathf.CeilToInt(count / (float)cols);
+
+        float width = (cols - 1) * spacing;
+        float height = (rows - 1) * spacing;
+
+        for (int i = 0; i < agents.Count; i++)
+        {
+            var agent = agents[i];
+            if (agent == null || !agent.isActiveAndEnabled) continue;
+
+            int r = i / cols;
+            int c = i % cols;
+
+            float x = (c * spacing) - width * 0.5f;
+            float z = (r * spacing) - height * 0.5f;
+
+            Vector3 targetPos = center + new Vector3(x, 0f, z);
+
+            if (NavMesh.SamplePosition(targetPos, out NavMeshHit hit, sampleRadius, NavMesh.AllAreas))
+                targetPos = hit.position;
+
+            if (forceUnstop)
+                agent.isStopped = false;
+
+            agent.SetDestination(targetPos);
+        }
     }
 
     // -------------------- SPLIT (placeholder) --------------------
