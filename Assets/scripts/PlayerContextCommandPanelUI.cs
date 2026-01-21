@@ -24,6 +24,10 @@ public class PlayerContextCommandPanelUI : MonoBehaviour
     public Button holdFireButton;
     public Button holdPositionButton; // optional
 
+
+    // Formation buttons (inspector-only; no functionality here)
+    public Button lineFormationButton;
+    public Button wedgeFormationButton;
     [Header("Theme (Player Buttons)")]
     public Color buttonNormal = new Color(0.20f, 0.35f, 0.85f, 1f);
     public Color buttonHighlight = new Color(0.28f, 0.45f, 0.95f, 1f);
@@ -97,6 +101,8 @@ public class PlayerContextCommandPanelUI : MonoBehaviour
         ApplyButtonTheme(followMeButton);
         ApplyButtonTheme(holdFireButton);
         ApplyButtonTheme(holdPositionButton);
+        ApplyButtonTheme(lineFormationButton);
+        ApplyButtonTheme(wedgeFormationButton);
     }
 
     private void ApplyButtonTheme(Button b)

@@ -80,10 +80,10 @@ public class PlayerSquadFollowSystem : MonoBehaviour
 
     [Header("Arc Shape")]
     [Tooltip("Base distance behind player for the first row.")]
-    public float baseBehindDistance = 3.2f;
+    public float baseBehindDistance = 4.2f;
 
     [Tooltip("Base lateral spacing (will scale up with squad size).")]
-    public float baseSpacing = 1.8f;
+    public float baseSpacing = 2.2f;
 
     [Tooltip("How much spacing grows with squad size: spacing *= (1 + spacingGrowthPerSqrtMember * sqrt(n-1)).")]
     public float spacingGrowthPerSqrtMember = 0.14f;
@@ -107,13 +107,13 @@ public class PlayerSquadFollowSystem : MonoBehaviour
 
     [Header("Follow Distance")]
     [Tooltip("NavMeshAgent stopping distance to use while following slots (prevents face-hugging the player).")]
-    public float followStoppingDistance = 1.6f;
+    public float followStoppingDistance = 2.4f;
 
     [Tooltip("Extra personal space added on top of stopping distance when building slot radii (prevents slots too close to the player).")]
-    public float playerPersonalSpace = 0.8f;
+    public float playerPersonalSpace = 1.2f;
 
     [Tooltip("Minimum radius behind player regardless of other settings.")]
-    public float minBehindRadius = 2.6f;
+    public float minBehindRadius = 3.4f;
 
     [Header("Smoothing")]
     [Tooltip("How quickly slot transforms move toward their desired positions (higher = snappier).")]
