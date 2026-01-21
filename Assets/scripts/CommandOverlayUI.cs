@@ -612,7 +612,7 @@ public class CommandOverlayUI : MonoBehaviour
         {
             AutoFindHoverCursorIcon();
             if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
-            if (hoverCursorIcon != null && sm != null && sm.CurrentState == CommandStateMachine.State.MoveTargeting && sm.CurrentSelection != null && sm.CurrentSelection.Count > 0)
+            if (hoverCursorIcon != null && sm != null && sm.CurrentState == CommandStateMachine.State.MoveTargeting)
                 hoverCursorIcon.SetOverEnemy(true);
             int _previewCount = 1;
             if (sm != null && sm.CurrentSelection != null) _previewCount = Mathf.Max(1, sm.CurrentSelection.Count);
@@ -625,7 +625,7 @@ public class CommandOverlayUI : MonoBehaviour
         {
             AutoFindHoverCursorIcon();
             if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
-            if (hoverCursorIcon != null && sm != null && sm.CurrentState == CommandStateMachine.State.MoveTargeting && sm.CurrentSelection != null && sm.CurrentSelection.Count > 0)
+            if (hoverCursorIcon != null && sm != null && sm.CurrentState == CommandStateMachine.State.MoveTargeting)
                 hoverCursorIcon.SetOverEnemy(false);
             AttackTargetIndicatorSystem.Instance?.ClearPreview(enemyTarget);
         });
@@ -843,8 +843,7 @@ public class CommandOverlayUI : MonoBehaviour
             hoverCursorIcon.canvas = canvas;
 
         bool inCmd = IsInCommandView();
-        bool hasSelection = (sm != null && sm.CurrentSelection != null && sm.CurrentSelection.Count > 0);
-        bool show = inCmd && (sm != null && sm.CurrentState == CommandStateMachine.State.MoveTargeting) && hasSelection;
+        bool show = inCmd && (sm != null && sm.CurrentState == CommandStateMachine.State.MoveTargeting);
         hoverCursorIcon.SetVisible(show);
 
         // Make absolutely sure it renders on top.
