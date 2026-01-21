@@ -1,3 +1,5 @@
+using System;
+using System.Reflection;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -37,6 +39,9 @@ public class AttackTargetIndicatorSystem : MonoBehaviour
     [Header("Behavior")]
     [Tooltip("If true, preview badge shows selection count while hovering an enemy during MoveTargeting.")]
     public bool enablePreview = true;
+
+    [Tooltip("If true, preview badge ONLY shows while the player is in Move/Attack targeting mode and has at least one unit selected.")]
+    public bool previewOnlyInMoveTargeting = true;
 
     [Tooltip("If true, badges are only rendered while in Command Mode (prevents lingering badges in FPS mode).")]
     public bool onlyShowInCommandMode = true;
@@ -162,9 +167,19 @@ public class AttackTargetIndicatorSystem : MonoBehaviour
         }
     }
 
+
     public void SetPreview(Transform enemy, int count)
     {
         if (!enablePreview) return;
+
+        if (previewOnlyInMoveTargeting && !IsMoveTargetingWithSelection())
+        {
+            // If we're not in move targeting, ensure no lingering preview.
+            if (previewEnemy == enemy)
+                ClearPreview(enemy);
+            return;
+        }
+
         previewEnemy = enemy;
         previewCount = Mathf.Max(0, count);
         RefreshEnemy(enemy);
@@ -331,6 +346,184 @@ public class AttackTargetIndicatorSystem : MonoBehaviour
         return badge;
     }
 
+
+
+    // Preview should only appear while the player is actively in Move/Attack targeting mode (and has selection).
+    // We intentionally use reflection here so this system stays compatible even if your CommandStateMachine API changes.
+    private bool IsMoveTargetingWithSelection()
+    {
+        try
+        {
+            var sm = FindCommandStateMachineInstance();
+            if (sm == null) return false;
+
+            int selectionCount = TryGetSelectionCount(sm);
+            if (selectionCount <= 0) return false;
+
+            // Common bool flags
+            string[] boolNames = { "IsMoveTargeting", "InMoveTargeting", "IsInMoveTargeting", "IsMoveMode", "IsMoveAttackMode" };
+            for (int i = 0; i < boolNames.Length; i++)
+            {
+                if (TryGetBool(sm, boolNames[i], out bool b) && b)
+                    return true;
+            }
+
+            // Common state enum/object names
+            string[] stateNames = { "CurrentState", "State", "currentState" };
+            for (int i = 0; i < stateNames.Length; i++)
+            {
+                if (TryGetObject(sm, stateNames[i], out object stateObj) && stateObj != null)
+                {
+                    string s = stateObj.ToString();
+                    if (!string.IsNullOrEmpty(s))
+                    {
+                        s = s.ToLowerInvariant();
+                        if (s.Contains("move") && s.Contains("target"))
+                            return true;
+                    }
+                }
+            }
+
+            // If we can't determine the state, be conservative (no preview).
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private UnityEngine.Object FindCommandStateMachineInstance()
+    {
+        // First try to fetch from CommandOverlayUI via reflection (sm/stateMachine field)
+        try
+        {
+            if (CommandOverlayUI.Instance != null)
+            {
+                var ui = CommandOverlayUI.Instance;
+                var uiType = ui.GetType();
+
+                var f = uiType.GetField("sm", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                if (f != null)
+                {
+                    var v = f.GetValue(ui) as UnityEngine.Object;
+                    if (v != null) return v;
+                }
+
+                f = uiType.GetField("stateMachine", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                if (f != null)
+                {
+                    var v = f.GetValue(ui) as UnityEngine.Object;
+                    if (v != null) return v;
+                }
+            }
+        }
+        catch { /* ignore */ }
+
+        // Otherwise find by type name
+        var t = FindTypeByName("CommandStateMachine");
+        if (t == null) return null;
+
+#pragma warning disable 618
+        return UnityEngine.Object.FindObjectOfType(t);
+#pragma warning restore 618
+    }
+
+    private static Type FindTypeByName(string typeName)
+    {
+        if (string.IsNullOrEmpty(typeName)) return null;
+
+        // Try fast path first
+        var t = Type.GetType(typeName);
+        if (t != null) return t;
+
+        var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+        for (int i = 0; i < assemblies.Length; i++)
+        {
+            var a = assemblies[i];
+            if (a == null) continue;
+            t = a.GetType(typeName);
+            if (t != null) return t;
+        }
+        return null;
+    }
+
+    private static bool TryGetBool(object obj, string memberName, out bool value)
+    {
+        value = false;
+        if (obj == null || string.IsNullOrEmpty(memberName)) return false;
+
+        var t = obj.GetType();
+        var p = t.GetProperty(memberName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        if (p != null && p.PropertyType == typeof(bool))
+        {
+            value = (bool)p.GetValue(obj);
+            return true;
+        }
+
+        var f = t.GetField(memberName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        if (f != null && f.FieldType == typeof(bool))
+        {
+            value = (bool)f.GetValue(obj);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryGetObject(object obj, string memberName, out object value)
+    {
+        value = null;
+        if (obj == null || string.IsNullOrEmpty(memberName)) return false;
+
+        var t = obj.GetType();
+        var p = t.GetProperty(memberName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        if (p != null)
+        {
+            value = p.GetValue(obj);
+            return true;
+        }
+
+        var f = t.GetField(memberName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        if (f != null)
+        {
+            value = f.GetValue(obj);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static int TryGetSelectionCount(object sm)
+    {
+        if (sm == null) return 0;
+
+        // Preferred explicit count
+        if (TryGetObject(sm, "SelectionCount", out object countObj) && countObj != null)
+        {
+            if (countObj is int i) return i;
+        }
+
+        // Otherwise look for a selection collection
+        string[] selNames = { "CurrentSelection", "Selection", "selectedUnits", "SelectedUnits" };
+        for (int i = 0; i < selNames.Length; i++)
+        {
+            if (TryGetObject(sm, selNames[i], out object selObj) && selObj != null)
+            {
+                if (selObj is System.Collections.ICollection col)
+                    return col.Count;
+
+                if (selObj is System.Collections.IEnumerable en)
+                {
+                    int c = 0;
+                    foreach (var _ in en) c++;
+                    return c;
+                }
+            }
+        }
+
+        return 0;
+    }
     private bool IsCommandMode()
     {
         if (CommandCamToggle.Instance != null)
@@ -351,6 +544,11 @@ public class AttackTargetIndicatorSystem : MonoBehaviour
 
         bool commandMode = !onlyShowInCommandMode || IsCommandMode();
 
+
+        if (enablePreview && previewOnlyInMoveTargeting && previewEnemy != null && !IsMoveTargetingWithSelection())
+        {
+            ClearAllPreview();
+        }
         // Cleanup dead enemies + bad badges up-front (prevents "badge at center" artifacts).
         List<Transform> enemiesToRemove = null;
         foreach (var kvp in badgeByEnemy)

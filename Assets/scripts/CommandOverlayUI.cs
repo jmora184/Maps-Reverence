@@ -9,6 +9,8 @@ using UnityEngine.EventSystems;
 
 public class CommandOverlayUI : MonoBehaviour
 {
+    private readonly HashSet<Transform> playerFollowerUnits = new HashSet<Transform>();
+
     public static CommandOverlayUI Instance { get; private set; }
     public static CommandOverlayUI instance => Instance; // backwards compat
 
@@ -349,6 +351,128 @@ public class CommandOverlayUI : MonoBehaviour
 
     // -------------------- ICON BUILD / UPDATE --------------------
 
+
+
+
+
+    private static void BuildKeepSetForTag(Transform iconRoot, Transform tag, HashSet<Transform> keep)
+    {
+        keep.Clear();
+        if (iconRoot == null || tag == null) return;
+
+        // Keep tag, its children, and the parent chain up to the icon root.
+        // This ensures nested PlayerTag becomes visible.
+        Transform t = tag;
+        while (t != null)
+        {
+            keep.Add(t);
+            if (t == iconRoot) break;
+            t = t.parent;
+        }
+
+        var tagChildren = tag.GetComponentsInChildren<Transform>(true);
+        for (int i = 0; i < tagChildren.Length; i++)
+        {
+            var c = tagChildren[i];
+            if (c != null) keep.Add(c);
+        }
+    }
+
+    private readonly HashSet<Transform> _tmpKeep = new HashSet<Transform>();
+
+    /// <summary>
+    /// FPS mode: keep the AllyIcon active but show ONLY the PlayerTag (and its parent chain).
+    /// This avoids bringing back all command overlay visuals in FPS.
+    /// </summary>
+    private void SetIconShowOnlyPlayerTag(RectTransform icon)
+    {
+        if (icon == null) return;
+
+        var tag = FindDeepChildByName(icon, "PlayerTag");
+        if (tag == null) return;
+
+        BuildKeepSetForTag(icon, tag, _tmpKeep);
+
+        // Enable icon root
+        icon.gameObject.SetActive(true);
+
+        // Disable everything under icon except the keep set
+        var all = icon.GetComponentsInChildren<Transform>(true);
+        for (int i = 0; i < all.Length; i++)
+        {
+            var tr = all[i];
+            if (tr == null) continue;
+            if (tr == icon) continue;
+
+            bool keep = _tmpKeep.Contains(tr);
+            if (tr.gameObject.activeSelf != keep)
+                tr.gameObject.SetActive(keep);
+        }
+
+        // Ensure the tag itself is enabled
+        tag.gameObject.SetActive(true);
+    }
+
+    private static Transform FindDeepChildByName(Transform root, string childName)
+    {
+        if (root == null || string.IsNullOrEmpty(childName)) return null;
+
+        // Includes inactive children
+        var all = root.GetComponentsInChildren<Transform>(true);
+        for (int i = 0; i < all.Length; i++)
+        {
+            var t = all[i];
+            if (t != null && t.name == childName)
+                return t;
+        }
+        return null;
+    }
+
+    // -------------------- PLAYER FOLLOW TAG --------------------
+
+    public bool IsPlayerFollower(Transform ally)
+    {
+        if (ally == null) return false;
+        return playerFollowerUnits.Contains(ally);
+    }
+
+    /// <summary>
+    /// Toggles the small PlayerTag indicator under an ally icon (used when ally is following the player).
+    /// Your AllyIcon prefab should have a child GameObject named "PlayerTag" (disabled by default).
+    /// When active, the ally icon becomes NOT clickable/selection-able.
+    /// </summary>
+    public void SetPlayerFollowerTag(Transform ally, bool active)
+    {
+        if (ally == null) return;
+
+        if (active) playerFollowerUnits.Add(ally);
+        else playerFollowerUnits.Remove(ally);
+
+        if (allyIconByUnit != null && allyIconByUnit.TryGetValue(ally, out RectTransform icon) && icon != null)
+        {
+            var tag = FindDeepChildByName(icon, "PlayerTag");
+            if (tag != null)
+                tag.gameObject.SetActive(active);
+
+            // Disable clicking/raycasting when following so the icon can't be selected.
+            var btn = icon.GetComponent<Button>();
+            if (btn != null) btn.interactable = !active;
+
+            var cg = icon.GetComponent<CanvasGroup>();
+            if (cg == null) cg = icon.gameObject.AddComponent<CanvasGroup>();
+            cg.blocksRaycasts = !active;
+        }
+    }
+
+    public void SetPlayerFollowerTags(IEnumerable<Transform> allies, bool active)
+    {
+        if (allies == null) return;
+        foreach (var a in allies)
+            SetPlayerFollowerTag(a, active);
+    }
+
+
+
     public void BuildIcons()
     {
         ClearAllIcons();
@@ -366,6 +490,16 @@ public class CommandOverlayUI : MonoBehaviour
             EnsureHoverHint(icon, allyHoverHint);
 
             allyIconByUnit[go.transform] = icon;
+
+
+            // Ensure PlayerTag starts hidden and icon is clickable by default
+            var playerTag = FindDeepChildByName(icon, "PlayerTag");
+            if (playerTag != null) playerTag.gameObject.SetActive(false);
+            var btnInit = icon.GetComponent<Button>();
+            if (btnInit != null) btnInit.interactable = true;
+            var cgInit = icon.GetComponent<CanvasGroup>();
+            if (cgInit != null) cgInit.blocksRaycasts = true;
+
 
             // Bind ally UI helpers (health bar, team tag, etc.)
             var allyUI = icon.GetComponent<AllyHealthIcon>();
@@ -445,6 +579,12 @@ public class CommandOverlayUI : MonoBehaviour
 
             }
         }
+
+
+        // If we have an active follow group, re-apply PlayerTag indicators after rebuilding icons.
+        if (PlayerSquadFollowSystem.Instance != null)
+            PlayerSquadFollowSystem.Instance.RefreshFollowerTagsUI();
+
     }
 
     // -------------------- ENEMY HOVER (attack icon preview) --------------------
@@ -472,7 +612,7 @@ public class CommandOverlayUI : MonoBehaviour
         {
             AutoFindHoverCursorIcon();
             if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
-            if (hoverCursorIcon != null && sm != null && sm.CurrentState == CommandStateMachine.State.MoveTargeting)
+            if (hoverCursorIcon != null && sm != null && sm.CurrentState == CommandStateMachine.State.MoveTargeting && sm.CurrentSelection != null && sm.CurrentSelection.Count > 0)
                 hoverCursorIcon.SetOverEnemy(true);
             int _previewCount = 1;
             if (sm != null && sm.CurrentSelection != null) _previewCount = Mathf.Max(1, sm.CurrentSelection.Count);
@@ -485,7 +625,7 @@ public class CommandOverlayUI : MonoBehaviour
         {
             AutoFindHoverCursorIcon();
             if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
-            if (hoverCursorIcon != null && sm != null && sm.CurrentState == CommandStateMachine.State.MoveTargeting)
+            if (hoverCursorIcon != null && sm != null && sm.CurrentState == CommandStateMachine.State.MoveTargeting && sm.CurrentSelection != null && sm.CurrentSelection.Count > 0)
                 hoverCursorIcon.SetOverEnemy(false);
             AttackTargetIndicatorSystem.Instance?.ClearPreview(enemyTarget);
         });
@@ -622,9 +762,38 @@ public class CommandOverlayUI : MonoBehaviour
     private void SetOverlayVisible(bool visible)
     {
         // Ally/enemy icons
-        SetDictIconsActive(allyIconByUnit, visible);
-        SetDictIconsActive(enemyIconByUnit, visible);
+        if (visible)
+        {
+            // Command mode: show all icons normally
+            SetDictIconsActive(allyIconByUnit, true);
+            SetDictIconsActive(enemyIconByUnit, true);
 
+            // If followers exist, re-apply their PlayerTag after re-showing icons.
+            if (PlayerSquadFollowSystem.Instance != null)
+                PlayerSquadFollowSystem.Instance.RefreshFollowerTagsUI();
+        }
+        else
+        {
+            // FPS mode: hide everything EXCEPT PlayerTag for player-followers.
+            if (allyIconByUnit != null)
+            {
+                foreach (var kvp in allyIconByUnit)
+                {
+                    if (kvp.Value == null) continue;
+
+                    if (IsPlayerFollower(kvp.Key))
+                    {
+                        SetIconShowOnlyPlayerTag(kvp.Value);
+                    }
+                    else
+                    {
+                        kvp.Value.gameObject.SetActive(false);
+                    }
+                }
+            }
+
+            SetDictIconsActive(enemyIconByUnit, false);
+        }
         // Team stars
         if (teamStarByTeamId != null)
         {
@@ -674,7 +843,8 @@ public class CommandOverlayUI : MonoBehaviour
             hoverCursorIcon.canvas = canvas;
 
         bool inCmd = IsInCommandView();
-        bool show = inCmd && (sm != null && sm.CurrentState == CommandStateMachine.State.MoveTargeting);
+        bool hasSelection = (sm != null && sm.CurrentSelection != null && sm.CurrentSelection.Count > 0);
+        bool show = inCmd && (sm != null && sm.CurrentState == CommandStateMachine.State.MoveTargeting) && hasSelection;
         hoverCursorIcon.SetVisible(show);
 
         // Make absolutely sure it renders on top.
@@ -1128,6 +1298,27 @@ public class CommandOverlayUI : MonoBehaviour
         if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
         if (sm == null) return;
 
+
+
+        // Player follow pick mode: clicking a Team Star chooses the whole team to follow.
+        if (PlayerSquadFollowSystem.Instance != null && PlayerSquadFollowSystem.Instance.IsPickingFollowers)
+        {
+            var members = new List<Transform>();
+            if (team.Anchor != null) members.Add(team.Anchor);
+            if (team.Members != null)
+            {
+                for (int i = 0; i < team.Members.Count; i++)
+                {
+                    var mbr = team.Members[i];
+                    if (mbr == null) continue;
+                    if (team.Anchor != null && mbr == team.Anchor) continue;
+                    members.Add(mbr);
+                }
+            }
+
+            PlayerSquadFollowSystem.Instance.ConsumePickOnTeam(members);
+            return;
+        }
         // ✅ If we're currently choosing a JOIN target, clicking the star should act like clicking the team "anchor"
         // so an unteamed ally can join an already-existing team.
         if (sm.CurrentState == CommandStateMachine.State.AddTargeting)
@@ -1156,6 +1347,21 @@ public class CommandOverlayUI : MonoBehaviour
         if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
         if (sm == null) return;
 
+
+
+        // Player follow pick mode: if armed, this click chooses the follower(s) instead of normal selection.
+        if (PlayerSquadFollowSystem.Instance != null && PlayerSquadFollowSystem.Instance.IsPickingFollowers)
+        {
+            if (unit.CompareTag("Ally"))
+            {
+                PlayerSquadFollowSystem.Instance.ConsumePickOnAlly(unit);
+                return;
+            }
+        }
+
+        // If this ally is currently a player-follower, ignore clicks (followers aren't selectable).
+        if (unit.CompareTag("Ally") && IsPlayerFollower(unit))
+            return;
         // While choosing a MOVE target, ignore ally icon clicks so the current selection stays locked
         // until a destination (or enemy follow) is chosen.
         if (sm.CurrentState == CommandStateMachine.State.MoveTargeting)
@@ -1359,6 +1565,7 @@ public class CommandOverlayUI : MonoBehaviour
         foreach (var kvp in allyIconByUnit)
             if (kvp.Value != null) Destroy(kvp.Value.gameObject);
         allyIconByUnit.Clear();
+        playerFollowerUnits.Clear();
 
         foreach (var kvp in enemyIconByUnit)
             if (kvp.Value != null) Destroy(kvp.Value.gameObject);

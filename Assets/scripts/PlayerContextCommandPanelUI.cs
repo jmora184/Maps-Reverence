@@ -1,6 +1,18 @@
+using System.Collections;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 
+/// <summary>
+/// Player personal commands panel (shown when clicking the Player icon in CommandOverlayUI).
+///
+/// Follow Me behavior (updated):
+/// - Uses CURRENT COMMAND SELECTION to decide who follows.
+/// - If no allies are selected, we show a hint and do nothing (so you can choose).
+///
+/// Notes:
+/// - This is meant to be used while in command view: select allies or a team star, then click Player icon -> Follow Me.
+/// </summary>
 public class PlayerContextCommandPanelUI : MonoBehaviour
 {
     public static PlayerContextCommandPanelUI Instance { get; private set; }
@@ -12,7 +24,19 @@ public class PlayerContextCommandPanelUI : MonoBehaviour
     [Header("Buttons")]
     public Button followMeButton;
     public Button holdFireButton;
+    public Button lineFormationButton;
+    public Button wedgeFormationButton;
     public Button holdPositionButton; // optional
+
+    [Header("Follow Selection")]
+    [Tooltip("If true, Follow Me requires allies selected in command mode. If false, falls back to ALL allies.")]
+    public bool requireSelectionForFollow = true;
+
+    [Tooltip("Hint shown when Follow Me is pressed but no allies are selected.")]
+    public string followRequiresSelectionHint = "Select allies (or a Team Star) first, then press Follow Me.";
+
+    [Tooltip("How long the hint stays visible (if HintToastUI exists).")]
+    public float hintDuration = 2f;
 
     [Header("Theme (Player Buttons)")]
     public Color buttonNormal = new Color(0.20f, 0.35f, 0.85f, 1f);
@@ -25,6 +49,8 @@ public class PlayerContextCommandPanelUI : MonoBehaviour
 
     private RectTransform anchor;
     private Transform playerTarget;
+    private HintToastUI hintToastUI;
+    private Coroutine hintHideRoutine;
 
     private void Awake()
     {
@@ -41,7 +67,7 @@ public class PlayerContextCommandPanelUI : MonoBehaviour
         ApplyTheme();
         HideImmediate();
 
-        // Hook buttons (you can replace these bodies later with your real logic)
+        // Hook buttons
         if (followMeButton != null) followMeButton.onClick.AddListener(OnFollowMeClicked);
         if (holdFireButton != null) holdFireButton.onClick.AddListener(OnHoldFireClicked);
         if (holdPositionButton != null) holdPositionButton.onClick.AddListener(OnHoldPositionClicked);
@@ -71,6 +97,9 @@ public class PlayerContextCommandPanelUI : MonoBehaviour
 
     public void HideImmediate()
     {
+        if (hintHideRoutine != null) StopCoroutine(hintHideRoutine);
+        hintHideRoutine = null;
+
         if (canvasGroup != null) canvasGroup.alpha = 0f;
         if (root != null && root.gameObject.activeSelf) root.gameObject.SetActive(false);
 
@@ -114,24 +143,124 @@ public class PlayerContextCommandPanelUI : MonoBehaviour
         if (txt != null) txt.color = buttonTextColor;
     }
 
-    // ===== Button actions (stub for now) =====
+    // ===== Button actions =====
 
     private void OnFollowMeClicked()
     {
-        // TODO: Hook to your player command system
-        Debug.Log("[Player Panel] Follow Me clicked");
+        // Resolve player
+        if (playerTarget == null)
+        {
+            var p = GameObject.FindGameObjectWithTag("Player");
+            if (p != null) playerTarget = p.transform;
+        }
+
+        if (playerTarget == null)
+        {
+            Debug.LogWarning("[Player Panel] Follow Me clicked, but Player not found (tag=Player).");
+            HideImmediate();
+            return;
+        }
+
+        // Gather selected allies
+        List<Transform> selectedAllies = GatherSelectedAllies();
+
+        if (requireSelectionForFollow && (selectedAllies == null || selectedAllies.Count == 0))
+        {
+            ShowHint(followRequiresSelectionHint, hintDuration);
+            return; // keep panel open so you can select then click again
+        }
+
+        // Start squad follow formation behind player
+        var sys = PlayerSquadFollowSystem.EnsureExists();
+        sys.SetPlayer(playerTarget);
+
+        if (selectedAllies != null && selectedAllies.Count > 0)
+            sys.BeginFollow(selectedAllies);
+        else
+            sys.BeginFollow_AllAllies(); // optional fallback
+
         HideImmediate();
+    }
+
+    private List<Transform> GatherSelectedAllies()
+    {
+        var sm = FindObjectOfType<CommandStateMachine>();
+        if (sm == null || sm.CurrentSelection == null || sm.CurrentSelection.Count == 0)
+            return new List<Transform>();
+
+        var list = new List<Transform>(sm.CurrentSelection.Count);
+        for (int i = 0; i < sm.CurrentSelection.Count; i++)
+        {
+            var go = sm.CurrentSelection[i];
+            if (go == null) continue;
+            if (!go.CompareTag("Ally")) continue;
+
+            // Avoid accidentally adding the player if you ever tag them Ally (unlikely)
+            if (playerTarget != null && go.transform == playerTarget) continue;
+
+            list.Add(go.transform);
+        }
+
+        // Stable order so slot assignment doesn't shuffle each click
+        list.Sort((a, b) => a.GetInstanceID().CompareTo(b.GetInstanceID()));
+        return list;
     }
 
     private void OnHoldFireClicked()
     {
-        Debug.Log("[Player Panel] Hold Fire clicked");
+        Debug.Log("[Player Panel] Hold Fire clicked (stub).");
         HideImmediate();
     }
 
     private void OnHoldPositionClicked()
     {
-        Debug.Log("[Player Panel] Hold Position clicked");
+        Debug.Log("[Player Panel] Hold Position clicked (stub).");
         HideImmediate();
+    }
+
+    // ===== Hint Toast =====
+
+    private void AutoFindHintToastUI()
+    {
+        if (hintToastUI != null) return;
+
+        // Finds disabled objects too.
+        var all = Resources.FindObjectsOfTypeAll<HintToastUI>();
+        for (int i = 0; i < all.Length; i++)
+        {
+            var h = all[i];
+            if (h == null) continue;
+            if (!h.gameObject.scene.IsValid()) continue; // scene objects only
+            hintToastUI = h;
+            return;
+        }
+    }
+
+    private void ShowHint(string message, float durationSeconds)
+    {
+        if (string.IsNullOrWhiteSpace(message)) return;
+
+        AutoFindHintToastUI();
+
+        if (hintToastUI == null)
+        {
+            Debug.Log($"[Hint] {message}");
+            return;
+        }
+
+        hintToastUI.Show(message);
+
+        if (hintHideRoutine != null) StopCoroutine(hintHideRoutine);
+        hintHideRoutine = StartCoroutine(HideHintAfter(durationSeconds));
+    }
+
+    private IEnumerator HideHintAfter(float seconds)
+    {
+        yield return new WaitForSecondsRealtime(Mathf.Max(0.05f, seconds));
+
+        if (hintToastUI != null)
+            hintToastUI.Hide();
+
+        hintHideRoutine = null;
     }
 }
