@@ -19,6 +19,10 @@ public class AllyController : MonoBehaviour
     public Rigidbody theRB;
     public Transform target; // (used for dynamic travel follow, e.g., join in-route)
     private bool chasing;
+
+    /// <summary>True while this ally is actively chasing/fighting an enemy.</summary>
+    public bool IsChasing => chasing;
+
     private float travelFollowTimer;
     public float distanceToChase = 10f, distanceToLose = 15f, distanceToStop = 2f;
     public NavMeshAgent agent;
@@ -57,6 +61,20 @@ public class AllyController : MonoBehaviour
 
     [Tooltip("NavMesh sample radius used when picking a strafe point.")]
     public float strafeSampleRadius = 2.5f;
+
+    [Header("Formation Hold (Optional)")]
+    [Tooltip("If true, and this ally is currently following a formation slot (target != null), combat movement is clamped so the ally stays near its slot instead of breaking formation.")]
+    public bool holdFormationWhenFollowing = true;
+
+    [Tooltip("Max distance (meters) the ally may drift away from its formation slot during combat.")]
+    public float formationCombatTetherRadius = 2.5f;
+
+    [Tooltip("If true, tether radius scales slightly with team size (helps large squads keep a cohesive line).")]
+    public bool scaleTetherWithTeamSize = true;
+
+    [Tooltip("Extra meters added to tether when scaling with team size. Effective tether = base + extra * sqrt(teamSize-1).")]
+    public float tetherExtraPerSqrtMember = 0.35f;
+
     [Header("Animation")]
     public Animator soldierAnimator;
 
@@ -563,11 +581,113 @@ public class AllyController : MonoBehaviour
     }
 
 
+
+
+
+    private float GetEffectiveFormationTether()
+    {
+        float tether = Mathf.Max(0f, formationCombatTetherRadius);
+        if (!scaleTetherWithTeamSize || tether <= 0f) return tether;
+
+        int teamSize = 0;
+
+        // Use reflection to avoid hard-coupling to a specific Team API shape.
+        try
+        {
+            if (TeamManager.Instance != null)
+            {
+                var tm = TeamManager.Instance;
+                var tmType = tm.GetType();
+
+                var getTeamOf = tmType.GetMethod("GetTeamOf", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (getTeamOf != null)
+                {
+                    object teamObj = getTeamOf.Invoke(tm, new object[] { this.transform });
+                    if (teamObj != null)
+                    {
+                        var tType = teamObj.GetType();
+
+                        // Common: Members (List<Transform> or List<AllyController> etc.)
+                        var membersField = tType.GetField("Members", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                        if (membersField != null)
+                        {
+                            if (membersField.GetValue(teamObj) is System.Collections.ICollection col)
+                                teamSize = col.Count;
+                        }
+                        else
+                        {
+                            var membersProp = tType.GetProperty("Members", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                            if (membersProp != null)
+                            {
+                                var val = membersProp.GetValue(teamObj);
+                                if (val is System.Collections.ICollection col2)
+                                    teamSize = col2.Count;
+                            }
+                        }
+
+                        // Fallback: "members" lowercase
+                        if (teamSize == 0)
+                        {
+                            var membersField2 = tType.GetField("members", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                            if (membersField2 != null)
+                            {
+                                if (membersField2.GetValue(teamObj) is System.Collections.ICollection col3)
+                                    teamSize = col3.Count;
+                            }
+                            else
+                            {
+                                var membersProp2 = tType.GetProperty("members", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                                if (membersProp2 != null)
+                                {
+                                    var val2 = membersProp2.GetValue(teamObj);
+                                    if (val2 is System.Collections.ICollection col4)
+                                        teamSize = col4.Count;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // ignore; use base tether
+        }
+
+        if (teamSize > 1)
+            tether += Mathf.Max(0f, tetherExtraPerSqrtMember) * Mathf.Sqrt(teamSize - 1);
+
+        return tether;
+    }
+
+    private Vector3 ClampCombatMoveToFormation(Vector3 desired, Transform formationSlot)
+    {
+        if (!holdFormationWhenFollowing) return desired;
+        if (formationSlot == null) return desired;
+
+        float tether = GetEffectiveFormationTether();
+        if (tether <= 0.001f) return formationSlot.position;
+
+        Vector3 anchor = formationSlot.position;
+        Vector3 off = desired - anchor;
+        off.y = 0f;
+
+        float mag = off.magnitude;
+        if (mag <= tether) return desired;
+
+        Vector3 clamped = anchor + off.normalized * tether;
+        clamped.y = desired.y;
+        return clamped;
+    }
     private void ChaseAndShoot(Transform enemy)
     {
         if (enemy == null) return;
 
         Vector3 targetPoint = enemy.position;
+
+        // If we're following a formation slot (PlayerSquadFollowSystem sets AllyController.target to a slot transform),
+        // keep combat movement tethered to that slot so we don't break formation.
+        Transform formationSlot = (target != null) ? target : null;
 
         // Maintain a stable standoff distance instead of running into the target's center.
         // NOTE: We manage standoff in code; do NOT set agent.stoppingDistance = desiredAttackRange.
@@ -603,6 +723,7 @@ public class AllyController : MonoBehaviour
                 if (toward.sqrMagnitude < 0.001f) toward = transform.forward;
 
                 Vector3 ringPoint = targetPoint - toward.normalized * range;
+                ringPoint = ClampCombatMoveToFormation(ringPoint, formationSlot);
                 agent.SetDestination(ringPoint);
             }
             // Too close: back off a bit.
@@ -618,6 +739,7 @@ public class AllyController : MonoBehaviour
                 if (NavMesh.SamplePosition(desired, out NavMeshHit hit, backoffSampleRadius, NavMesh.AllAreas))
                     desired = hit.position;
 
+                desired = ClampCombatMoveToFormation(desired, formationSlot);
                 agent.isStopped = false;
                 agent.SetDestination(desired);
             }
@@ -652,6 +774,7 @@ public class AllyController : MonoBehaviour
                         if (NavMesh.SamplePosition(desired, out NavMeshHit hit, strafeSampleRadius, NavMesh.AllAreas))
                             desired = hit.position;
 
+                        desired = ClampCombatMoveToFormation(desired, formationSlot);
                         agent.isStopped = false;
                         agent.SetDestination(desired);
                         _strafeRepathTimer = Mathf.Max(0.05f, strafeRepathInterval);

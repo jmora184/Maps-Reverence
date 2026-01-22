@@ -24,6 +24,25 @@ public class CommandExecutor : MonoBehaviour
 
     public int formationColumns = 4;
 
+
+    [Header("Formation Pattern")]
+    public FormationPattern formationPattern = FormationPattern.Grid;
+
+    [Tooltip("If true, LINE/WEDGE (and oriented GRID) will rotate to face the move direction (from the selection center toward the destination/target).")]
+    public bool orientFormationToMoveDirection = true;
+
+    public enum FormationPattern
+    {
+        Grid,
+        Line,
+        Wedge
+    }
+
+    // Easy wiring from UI Button onClick() without extra scripts
+    public void SetFormationGrid() => formationPattern = FormationPattern.Grid;
+    public void SetFormationLine() => formationPattern = FormationPattern.Line;
+    public void SetFormationWedge() => formationPattern = FormationPattern.Wedge;
+
     [Header("Team Move Settings")]
     [Tooltip("If true, move orders given to any team member will move the entire team.")]
     public bool expandMoveToWholeTeam = true;
@@ -226,32 +245,14 @@ public class CommandExecutor : MonoBehaviour
         int cols = Mathf.Max(1, formationColumns);
         spacing = Mathf.Max(0.1f, spacing);
 
-        int count = agents.Count;
-        int rows = Mathf.CeilToInt(count / (float)cols);
-
-        float width = (cols - 1) * spacing;
-        float height = (rows - 1) * spacing;
-
-        for (int i = 0; i < agents.Count; i++)
-        {
-            var agent = agents[i];
-            if (agent == null) continue;
-
-            int r = i / cols;
-            int c = i % cols;
-
-            float x = (c * spacing) - width * 0.5f;
-            float z = (r * spacing) - height * 0.5f;
-
-            Vector3 targetPos = destination + new Vector3(x, 0f, z);
-
-            // Snap to nearest navmesh
-            if (NavMesh.SamplePosition(targetPos, out NavMeshHit hit, 2.5f, NavMesh.AllAreas))
-                targetPos = hit.position;
-
-            agent.isStopped = false;
-            agent.SetDestination(targetPos);
-        }
+        ApplyFormationToAgents(
+            agents,
+            destination,
+            spacing,
+            cols,
+            sampleRadius: 2.5f,
+            forceUnstop: true
+        );
 
         StartPinClearRoutine(expanded, agents);
     }
@@ -1048,7 +1049,7 @@ public class CommandExecutor : MonoBehaviour
             Vector3 center = targetT.position;
             center.y = 0f;
 
-            ApplyGridFormationToAgents(agents, center, spacing, cols, sampleR, forceUnstop: false);
+            ApplyFormationToAgents(agents, center, spacing, cols, sampleRadius: sampleR, forceUnstop: false);
 
             yield return new WaitForSeconds(interval);
         }
@@ -1058,12 +1059,84 @@ public class CommandExecutor : MonoBehaviour
         Vector3 settle = (team.Anchor != null ? team.Anchor.position : agents[0].transform.position);
         settle.y = 0f;
 
-        ApplyGridFormationToAgents(agents, settle, spacing, cols, sampleR, forceUnstop: true);
+        ApplyFormationToAgents(agents, settle, spacing, cols, sampleRadius: sampleR, forceUnstop: true);
 
         followFormationRoutine = null;
     }
 
-    private static void ApplyGridFormationToAgents(List<NavMeshAgent> agents, Vector3 center, float spacing, int cols, float sampleRadius, bool forceUnstop)
+
+    private void ApplyFormationToAgents(List<NavMeshAgent> agents, Vector3 center, float spacing, int cols, float sampleRadius, bool forceUnstop)
+    {
+        if (agents == null || agents.Count == 0) return;
+
+        // Default axes (world-aligned)
+        Vector3 rightAxis = Vector3.right;
+        Vector3 backAxis = Vector3.forward;
+
+        if (orientFormationToMoveDirection)
+        {
+            Vector3 agentsCenter = ComputeAgentsCenter(agents);
+            Vector3 forward = center - agentsCenter;
+            forward.y = 0f;
+
+            if (forward.sqrMagnitude > 0.0001f)
+            {
+                forward.Normalize();
+                rightAxis = Vector3.Cross(Vector3.up, forward);
+                if (rightAxis.sqrMagnitude < 0.0001f) rightAxis = Vector3.right;
+                rightAxis.Normalize();
+
+                // Depth axis points *back* from the destination/target, so formations "trail" behind the move direction.
+                backAxis = -forward;
+            }
+        }
+
+        switch (formationPattern)
+        {
+            case FormationPattern.Line:
+                ApplyLineFormationToAgents(agents, center, spacing, sampleRadius, forceUnstop, rightAxis);
+                break;
+
+            case FormationPattern.Wedge:
+                ApplyWedgeFormationToAgents(agents, center, spacing, sampleRadius, forceUnstop, rightAxis, backAxis);
+                break;
+
+            default:
+                ApplyGridFormationToAgents(agents, center, spacing, cols, sampleRadius, forceUnstop, rightAxis, backAxis);
+                break;
+        }
+    }
+
+    private static Vector3 ComputeAgentsCenter(List<NavMeshAgent> agents)
+    {
+        if (agents == null || agents.Count == 0) return Vector3.zero;
+
+        Vector3 sum = Vector3.zero;
+        int n = 0;
+
+        for (int i = 0; i < agents.Count; i++)
+        {
+            var a = agents[i];
+            if (a == null) continue;
+            sum += a.transform.position;
+            n++;
+        }
+
+        if (n <= 0) return Vector3.zero;
+        Vector3 c = sum / n;
+        c.y = 0f;
+        return c;
+    }
+
+    private static void ApplyGridFormationToAgents(
+        List<NavMeshAgent> agents,
+        Vector3 center,
+        float spacing,
+        int cols,
+        float sampleRadius,
+        bool forceUnstop,
+        Vector3 rightAxis,
+        Vector3 backAxis)
     {
         if (agents == null || agents.Count == 0) return;
 
@@ -1079,7 +1152,7 @@ public class CommandExecutor : MonoBehaviour
         for (int i = 0; i < agents.Count; i++)
         {
             var agent = agents[i];
-            if (agent == null || !agent.isActiveAndEnabled) continue;
+            if (agent == null) continue;
 
             int r = i / cols;
             int c = i % cols;
@@ -1087,7 +1160,7 @@ public class CommandExecutor : MonoBehaviour
             float x = (c * spacing) - width * 0.5f;
             float z = (r * spacing) - height * 0.5f;
 
-            Vector3 targetPos = center + new Vector3(x, 0f, z);
+            Vector3 targetPos = center + (rightAxis * x) + (backAxis * z);
 
             if (NavMesh.SamplePosition(targetPos, out NavMeshHit hit, sampleRadius, NavMesh.AllAreas))
                 targetPos = hit.position;
@@ -1099,6 +1172,82 @@ public class CommandExecutor : MonoBehaviour
         }
     }
 
+    private static void ApplyLineFormationToAgents(
+        List<NavMeshAgent> agents,
+        Vector3 center,
+        float spacing,
+        float sampleRadius,
+        bool forceUnstop,
+        Vector3 rightAxis)
+    {
+        if (agents == null || agents.Count == 0) return;
+
+        spacing = Mathf.Max(0.1f, spacing);
+
+        int count = agents.Count;
+        float width = (count - 1) * spacing;
+
+        for (int i = 0; i < agents.Count; i++)
+        {
+            var agent = agents[i];
+            if (agent == null) continue;
+
+            float x = (i * spacing) - width * 0.5f;
+            Vector3 targetPos = center + (rightAxis * x);
+
+            if (NavMesh.SamplePosition(targetPos, out NavMeshHit hit, sampleRadius, NavMesh.AllAreas))
+                targetPos = hit.position;
+
+            if (forceUnstop)
+                agent.isStopped = false;
+
+            agent.SetDestination(targetPos);
+        }
+    }
+
+    private static void ApplyWedgeFormationToAgents(
+        List<NavMeshAgent> agents,
+        Vector3 center,
+        float spacing,
+        float sampleRadius,
+        bool forceUnstop,
+        Vector3 rightAxis,
+        Vector3 backAxis)
+    {
+        if (agents == null || agents.Count == 0) return;
+
+        spacing = Mathf.Max(0.1f, spacing);
+
+        // Slot 0 = tip of the wedge at center. Every row behind has 2 slots (left/right).
+        for (int i = 0; i < agents.Count; i++)
+        {
+            var agent = agents[i];
+            if (agent == null) continue;
+
+            Vector3 targetPos = center;
+
+            if (i > 0)
+            {
+                int k = i - 1;
+                int row = (k / 2) + 1; // 1,2,3...
+                bool left = (k % 2 == 0);
+
+                float side = left ? -1f : 1f;
+                float x = side * row * spacing;
+                float z = row * spacing;
+
+                targetPos = center + (rightAxis * x) + (backAxis * z);
+            }
+
+            if (NavMesh.SamplePosition(targetPos, out NavMeshHit hit, sampleRadius, NavMesh.AllAreas))
+                targetPos = hit.position;
+
+            if (forceUnstop)
+                agent.isStopped = false;
+
+            agent.SetDestination(targetPos);
+        }
+    }
     // -------------------- SPLIT (placeholder) --------------------
     private void HandleSplitRequested(IReadOnlyList<GameObject> selection)
     {

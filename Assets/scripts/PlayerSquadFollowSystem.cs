@@ -4,26 +4,58 @@ using UnityEngine;
 using UnityEngine.AI;
 
 /// <summary>
-/// Keeps a chosen squad in a dynamic ARC behind the player while in FPS mode.
+/// Keeps a chosen squad in a dynamic formation relative to the player while in FPS mode.
 ///
 /// Core idea:
 /// - We create per-ally "slot" Transforms and set AllyController.target = slotTransform.
 /// - AllyController only updates destination toward target when NOT chasing (combat),
 ///   so it naturally re-forms after combat.
 ///
-/// Pick flow supported:
-/// - Player icon -> Follow Me (arms pick mode)
-/// - Next click on Ally icon (or Team Star) chooses who follows.
+/// Supports formations:
+/// - ArcBehind (classic follow arc)
+/// - LineFront (line in front of player)
+/// - WedgeFront (wedge in front of player)
 ///
-/// Comfort fixes:
-/// - Personal-space clamp + increased stoppingDistance while following (prevents running into player)
-/// - "Freeze while idle" so rotating in place doesn't make allies shuffle behind you
-/// - BUT: initial / far-away catch-up still updates even while idle
-/// - PlayerTag under AllyIcon is toggled for followers
+/// Upgrades:
+/// - Optional camera-aim orientation: formation faces where the camera aims (not player body)
+/// - Optional "hold the line": periodic snap/pulse to keep formation tight while moving
+/// - Optional smart slot assignment: prevents criss-crossing by matching allies to closest slots
 /// </summary>
 public class PlayerSquadFollowSystem : MonoBehaviour
 {
     public static PlayerSquadFollowSystem Instance { get; private set; }
+
+    public enum FollowFormation
+    {
+        ArcBehind,
+        LineFront,
+        WedgeFront
+    }
+
+    [Header("Formation Mode")]
+    [Tooltip("How followers arrange around the player while following.")]
+    public FollowFormation formation = FollowFormation.ArcBehind;
+
+    /// <summary>
+    /// Change follower formation. Safe to call even if there are no followers yet.
+    /// </summary>
+    public void SetFormation(FollowFormation newFormation)
+    {
+        formation = newFormation;
+
+        // Snap into the new shape immediately.
+        forceUpdateFramesLeft = Mathf.Max(forceUpdateFramesLeft, forceUpdateFramesOnBegin);
+
+        // Force a re-assignment pass so we avoid criss-crossing on a big re-shape.
+        forceReassignNow = true;
+    }
+
+    public void SetFormationArcBehind() => SetFormation(FollowFormation.ArcBehind);
+    public void SetFormationLineFront() => SetFormation(FollowFormation.LineFront);
+    public void SetFormationWedgeFront() => SetFormation(FollowFormation.WedgeFront);
+
+    /// <summary>Convenience: clears any active formation choice and returns to the default Arc-Behind follow.</summary>
+    public void CancelFormationToNormalFollow() => SetFormationArcBehind();
 
     /// <summary>
     /// Re-apply PlayerTag UI indicators for the current followers.
@@ -33,7 +65,6 @@ public class PlayerSquadFollowSystem : MonoBehaviour
     {
         UpdateFollowerTags();
     }
-
 
     [Header("Refs")]
     [Tooltip("Player transform. If null, will auto-find by tag 'Player'.")]
@@ -50,7 +81,6 @@ public class PlayerSquadFollowSystem : MonoBehaviour
     [Tooltip("If true, picking replaces any existing follow group. If false, adds to existing follow group.")]
     public bool pickReplacesExisting = true;
 
-
     [Tooltip("If true, you can click multiple allies in a single Follow Me picking session (until you cancel it).")]
     public bool pickStaysArmedUntilCancelled = true;
 
@@ -64,7 +94,6 @@ public class PlayerSquadFollowSystem : MonoBehaviour
     public string pickBlockedTeamedAllyText = "That ally is already on a team.";
     public string pickBlockedTeamText = "You can't recruit a whole team in Follow Me mode.";
 
-
     [Tooltip("Show a hint when pick mode begins (requires HintToastUI in scene).")]
     public bool showPickHint = true;
 
@@ -77,6 +106,28 @@ public class PlayerSquadFollowSystem : MonoBehaviour
     public bool IsPickingFollowers => isPickingFollowers;
     private bool isPickingFollowers;
     private bool pickSessionHasPickedAny;
+
+    [Header("Orientation")]
+    [Tooltip("If true, the formation faces where the camera aims (recommended for FPS). If false, uses player movement direction / player forward.")]
+    public bool useCameraAimForward = true;
+
+    [Tooltip("Optional override for aim direction source. If null and useCameraAimForward is true, uses Camera.main.")]
+    public Transform aimForwardSource;
+
+    [Tooltip("If true, rotating the camera while standing still will still update the formation heading (for Line/Wedge).")]
+    public bool allowAimRotateWhileIdle = true;
+
+    [Tooltip("Degrees of aim-rotation change required (while idle) to trigger an update. Prevents micro-jitter.")]
+    [Range(0.5f, 20f)]
+    public float idleAimRotateThresholdDegrees = 3.0f;
+
+
+    [Header("Idle Heading Lock")]
+    [Tooltip("If true, ArcBehind formation will NOT change its heading just because you rotate your aim while standing still. The heading updates again once you move.")]
+    public bool lockArcBehindHeadingWhileIdle = true;
+
+    [Tooltip("If true, when the player is idle we keep using the last 'stable' heading even if followers are far away and need catch-up. Prevents followers from rushing around you when you only look around.")]
+    public bool useLockedHeadingDuringCatchUp = true;
 
     [Header("Arc Shape")]
     [Tooltip("Base distance behind player for the first row.")]
@@ -97,6 +148,19 @@ public class PlayerSquadFollowSystem : MonoBehaviour
 
     [Tooltip("Extra distance between rows (multiplier of spacing).")]
     public float rowDistanceMultiplier = 1.15f;
+
+    [Header("Front Line / Wedge")]
+    [Tooltip("How far in FRONT of the player the line/wedge starts (meters).")]
+    public float baseFrontDistance = 4.2f;
+
+    [Tooltip("Minimum front distance regardless of settings (meters).")]
+    public float minFrontDistance = 3.0f;
+
+    [Tooltip("Spacing multiplier for LINE formation only.")]
+    public float lineSpacingMultiplier = 1.0f;
+
+    [Tooltip("How far each wedge row steps back from the tip (multiplier of spacing).")]
+    public float wedgeRowBackMultiplier = 1.0f;
 
     [Header("NavMesh")]
     [Tooltip("NavMesh sample radius for slot points.")]
@@ -146,9 +210,48 @@ public class PlayerSquadFollowSystem : MonoBehaviour
 
     private int forceUpdateFramesLeft;
 
+    [Header("Hold the Line")]
+    [Tooltip("If true, periodically 'pulses' the slot movement to snap the formation tighter (helps line stay crisp while moving).")]
+    public bool enableReformPulse = true;
+
+    [Tooltip("How often (seconds) to apply a brief snap/pulse update. 0 disables.")]
+    [Range(0f, 2f)]
+    public float reformPulseInterval = 0.45f;
+
+    [Tooltip("How many frames to snap/pulse when reforming.")]
+    [Range(0, 10)]
+    public int reformPulseFrames = 2;
+
+    private float nextReformPulseTime;
+
+    [Header("Smart Slot Assignment")]
+    [Tooltip("If true, allies are assigned to the nearest slots to avoid criss-crossing when you change heading or formation.")]
+    public bool enableSmartAssignment = true;
+
+    [Tooltip("How often (seconds) we recompute the best follower->slot mapping. Lower = more responsive, higher = more stable.")]
+    [Range(0.05f, 2f)]
+    public float smartAssignmentInterval = 0.25f;
+
+    [Tooltip("If the formation heading changes by at least this many degrees, we immediately recompute mapping.")]
+    [Range(1f, 90f)]
+    public float smartReassignAngleThreshold = 12f;
+
+    private float lastSmartAssignTime;
+    private Vector3 lastAssignedForward = Vector3.forward;
+    private bool hasLastAssignedForward;
+    private bool forceReassignNow;
+
+    private bool isCatchUpUpdate;
     // Followers + slots
     private readonly List<Transform> followers = new();
+
+    /// <summary>How many allies are currently following the player via this system.</summary>
+    public int FollowerCount => followers.Count;
+
     private readonly Dictionary<Transform, Transform> slotByFollower = new(); // follower -> slot transform
+
+    // follower -> desired slot index (0..n-1)
+    private readonly Dictionary<Transform, int> assignedIndexByFollower = new();
 
     // UI tagging (PlayerTag under AllyIcon)
     private readonly HashSet<Transform> taggedFollowers = new();
@@ -163,6 +266,15 @@ public class PlayerSquadFollowSystem : MonoBehaviour
     // Track last movement direction so rotating-in-place doesn't move "behind"
     private Vector3 lastMoveDir = Vector3.forward;
     private bool hasLastMoveDir;
+
+    // Track last aim direction to detect idle rotate changes
+    private Vector3 lastAimDir = Vector3.forward;
+    private bool hasLastAimDir;
+
+
+    // Cached heading while idle (prevents "rush behind me" when only rotating aim)
+    private Vector3 lockedIdleForward = Vector3.forward;
+    private bool hasLockedIdleForward;
 
     // Hint toast
     private HintToastUI hintToastUI;
@@ -208,6 +320,17 @@ public class PlayerSquadFollowSystem : MonoBehaviour
             if (fwd.sqrMagnitude < 0.0001f) fwd = Vector3.forward;
             lastMoveDir = fwd.normalized;
             hasLastMoveDir = true;
+            lockedIdleForward = lastMoveDir;
+            hasLockedIdleForward = true;
+
+        }
+
+        // Seed aim dir
+        Vector3 aim = GetAimForwardFlat();
+        if (aim.sqrMagnitude > 0.0001f)
+        {
+            lastAimDir = aim.normalized;
+            hasLastAimDir = true;
         }
     }
 
@@ -223,6 +346,16 @@ public class PlayerSquadFollowSystem : MonoBehaviour
             if (fwd.sqrMagnitude < 0.0001f) fwd = Vector3.forward;
             lastMoveDir = fwd.normalized;
             hasLastMoveDir = true;
+            lockedIdleForward = lastMoveDir;
+            hasLockedIdleForward = true;
+
+        }
+
+        Vector3 aim = GetAimForwardFlat();
+        if (aim.sqrMagnitude > 0.0001f)
+        {
+            lastAimDir = aim.normalized;
+            hasLastAimDir = true;
         }
     }
 
@@ -230,7 +363,6 @@ public class PlayerSquadFollowSystem : MonoBehaviour
 
     public void ArmPickFollowers()
     {
-
         // Force multi-pick session: stay armed until user cancels (click Follow Me again / Esc / RMB if you add it).
         pickStaysArmedUntilCancelled = true;
 
@@ -390,7 +522,22 @@ public class PlayerSquadFollowSystem : MonoBehaviour
             if (fwd.sqrMagnitude < 0.0001f) fwd = Vector3.forward;
             lastMoveDir = fwd.normalized;
             hasLastMoveDir = true;
+            lockedIdleForward = lastMoveDir;
+            hasLockedIdleForward = true;
+
         }
+
+        // Seed aim dir
+        Vector3 aim = GetAimForwardFlat();
+        if (aim.sqrMagnitude > 0.0001f)
+        {
+            lastAimDir = aim.normalized;
+            hasLastAimDir = true;
+        }
+
+        // Force a mapping now so the initial arrangement is clean.
+        forceReassignNow = true;
+        lastSmartAssignTime = -999f;
 
         enabled = true;
     }
@@ -450,7 +597,10 @@ public class PlayerSquadFollowSystem : MonoBehaviour
 
         followers.Clear();
         slotByFollower.Clear();
+        assignedIndexByFollower.Clear();
 
+
+        hasLockedIdleForward = false;
         enabled = false;
     }
 
@@ -481,7 +631,6 @@ public class PlayerSquadFollowSystem : MonoBehaviour
                     DisarmPickFollowers();
             }
         }
-
 
         if (stopFollowWhenEnterCommandMode && commandMode && followers.Count > 0 && !isPickingFollowers)
         {
@@ -515,7 +664,32 @@ public class PlayerSquadFollowSystem : MonoBehaviour
         {
             lastMoveDir = moveDir;
             hasLastMoveDir = true;
+        }// Update the cached idle heading once the player actually moves.
+         // This becomes the "stable" behind direction used while standing still.
+        if (playerSpeed >= playerIdleSpeedThreshold)
+        {
+            Vector3 stable = Vector3.zero;
+
+            if (useCameraAimForward)
+            {
+                stable = GetAimForwardFlat();
+            }
+
+            if (stable.sqrMagnitude < 0.0001f)
+            {
+                // Fall back to actual movement direction, then player forward.
+                if (moveDir.sqrMagnitude > 0.000001f) stable = moveDir;
+                else stable = player.forward;
+                stable.y = 0f;
+            }
+
+            if (stable.sqrMagnitude < 0.0001f) stable = Vector3.forward;
+
+            lockedIdleForward = stable.normalized;
+            hasLockedIdleForward = true;
         }
+
+
 
         lastPlayerPos = player.position;
         hasLastPlayerPos = true;
@@ -537,8 +711,15 @@ public class PlayerSquadFollowSystem : MonoBehaviour
             behindDist *= Mathf.Max(0.1f, idleDistanceMultiplier);
         }
 
-        // Freeze while idle (to avoid re-forming on rotation),
-        // BUT never freeze during initial "pull in" frames or if anyone is far away.
+        // Determine formation heading
+        Vector3 formationForward = ResolveFormationForward(playerSpeed, moveDir);
+
+        // Determine whether we should freeze updates (idle freeze), with overrides:
+        // - Never freeze during initial pull-in frames or if someone needs catch-up.
+        // - For front formations with camera aim: if you rotate aim enough while idle, we update.
+        bool needsCatchUp = NeedCatchUp();
+
+        isCatchUpUpdate = needsCatchUp;
         bool shouldFreeze = freezeSlotsWhenPlayerIdle && playerSpeed < playerIdleSpeedThreshold;
 
         if (forceUpdateFramesLeft > 0)
@@ -546,28 +727,134 @@ public class PlayerSquadFollowSystem : MonoBehaviour
             shouldFreeze = false;
             forceUpdateFramesLeft--;
         }
-        else if (NeedCatchUp())
+        else if (needsCatchUp)
         {
             shouldFreeze = false;
+        }
+        else if (shouldFreeze && allowAimRotateWhileIdle && useCameraAimForward && (formation == FollowFormation.LineFront || formation == FollowFormation.WedgeFront))
+        {
+            // Only unfreeze if the aim direction changed enough while idle.
+            Vector3 aim = GetAimForwardFlat();
+            if (aim.sqrMagnitude > 0.0001f)
+            {
+                aim.Normalize();
+                if (!hasLastAimDir)
+                {
+                    lastAimDir = aim;
+                    hasLastAimDir = true;
+                }
+                float ang = Vector3.Angle(lastAimDir, aim);
+                if (ang >= idleAimRotateThresholdDegrees)
+                {
+                    shouldFreeze = false;
+                    lastAimDir = aim;
+                }
+            }
         }
 
         if (shouldFreeze)
             return;
 
-        // Heading for the arc:
-        // - While moving: use movement direction (not look direction)
-        // - While idle: optionally use last movement direction
-        Vector3 formationForward = player.forward;
+        // Hold-the-line pulse: periodically snap a couple frames to keep formation crisp.
+        bool snapThisFrame = false;
+        if (enableReformPulse && reformPulseInterval > 0f && Time.time >= nextReformPulseTime)
+        {
+            nextReformPulseTime = Time.time + reformPulseInterval;
+            if (reformPulseFrames > 0)
+            {
+                forceSnapFramesLeft = Mathf.Max(forceSnapFramesLeft, reformPulseFrames);
+            }
+        }
 
-        if (playerSpeed >= playerIdleSpeedThreshold && moveDir.sqrMagnitude > 0.000001f)
-            formationForward = moveDir;
-        else if (playerSpeed < playerIdleSpeedThreshold && useLastMoveDirectionWhenIdle && hasLastMoveDir)
-            formationForward = lastMoveDir;
+        if (forceSnapFramesLeft > 0)
+        {
+            snapThisFrame = true;
+            forceSnapFramesLeft--;
+        }
 
-        ComputeAndApplySlotPositions(player.position, formationForward, spacing, behindDist);
+        ComputeAndApplySlotPositions(player.position, formationForward, spacing, behindDist, snapThisFrame);
     }
 
     // -------------------- INTERNALS --------------------
+
+    private int forceSnapFramesLeft;
+
+    private Vector3 ResolveFormationForward(float playerSpeed, Vector3 moveDir)
+    {
+        bool isIdle = playerSpeed < playerIdleSpeedThreshold;
+
+        // --- Idle heading lock (ArcBehind) ---
+        // Prevent followers from "rushing behind you" just because you rotate your aim while standing still.
+        if (isIdle && lockArcBehindHeadingWhileIdle && formation == FollowFormation.ArcBehind && (!isCatchUpUpdate || useLockedHeadingDuringCatchUp))
+        {
+            if (hasLockedIdleForward && lockedIdleForward.sqrMagnitude > 0.0001f)
+                return lockedIdleForward.normalized;
+
+            // Fallback if we haven't cached yet
+            Vector3 fallback = Vector3.zero;
+
+            if (useLastMoveDirectionWhenIdle && hasLastMoveDir)
+                fallback = lastMoveDir;
+            else if (player != null)
+                fallback = player.forward;
+
+            fallback.y = 0f;
+            if (fallback.sqrMagnitude < 0.0001f) fallback = Vector3.forward;
+
+            lockedIdleForward = fallback.normalized;
+            hasLockedIdleForward = true;
+            return lockedIdleForward;
+        }
+
+        // Prefer camera aim if enabled
+        if (useCameraAimForward)
+        {
+            Vector3 aim = GetAimForwardFlat();
+            if (aim.sqrMagnitude > 0.0001f)
+            {
+                aim.Normalize();
+
+                // Only treat aim as the driving heading while idle if allowed (front formations).
+                // For ArcBehind we handled the idle case above.
+                lastAimDir = aim;
+                hasLastAimDir = true;
+
+                return aim;
+            }
+        }
+
+        // Fallback: movement direction when moving; otherwise last movement direction or player forward.
+        Vector3 formationForward = player != null ? player.forward : Vector3.forward;
+
+        if (!isIdle && moveDir.sqrMagnitude > 0.000001f)
+            formationForward = moveDir;
+        else if (isIdle && useLastMoveDirectionWhenIdle && hasLastMoveDir)
+            formationForward = lastMoveDir;
+
+        formationForward.y = 0f;
+        if (formationForward.sqrMagnitude < 0.0001f) formationForward = Vector3.forward;
+        return formationForward.normalized;
+    }
+
+
+    private Vector3 GetAimForwardFlat()
+    {
+        Transform src = aimForwardSource;
+
+        if (src == null && useCameraAimForward)
+        {
+            // Camera.main is ok here; you can override with aimForwardSource if you prefer.
+            var cam = Camera.main;
+            if (cam != null) src = cam.transform;
+        }
+
+        if (src == null) return Vector3.zero;
+
+        Vector3 f = src.forward;
+        f.y = 0f;
+        if (f.sqrMagnitude < 0.0001f) return Vector3.zero;
+        return f.normalized;
+    }
 
     private bool NeedCatchUp()
     {
@@ -637,11 +924,28 @@ public class PlayerSquadFollowSystem : MonoBehaviour
             followers.Add(f);
         }
 
-        // Stable order so slots don't shuffle.
+        // Stable order so we have a consistent baseline.
         followers.Sort((a, b) => a.GetInstanceID().CompareTo(b.GetInstanceID()));
 
         EnsureSlotsForFollowers();
+        CleanupAssignmentForMissingFollowers();
         UpdateFollowerTags();
+
+        // Force a clean assignment for the new group.
+        forceReassignNow = true;
+    }
+
+    private void CleanupAssignmentForMissingFollowers()
+    {
+        // Remove mapping entries for followers that no longer exist.
+        var toRemove = new List<Transform>();
+        foreach (var kvp in assignedIndexByFollower)
+        {
+            if (kvp.Key == null || !followers.Contains(kvp.Key))
+                toRemove.Add(kvp.Key);
+        }
+        for (int i = 0; i < toRemove.Count; i++)
+            assignedIndexByFollower.Remove(toRemove[i]);
     }
 
     private void AssignTargetsToSlots()
@@ -682,18 +986,190 @@ public class PlayerSquadFollowSystem : MonoBehaviour
         }
     }
 
-    private void ComputeAndApplySlotPositions(Vector3 playerPos, Vector3 playerForward, float spacing, float behindDist)
+    private void ComputeAndApplySlotPositions(Vector3 playerPos, Vector3 playerForward, float spacing, float baseDist, bool snapThisFrame)
     {
+        if (followers == null || followers.Count == 0)
+            return;
+
+        // Flatten forward
         playerForward.y = 0f;
         if (playerForward.sqrMagnitude < 0.0001f)
             playerForward = Vector3.forward;
 
         playerForward.Normalize();
 
-        Vector3 behindDir = -playerForward;
-        Vector3 rightDir = Vector3.Cross(Vector3.up, behindDir).normalized;
+        // Common dirs
+        Vector3 fwd = playerForward;
+        Vector3 rightDir = Vector3.Cross(Vector3.up, fwd).normalized;
+        if (rightDir.sqrMagnitude < 0.0001f) rightDir = Vector3.right;
 
-        int remaining = followers.Count;
+        // Build desired positions for the current formation
+        var desiredPositions = BuildDesiredPositions(playerPos, fwd, rightDir, spacing, baseDist);
+        if (desiredPositions == null || desiredPositions.Count != followers.Count)
+            return;
+
+        // Decide whether to recompute assignment mapping
+        bool needReassign = forceReassignNow;
+
+        float now = Time.time;
+        if (!needReassign && enableSmartAssignment)
+        {
+            if ((now - lastSmartAssignTime) >= smartAssignmentInterval)
+                needReassign = true;
+
+            if (hasLastAssignedForward)
+            {
+                float ang = Vector3.Angle(lastAssignedForward, fwd);
+                if (ang >= smartReassignAngleThreshold)
+                    needReassign = true;
+            }
+        }
+
+        if (!enableSmartAssignment)
+            needReassign = false;
+
+        if (needReassign)
+        {
+            ReassignFollowersToSlots(desiredPositions);
+            lastSmartAssignTime = now;
+            lastAssignedForward = fwd;
+            hasLastAssignedForward = true;
+            forceReassignNow = false;
+        }
+        else
+        {
+            // Ensure mapping exists for everyone (fallback to index order)
+            EnsureDefaultAssignments();
+        }
+
+        // Apply positions
+        for (int i = 0; i < followers.Count; i++)
+        {
+            var follower = followers[i];
+            if (follower == null) continue;
+
+            if (!slotByFollower.TryGetValue(follower, out var slot) || slot == null)
+                continue;
+
+            int idx = i;
+            if (assignedIndexByFollower.TryGetValue(follower, out int mapped))
+                idx = Mathf.Clamp(mapped, 0, desiredPositions.Count - 1);
+
+            Vector3 finalPos = desiredPositions[idx];
+
+            if (snapThisFrame)
+            {
+                slot.position = finalPos;
+            }
+            else
+            {
+                float lerpT = 1f - Mathf.Exp(-slotLerpSpeed * Time.deltaTime);
+                slot.position = Vector3.Lerp(slot.position, finalPos, lerpT);
+            }
+        }
+    }
+
+    private List<Vector3> BuildDesiredPositions(Vector3 playerPos, Vector3 fwd, Vector3 rightDir, float spacing, float baseDist)
+    {
+        switch (formation)
+        {
+            case FollowFormation.LineFront:
+                return BuildLineFrontPositions(playerPos, fwd, rightDir, spacing, baseDist);
+
+            case FollowFormation.WedgeFront:
+                return BuildWedgeFrontPositions(playerPos, fwd, rightDir, spacing, baseDist);
+
+            default:
+                return BuildArcBehindPositions(playerPos, fwd, rightDir, spacing, baseDist);
+        }
+    }
+
+    private List<Vector3> BuildLineFrontPositions(Vector3 playerPos, Vector3 fwd, Vector3 rightDir, float spacing, float baseDist)
+    {
+        int n = followers.Count;
+        var result = new List<Vector3>(n);
+        if (n == 0) return result;
+
+        float frontDist = Mathf.Max(baseFrontDistance, baseDist, minFrontDistance);
+        frontDist = Mathf.Max(frontDist, followStoppingDistance + playerPersonalSpace);
+
+        Vector3 basePos = playerPos + fwd * frontDist;
+        basePos.y = playerPos.y;
+
+        float cx = (n - 1) * 0.5f;
+        float s = Mathf.Max(0.1f, spacing) * Mathf.Max(0.1f, lineSpacingMultiplier);
+
+        for (int i = 0; i < n; i++)
+        {
+            float x = (i - cx) * s;
+            Vector3 desired = basePos + rightDir * x;
+            desired.y = playerPos.y;
+
+            result.Add(SampleNavmeshOrFallback(desired, playerPos));
+        }
+
+        return result;
+    }
+
+    private List<Vector3> BuildWedgeFrontPositions(Vector3 playerPos, Vector3 fwd, Vector3 rightDir, float spacing, float baseDist)
+    {
+        int n = followers.Count;
+        var result = new List<Vector3>(n);
+        if (n == 0) return result;
+
+        float tipDist = Mathf.Max(baseFrontDistance, baseDist, minFrontDistance);
+        tipDist = Mathf.Max(tipDist, followStoppingDistance + playerPersonalSpace);
+
+        Vector3 tip = playerPos + fwd * tipDist;
+        tip.y = playerPos.y;
+
+        float s = Mathf.Max(0.1f, spacing);
+        float rowBack = s * Mathf.Max(0.1f, wedgeRowBackMultiplier);
+
+        int remaining = n;
+        int index = 0;
+        int row = 0;
+
+        while (remaining > 0)
+        {
+            row++;
+            int rowCapacity = row; // 1,2,3,...
+            int take = Mathf.Min(rowCapacity, remaining);
+
+            Vector3 rowCenter = tip - fwd * (row - 1) * rowBack;
+            rowCenter.y = playerPos.y;
+
+            float cx = (take - 1) * 0.5f;
+
+            for (int j = 0; j < take; j++)
+            {
+                if (index >= n) break;
+
+                float x = (j - cx) * s;
+                Vector3 desired = rowCenter + rightDir * x;
+                desired.y = playerPos.y;
+
+                result.Add(SampleNavmeshOrFallback(desired, playerPos));
+
+                index++;
+                remaining--;
+            }
+        }
+
+        return result;
+    }
+
+    private List<Vector3> BuildArcBehindPositions(Vector3 playerPos, Vector3 fwd, Vector3 rightDir, float spacing, float baseDist)
+    {
+        int n = followers.Count;
+        var result = new List<Vector3>(n);
+        if (n == 0) return result;
+
+        Vector3 behindDir = -fwd;
+        Vector3 behindRight = Vector3.Cross(Vector3.up, behindDir).normalized;
+        if (behindRight.sqrMagnitude < 0.0001f) behindRight = rightDir;
+
+        int remaining = n;
         int index = 0;
         int row = 0;
 
@@ -702,11 +1178,10 @@ public class PlayerSquadFollowSystem : MonoBehaviour
         while (remaining > 0)
         {
             row++;
-
             int rowCapacity = row; // 1,2,3,...
             int take = Mathf.Min(rowCapacity, remaining);
 
-            float radius = behindDist + (row - 1) * spacing * rowDistanceMultiplier;
+            float radius = Mathf.Max(baseBehindDistance, baseDist) + (row - 1) * spacing * rowDistanceMultiplier;
 
             // Prevent slots from ever being too close to the player (avoids running into you)
             float minRadius = Mathf.Max(minBehindRadius, followStoppingDistance + playerPersonalSpace);
@@ -714,7 +1189,7 @@ public class PlayerSquadFollowSystem : MonoBehaviour
 
             for (int j = 0; j < take; j++)
             {
-                if (index >= followers.Count) break;
+                if (index >= n) break;
 
                 float t = (take == 1) ? 0f : (j / (float)(take - 1));
                 float angle = Mathf.Lerp(-halfArc, halfArc, t);
@@ -726,26 +1201,122 @@ public class PlayerSquadFollowSystem : MonoBehaviour
                 if (row == 1 && take == 1)
                     lateralJitter = 0.15f * spacing;
 
-                Vector3 desired = playerPos + dir * radius + rightDir * lateralJitter;
+                Vector3 desired = playerPos + dir * radius + behindRight * lateralJitter;
                 desired.y = playerPos.y;
 
-                Vector3 finalPos = desired;
-                if (NavMesh.SamplePosition(desired, out NavMeshHit hit, Mathf.Max(0.1f, navmeshSampleRadius), NavMesh.AllAreas))
-                    finalPos = hit.position;
-                else if (!allowRawFallbackWhenNoNavmesh)
-                    finalPos = playerPos;
-
-                var follower = followers[index];
-                if (follower != null && slotByFollower.TryGetValue(follower, out var slot) && slot != null)
-                {
-                    float lerpT = 1f - Mathf.Exp(-slotLerpSpeed * Time.deltaTime);
-                    slot.position = Vector3.Lerp(slot.position, finalPos, lerpT);
-                }
+                result.Add(SampleNavmeshOrFallback(desired, playerPos));
 
                 index++;
                 remaining--;
             }
         }
+
+        return result;
+    }
+
+    private Vector3 SampleNavmeshOrFallback(Vector3 desired, Vector3 fallback)
+    {
+        if (NavMesh.SamplePosition(desired, out NavMeshHit hit, Mathf.Max(0.1f, navmeshSampleRadius), NavMesh.AllAreas))
+            return hit.position;
+
+        return allowRawFallbackWhenNoNavmesh ? desired : fallback;
+    }
+
+    private void EnsureDefaultAssignments()
+    {
+        // Fill in missing assignments with a stable default (index order),
+        // without disturbing existing assignments.
+        var used = new HashSet<int>();
+        foreach (var kvp in assignedIndexByFollower)
+        {
+            if (kvp.Key == null) continue;
+            if (!followers.Contains(kvp.Key)) continue;
+            used.Add(kvp.Value);
+        }
+
+        for (int i = 0; i < followers.Count; i++)
+        {
+            var f = followers[i];
+            if (f == null) continue;
+
+            if (assignedIndexByFollower.ContainsKey(f)) continue;
+
+            int idx = i;
+            while (used.Contains(idx) && idx < followers.Count) idx++;
+            if (idx >= followers.Count) idx = i; // fallback
+            assignedIndexByFollower[f] = idx;
+            used.Add(idx);
+        }
+    }
+
+    private void ReassignFollowersToSlots(List<Vector3> desiredPositions)
+    {
+        CleanupAssignmentForMissingFollowers();
+
+        int n = followers.Count;
+        if (n == 0) return;
+
+        // Greedy minimal-distance assignment between follower positions and desired slot positions.
+        // This avoids criss-crossing when headings/formations change.
+        var remainingFollowers = new List<int>(n);
+        var remainingSlots = new List<int>(n);
+
+        for (int i = 0; i < n; i++)
+        {
+            remainingFollowers.Add(i);
+            remainingSlots.Add(i);
+        }
+
+        assignedIndexByFollower.Clear();
+
+        while (remainingFollowers.Count > 0)
+        {
+            float best = float.PositiveInfinity;
+            int bestFi = -1;
+            int bestSi = -1;
+            int bestFListIdx = -1;
+            int bestSListIdx = -1;
+
+            for (int fiList = 0; fiList < remainingFollowers.Count; fiList++)
+            {
+                int fi = remainingFollowers[fiList];
+                var follower = followers[fi];
+                if (follower == null) continue;
+
+                Vector3 fp = follower.position;
+                fp.y = desiredPositions[0].y;
+
+                for (int siList = 0; siList < remainingSlots.Count; siList++)
+                {
+                    int si = remainingSlots[siList];
+                    Vector3 sp = desiredPositions[si];
+
+                    float d = (fp - sp).sqrMagnitude;
+                    if (d < best)
+                    {
+                        best = d;
+                        bestFi = fi;
+                        bestSi = si;
+                        bestFListIdx = fiList;
+                        bestSListIdx = siList;
+                    }
+                }
+            }
+
+            if (bestFi < 0 || bestSi < 0)
+                break;
+
+            var f = followers[bestFi];
+            if (f != null)
+                assignedIndexByFollower[f] = bestSi;
+
+            // remove used follower and slot
+            remainingFollowers.RemoveAt(bestFListIdx);
+            remainingSlots.RemoveAt(bestSListIdx);
+        }
+
+        // Safety: ensure everyone has an assignment
+        EnsureDefaultAssignments();
     }
 
     // -------------------- UI TAGGING --------------------

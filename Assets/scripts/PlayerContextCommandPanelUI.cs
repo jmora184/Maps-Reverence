@@ -1,5 +1,6 @@
 using UnityEngine;
 using UnityEngine.UI;
+using TMPro;
 
 /// <summary>
 /// Player personal commands panel (shown when clicking the Player icon).
@@ -9,7 +10,7 @@ using UnityEngine.UI;
 /// 2) Click Follow Me
 /// 3) Click an Ally icon (or Team Star) to choose who follows
 ///
-/// This script only arms the "pick" mode. CommandOverlayUI consumes the next click.
+/// Formation buttons (Line/Wedge/Cancel) affect the current follower formation.
 /// </summary>
 public class PlayerContextCommandPanelUI : MonoBehaviour
 {
@@ -24,10 +25,12 @@ public class PlayerContextCommandPanelUI : MonoBehaviour
     public Button holdFireButton;
     public Button holdPositionButton; // optional
 
+    [Header("Formation Buttons (Followers)")]
+    public Button lineFormationButton;   // sets followers to LineFront
+    public Button wedgeFormationButton;  // sets followers to WedgeFront
+    [Tooltip("Clears formation and returns followers to normal Arc-Behind follow.")]
+    public Button cancelFormationButton; // sets followers to ArcBehind
 
-    // Formation buttons (inspector-only; no functionality here)
-    public Button lineFormationButton;
-    public Button wedgeFormationButton;
     [Header("Theme (Player Buttons)")]
     public Color buttonNormal = new Color(0.20f, 0.35f, 0.85f, 1f);
     public Color buttonHighlight = new Color(0.28f, 0.45f, 0.95f, 1f);
@@ -58,6 +61,10 @@ public class PlayerContextCommandPanelUI : MonoBehaviour
         if (followMeButton != null) followMeButton.onClick.AddListener(OnFollowMeClicked);
         if (holdFireButton != null) holdFireButton.onClick.AddListener(OnHoldFireClicked);
         if (holdPositionButton != null) holdPositionButton.onClick.AddListener(OnHoldPositionClicked);
+
+        if (lineFormationButton != null) lineFormationButton.onClick.AddListener(OnLineFormationClicked);
+        if (wedgeFormationButton != null) wedgeFormationButton.onClick.AddListener(OnWedgeFormationClicked);
+        if (cancelFormationButton != null) cancelFormationButton.onClick.AddListener(OnCancelFormationClicked);
     }
 
     private void LateUpdate()
@@ -80,6 +87,8 @@ public class PlayerContextCommandPanelUI : MonoBehaviour
             root.gameObject.SetActive(true);
 
         if (canvasGroup != null) canvasGroup.alpha = 1f;
+
+        UpdateFormationButtonsVisibility();
     }
 
     public void HideImmediate()
@@ -101,8 +110,10 @@ public class PlayerContextCommandPanelUI : MonoBehaviour
         ApplyButtonTheme(followMeButton);
         ApplyButtonTheme(holdFireButton);
         ApplyButtonTheme(holdPositionButton);
+
         ApplyButtonTheme(lineFormationButton);
         ApplyButtonTheme(wedgeFormationButton);
+        ApplyButtonTheme(cancelFormationButton);
     }
 
     private void ApplyButtonTheme(Button b)
@@ -122,21 +133,46 @@ public class PlayerContextCommandPanelUI : MonoBehaviour
         var img = b.GetComponent<Image>();
         if (img != null) img.color = buttonNormal;
 
-        var txt = b.GetComponentInChildren<Text>(true);
-        if (txt != null) txt.color = buttonTextColor;
+        // Legacy Text support
+        var legacyText = b.GetComponentInChildren<Text>(true);
+        if (legacyText != null) legacyText.color = buttonTextColor;
+
+        // TMP support
+        var tmpText = b.GetComponentInChildren<TMP_Text>(true);
+        if (tmpText != null) tmpText.color = buttonTextColor;
     }
+
+
+    private void UpdateFormationButtonsVisibility()
+    {
+        // Formation buttons only make sense when we have at least 2 followers.
+        var sys = PlayerSquadFollowSystem.Instance;
+        int followerCount = (sys != null) ? sys.FollowerCount : 0;
+
+        bool showLineWedge = followerCount >= 2;
+
+        if (lineFormationButton != null)
+            lineFormationButton.gameObject.SetActive(showLineWedge);
+
+        if (wedgeFormationButton != null)
+            wedgeFormationButton.gameObject.SetActive(showLineWedge);
+
+        // Only show "Cancel Formation" when:
+        // - we have enough followers to use formations, AND
+        // - we're currently in a non-default formation.
+        bool showCancel = showLineWedge && sys != null && sys.formation != PlayerSquadFollowSystem.FollowFormation.ArcBehind;
+
+        if (cancelFormationButton != null)
+            cancelFormationButton.gameObject.SetActive(showCancel);
+    }
+
 
     // ===== Button actions =====
 
     private void OnFollowMeClicked()
     {
         // Resolve player
-        if (playerTarget == null)
-        {
-            var p = GameObject.FindGameObjectWithTag("Player");
-            if (p != null) playerTarget = p.transform;
-        }
-
+        ResolvePlayerIfNeeded();
         if (playerTarget == null)
         {
             Debug.LogWarning("[Player Panel] Follow Me clicked, but Player not found (tag=Player).");
@@ -152,6 +188,41 @@ public class PlayerContextCommandPanelUI : MonoBehaviour
         HideImmediate();
     }
 
+    private void OnLineFormationClicked()
+    {
+        ResolvePlayerIfNeeded();
+
+        var sys = PlayerSquadFollowSystem.EnsureExists();
+        if (playerTarget != null) sys.SetPlayer(playerTarget);
+
+        sys.SetFormationLineFront();
+        HideImmediate();
+    }
+
+    private void OnWedgeFormationClicked()
+    {
+        ResolvePlayerIfNeeded();
+
+        var sys = PlayerSquadFollowSystem.EnsureExists();
+        if (playerTarget != null) sys.SetPlayer(playerTarget);
+
+        sys.SetFormationWedgeFront();
+        HideImmediate();
+    }
+
+    private void OnCancelFormationClicked()
+    {
+        // Return to the default "normal" follow behavior (Arc-Behind)
+        // and cancel any active pick session.
+        var sys = PlayerSquadFollowSystem.EnsureExists();
+        if (playerTarget != null) sys.SetPlayer(playerTarget);
+
+        sys.SetFormationArcBehind();
+        sys.DisarmPickFollowers();
+
+        HideImmediate();
+    }
+
     private void OnHoldFireClicked()
     {
         Debug.Log("[Player Panel] Hold Fire clicked (stub).");
@@ -162,5 +233,13 @@ public class PlayerContextCommandPanelUI : MonoBehaviour
     {
         Debug.Log("[Player Panel] Hold Position clicked (stub).");
         HideImmediate();
+    }
+
+    private void ResolvePlayerIfNeeded()
+    {
+        if (playerTarget != null) return;
+
+        var p = GameObject.FindGameObjectWithTag("Player");
+        if (p != null) playerTarget = p.transform;
     }
 }
