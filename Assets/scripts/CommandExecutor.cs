@@ -187,6 +187,7 @@ public class CommandExecutor : MonoBehaviour
         // ✅ Team expansion (team members move together)
         List<GameObject> expanded = ExpandSelectionForTeams(selection);
 
+        // Any new command breaks TEAM hold-ground.
         // Cancel any ongoing team-follow formation routine (move order overrides follow).
         StopFollowFormationRoutine();
 
@@ -275,6 +276,7 @@ public class CommandExecutor : MonoBehaviour
         // Expand selection to whole team if requested
         List<GameObject> expanded = (expandFollowToWholeTeam ? ExpandSelectionForTeams(selection) : UniqueNonNull(selection));
 
+        // Any new command breaks TEAM hold-ground.
         Transform targetT = targetUnit != null ? targetUnit.transform : null;
         if (targetT == null) return;
 
@@ -552,11 +554,50 @@ public class CommandExecutor : MonoBehaviour
             GameObject targetGO = clickedUnit;
 
             if (leaderGO == null || targetGO == null) return;
+
+            // Join is a new command: break TEAM hold-ground for both sides.
             if (leaderGO == targetGO) return;
+
+            // Allow JOIN -> Player to convert a single unteamed ally into a Player follower.
+            if (targetGO.CompareTag("Player"))
+            {
+                // Only allow a single ally (not an entire team selection).
+                int selCount = selection != null ? selection.Count : 0;
+                if (selCount > 1)
+                {
+                    HintSystem.Show("Select a single ally to join the player.", 2f);
+                    return;
+                }
+
+                if (!leaderGO.CompareTag("Ally"))
+                {
+                    Debug.Log($"[Join->Player] Ignored: leader must be an Ally. leader={leaderGO.name}");
+                    return;
+                }
+
+                // Keep teams separate from player followers.
+                if (TeamManager.Instance != null)
+                {
+                    Team leaderTeam = TeamManager.Instance.GetTeamOf(leaderGO.transform);
+                    if (leaderTeam != null)
+                    {
+                        HintSystem.Show("Can't add a teamed ally as a player follower.", 2f);
+                        return;
+                    }
+                }
+
+                // Add to player followers (uses the follower-slot system).
+                var follow = PlayerSquadFollowSystem.EnsureExists();
+                bool added = follow.TryAddFollowerDirect(leaderGO.transform, showBlockedHint: true);
+                if (added)
+                    HintSystem.Show("Ally joined you.", 1.5f);
+
+                return;
+            }
 
             if (!leaderGO.CompareTag("Ally") || !targetGO.CompareTag("Ally"))
             {
-                Debug.Log($"[Join] Ignored: must click Ally -> Ally. leader={leaderGO.name} target={targetGO.name}");
+                Debug.Log($"[Join] Ignored: must click Ally -> Ally (or Player). leader={leaderGO.name} target={targetGO.name}");
                 return;
             }
 

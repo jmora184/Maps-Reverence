@@ -283,6 +283,22 @@ public class CommandOverlayUI : MonoBehaviour
         AutoFindPlayerContextPanel();
         AutoFindHoverCursorIcon();
 
+        // ✅ If we're currently in JOIN targeting (AddTargeting) let the player icon act as the JOIN target.
+        // This allows: select Ally -> Join -> click PlayerIcon => ally becomes a Player follower.
+        if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
+        if (sm != null &&
+            sm.CurrentState == CommandStateMachine.State.AddTargeting &&
+            sm.JoinArmed &&
+            playerTarget != null)
+        {
+            // Don't pop the player panel while choosing a join target.
+            if (playerContextPanel != null && playerContextPanel.IsVisible())
+                playerContextPanel.HideImmediate();
+
+            sm.ClickUnitFromUI(playerTarget.gameObject);
+            return;
+        }
+
         if (playerContextPanel == null)
         {
             Debug.LogWarning("[CommandOverlayUI] PlayerContextCommandPanelUI not found/assigned.");

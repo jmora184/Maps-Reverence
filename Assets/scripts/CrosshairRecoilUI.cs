@@ -27,11 +27,15 @@ public class CrosshairRecoilUI : MonoBehaviour
     private float bloom;
     private float bloomVel;
 
+    // Base crosshair scale (weapon-specific). Final scale = baseScale * (1 + bloom).
+    private float baseScale = 1f;
+
     private void Awake()
     {
         Instance = this;
         rt = transform as RectTransform;
         basePos = rt.anchoredPosition;
+        baseScale = rt.localScale.x;
     }
 
     public void Kick(float intensity = 1f)
@@ -58,7 +62,7 @@ public class CrosshairRecoilUI : MonoBehaviour
         if (useScaleBloom)
         {
             bloom = Mathf.SmoothDamp(bloom, 0f, ref bloomVel, 1f / Mathf.Max(0.01f, bloomReturnSpeed));
-            float s = 1f + bloom;
+            float s = baseScale * (1f + bloom);
             rt.localScale = new Vector3(s, s, 1f);
         }
     }
@@ -68,5 +72,21 @@ public class CrosshairRecoilUI : MonoBehaviour
     {
         if (rt == null) rt = transform as RectTransform;
         basePos = rt.anchoredPosition;
+        baseScale = rt.localScale.x;
     }
+
+    /// <summary>
+    /// Sets the base crosshair scale (e.g., smaller for pistols). Bloom is applied on top of this.
+    /// </summary>
+    public void SetBaseScale(float scale)
+    {
+        if (rt == null) rt = transform as RectTransform;
+
+        baseScale = Mathf.Max(0.01f, scale);
+
+        // Apply immediately using current bloom so switching feels instant.
+        float s = useScaleBloom ? baseScale * (1f + bloom) : baseScale;
+        rt.localScale = new Vector3(s, s, 1f);
+    }
+
 }

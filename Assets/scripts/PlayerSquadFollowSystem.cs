@@ -497,6 +497,39 @@ public class PlayerSquadFollowSystem : MonoBehaviour
             isPickingFollowers = false;
     }
 
+
+    /// <summary>
+    /// Adds a single ally to the current follower list (without requiring Pick Mode).
+    /// Used by command-mode JOIN -> Player flow.
+    /// Returns true if the ally was added, false if blocked/already following.
+    /// </summary>
+    public bool TryAddFollowerDirect(Transform ally, bool showBlockedHint = true)
+    {
+        if (ally == null) return false;
+
+        // Block allies that already belong to a team (keeps team system separate from player followers).
+        if (TeamManager.Instance != null)
+        {
+            var t = TeamManager.Instance.GetTeamOf(ally);
+            if (t != null)
+            {
+                if (showBlockedHint && !string.IsNullOrWhiteSpace(pickBlockedTeamedAllyText))
+                    ShowHint(pickBlockedTeamedAllyText, pickHintDuration);
+                return false;
+            }
+        }
+
+        // Already following
+        if (followers.Contains(ally))
+            return false;
+
+        var newList = new List<Transform>(followers) { ally };
+        newList.Sort((a, b) => a.GetInstanceID().CompareTo(b.GetInstanceID()));
+
+        BeginFollow(newList);
+        return true;
+    }
+
     // -------------------- PUBLIC FOLLOW API --------------------
 
     /// <summary>

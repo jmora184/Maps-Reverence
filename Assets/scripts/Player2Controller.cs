@@ -1,16 +1,17 @@
-﻿using System.Collections;
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using UnityEngine;
 
 public class Player2Controller : MonoBehaviour
 {
     public static Player2Controller instance;
 
+    [Header("Movement")]
     public float moveSpeed, gravityModifier, jumpPower, runSpeed = 12f;
     public CharacterController charCon;
     public Transform camTrans;
     private Vector3 moveInput;
 
+    [Header("Look")]
     public float mouseSensitivity;
     public bool invertX;
     public bool invertY;
@@ -21,16 +22,33 @@ public class Player2Controller : MonoBehaviour
 
     public Animator anim; // Reference to Animator component
 
+    [Header("Gun Runtime (Active)")]
     public Gun activeGun;
     public GameObject bullet;
     public Transform firePoint;
 
     public GameObject muzzleFlash;
-
+    private ParticleSystem muzzleFlashPS;
     public Transform adsPoint, gunHolder;
 
+    [Header("Gun Switching")]
+    [Tooltip("If empty, guns will be auto-found under Gun Holder (children with a Gun component).")]
+    public List<Gun> guns = new List<Gun>();
+    [Tooltip("Which gun index to equip on start.")]
+    public int startGunIndex = 0;
+    [Tooltip("Press this key to cycle weapons.")]
+    public KeyCode switchGunKey = KeyCode.G;
+
+    private int gunIndex = 0;
+
+    [Header("Bullet Spawn Safety")]
+    [Tooltip("Spawns the bullet slightly forward from the firePoint so it doesn't start inside your own colliders in ADS.")]
+    public float bulletSpawnForwardOffset = 0.08f;
+
+    private Collider[] shooterColliders;   // all colliders on player + ACTIVE weapon rig
+
     [Header("Recoil (Visual)")]
-    [Tooltip("Assign Rifle (recommended) to apply recoil without breaking ADS (Gun Holder moves for ADS).")]
+    [Tooltip("Assign the active weapon root (or mesh) to apply recoil without breaking ADS (Gun Holder moves for ADS).")]
     public Transform recoilTarget;
     [Tooltip("Local position kick per shot (Z negative pushes back).")]
     public Vector3 recoilPosKick = new Vector3(0f, 0f, -0.03f);
@@ -51,7 +69,7 @@ public class Player2Controller : MonoBehaviour
     public float adsSpeed = 2f;
 
     [Header("Shooting")]
-    public float shotsPerSecond = 10f;   // hold mouse to fire
+    public float shotsPerSecond = 10f;   // hold mouse to fire (overridden by active gun FireRate if available)
     private float nextFireTime = 0f;
 
     [Header("Crosshair Recoil (UI)")]
@@ -60,55 +78,45 @@ public class Player2Controller : MonoBehaviour
     [Tooltip("How strong the crosshair recoil is while ADS (right mouse held).")]
     public float crosshairRecoilADS = 0.45f;
 
+    [Header("Crosshair Size")]
+    [Tooltip("Base crosshair scale for most guns.")]
+    public float crosshairScaleDefault = 1f;
+    [Tooltip("Base crosshair scale when a pistol is active.")]
+    public float crosshairScalePistol = 0.85f;
+
+
     [Header("Muzzle Flash")]
     [Tooltip("How long the muzzle flash stays visible after each shot (seconds).")]
     public float muzzleFlashDuration = 0.05f;
     private float muzzleFlashUntil = 0f;
-
-    void Start()
-    {
-        if (gunHolder != null)
-            gunStartPos = gunHolder.localPosition;
-
-        // Cache ADS target as a LOCAL position (more reliable than world-space moves when parented)
-        if (adsPoint != null && gunHolder != null && gunHolder.parent != null)
-            adsLocalPos = gunHolder.parent.InverseTransformPoint(adsPoint.position);
-        else
-            adsLocalPos = gunStartPos;
-
-        // --- Recoil setup ---
-        // IMPORTANT: recoil should NOT be applied to gunHolder, because gunHolder is what we move for ADS.
-        // Default to the Rifle child if it exists.
-        if (recoilTarget == null)
-        {
-            if (gunHolder != null)
-            {
-                var rifle = gunHolder.Find("Rifle");
-                if (rifle != null) recoilTarget = rifle;
-            }
-
-            if (recoilTarget == null && firePoint != null && firePoint.parent != null)
-                recoilTarget = firePoint.parent;
-        }
-
-        if (recoilTarget != null)
-        {
-            recoilPosBase = recoilTarget.localPosition;
-            recoilRotBase = recoilTarget.localEulerAngles;
-        }
-
-        // Cache crosshair base position (safe if CrosshairRecoilUI exists in scene)
-        if (CrosshairRecoilUI.Instance != null)
-            CrosshairRecoilUI.Instance.RebindBase();
-    }
 
     private void Awake()
     {
         instance = this;
     }
 
+    void Start()
+    {
+        if (gunHolder != null)
+            gunStartPos = gunHolder.localPosition;
+
+        AutoPopulateGunsIfEmpty();
+        EquipGun(Mathf.Clamp(startGunIndex, 0, Mathf.Max(0, guns.Count - 1)), true);
+
+        // Cache crosshair base position (safe if CrosshairRecoilUI exists in scene)
+        if (CrosshairRecoilUI.Instance != null)
+            CrosshairRecoilUI.Instance.RebindBase();
+    }
+
     void Update()
     {
+        // Allow switching regardless of command mode (your choice). If you only want it in FPS mode,
+        // wrap this in the !commandMode check below.
+        if (Input.GetKeyDown(switchGunKey))
+        {
+            CycleGun();
+        }
+
         // ✅ Command mode is now driven by CommandCamToggle, not FullMini
         bool commandMode =
             (CommandCamToggle.Instance != null && CommandCamToggle.Instance.IsCommandMode);
@@ -126,21 +134,15 @@ public class Player2Controller : MonoBehaviour
             moveInput.Normalize();
 
             if (Input.GetKey(KeyCode.LeftShift))
-            {
-                moveInput = moveInput * runSpeed;
-            }
+                moveInput *= runSpeed;
             else
-            {
-                moveInput = moveInput * moveSpeed;
-            }
+                moveInput *= moveSpeed;
 
             moveInput.y = yStore;
             moveInput.y += Physics.gravity.y * gravityModifier * Time.deltaTime;
 
             if (charCon.isGrounded)
-            {
                 moveInput.y = Physics.gravity.y * gravityModifier * Time.deltaTime;
-            }
 
             canJump = Physics.OverlapSphere(groundCheckPoint.position, .25f, whatIsGround).Length > 0;
 
@@ -171,31 +173,49 @@ public class Player2Controller : MonoBehaviour
             camTrans.rotation = Quaternion.Euler(camTrans.rotation.eulerAngles + new Vector3(-mouseInput.y, 0f, 0f));
 
             // ---------------------------
-            // SHOOTING (MACHINE GUN)
+            // SHOOTING
             // ---------------------------
-            bool holdingFire = Input.GetMouseButton(0);
+            bool holdingFire = false;
+
+            // If the gun does NOT auto fire, shoot on mouse down only.
+            if (activeGun != null && activeGun.canAutoFire == false)
+                holdingFire = Input.GetMouseButtonDown(0);
+            else
+                holdingFire = Input.GetMouseButton(0);
+
+            // Use gun fire rate if available (and non-zero), otherwise use player-level shotsPerSecond.
+            float sps = shotsPerSecond;
+            if (activeGun != null && activeGun.fireRate > 0)
+                sps = activeGun.fireRate;
 
             if (holdingFire && Time.time >= nextFireTime)
             {
-                nextFireTime = Time.time + (1f / shotsPerSecond);
+                nextFireTime = Time.time + (1f / Mathf.Max(0.01f, sps));
 
                 // Keep the flash visible for a short duration so it doesn't flicker inconsistently
                 muzzleFlashUntil = Time.time + muzzleFlashDuration;
 
-                RaycastHit hit;
-                if (Physics.Raycast(camTrans.position, camTrans.forward, out hit, 50f))
+                if (firePoint != null)
                 {
-                    if (Vector3.Distance(camTrans.position, hit.point) > 2f)
+                    RaycastHit hit;
+                    if (Physics.Raycast(camTrans.position, camTrans.forward, out hit, 50f))
                     {
-                        firePoint.LookAt(hit.point);
+                        if (Vector3.Distance(camTrans.position, hit.point) > 2f)
+                            firePoint.LookAt(hit.point);
+                    }
+                    else
+                    {
+                        firePoint.LookAt(camTrans.position + (camTrans.forward * 30f));
                     }
                 }
-                else
-                {
-                    firePoint.LookAt(camTrans.position + (camTrans.forward * 30f));
-                }
 
-                Instantiate(bullet, firePoint.position, firePoint.rotation);
+                if (bullet != null && firePoint != null)
+                {
+                    // Spawn slightly forward so ADS doesn't spawn inside our own colliders
+                    Vector3 spawnPos = firePoint.position + firePoint.forward * bulletSpawnForwardOffset;
+                    GameObject b = Instantiate(bullet, spawnPos, firePoint.rotation);
+                    IgnoreShooterCollisions(b);
+                }
 
                 ApplyRecoil();
 
@@ -229,29 +249,259 @@ public class Player2Controller : MonoBehaviour
             if (TestCam.instance != null && activeGun != null)
                 TestCam.instance.ZoomIn(activeGun.zoomAmount);
 
-            // Recompute ADS local target (in case ADS point is moved/animated)
-            if (adsPoint != null && gunHolder != null && gunHolder.parent != null)
-                adsLocalPos = gunHolder.parent.InverseTransformPoint(adsPoint.position);
+            RecomputeAdsLocalTarget();
         }
 
         if (Input.GetMouseButton(1))
         {
-            gunHolder.localPosition = Vector3.MoveTowards(gunHolder.localPosition, adsLocalPos, adsSpeed * Time.deltaTime);
+            if (gunHolder != null)
+                gunHolder.localPosition = Vector3.MoveTowards(gunHolder.localPosition, adsLocalPos, adsSpeed * Time.deltaTime);
         }
         else
         {
-            gunHolder.localPosition = Vector3.MoveTowards(gunHolder.localPosition, gunStartPos, adsSpeed * Time.deltaTime);
+            if (gunHolder != null)
+                gunHolder.localPosition = Vector3.MoveTowards(gunHolder.localPosition, gunStartPos, adsSpeed * Time.deltaTime);
         }
 
         if (Input.GetMouseButtonUp(1))
         {
             if (TestCam.instance != null)
-                TestCam.instance.ZoomOut(); // ✅ FIXED: no argument
+                TestCam.instance.ZoomOut();
         }
-
 
         // Update visual recoil (does not affect ADS gunHolder movement)
         UpdateRecoil();
+    }
+
+
+    private void TriggerMuzzleFlash()
+    {
+        if (muzzleFlash == null) return;
+
+        // Prefer ParticleSystem for reliable per-shot flashes.
+        if (muzzleFlashPS != null)
+        {
+            // Ensure object is enabled so it can render.
+            if (!muzzleFlash.activeSelf)
+                muzzleFlash.SetActive(true);
+
+            // Restart every shot.
+            muzzleFlashPS.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
+            muzzleFlashPS.Play(true);
+        }
+        else
+        {
+            // GameObject toggle flash: enable now; Update() will disable after muzzleFlashUntil.
+            if (!muzzleFlash.activeSelf)
+                muzzleFlash.SetActive(true);
+        }
+    }
+
+    // ---------------------------
+    // GUN SWITCHING
+    // ---------------------------
+    private void AutoPopulateGunsIfEmpty()
+    {
+        if (guns != null && guns.Count > 0) return;
+        if (gunHolder == null) return;
+
+        guns = new List<Gun>();
+        var found = gunHolder.GetComponentsInChildren<Gun>(true);
+        for (int i = 0; i < found.Length; i++)
+        {
+            if (!guns.Contains(found[i]))
+                guns.Add(found[i]);
+        }
+    }
+
+    private void CycleGun()
+    {
+        if (guns == null || guns.Count == 0) return;
+
+        int next = gunIndex + 1;
+        if (next >= guns.Count) next = 0;
+
+        EquipGun(next, false);
+    }
+
+    private void EquipGun(int index, bool instant)
+    {
+        if (guns == null || guns.Count == 0) return;
+
+        gunIndex = Mathf.Clamp(index, 0, guns.Count - 1);
+
+        // Activate only the selected gun GameObject (optional, but convenient)
+        for (int i = 0; i < guns.Count; i++)
+        {
+            if (guns[i] == null) continue;
+            bool active = (i == gunIndex);
+            if (guns[i].gameObject.activeSelf != active)
+                guns[i].gameObject.SetActive(active);
+        }
+
+        activeGun = guns[gunIndex];
+
+        // Pull core references from Gun component (these fields exist on your Gun script)
+        if (activeGun != null)
+        {
+            bullet = activeGun.bullet;
+            firePoint = activeGun.firePoint;
+        }
+
+        // If those aren't assigned on the Gun component, try to find common children
+        if (firePoint == null && activeGun != null)
+            firePoint = FindChildAny(activeGun.transform, new[] { "Fire Point", "FirePoint", "fire point", "firepoint" });
+
+        adsPoint = null;
+        if (activeGun != null)
+            adsPoint = FindChildAny(activeGun.transform, new[] { "ads point", "Ads Point", "ADS Point", "adsPoint", "ADSPoint", "ads point pistol", "ads point rifle" });
+
+        muzzleFlash = null;
+        if (activeGun != null)
+        {
+            Transform mf = FindChildAny(activeGun.transform, new[] { "Muzzle Flash", "muzzle flash", "MuzzleFlash", "muzzleFlash" });
+            muzzleFlash = (mf != null) ? mf.gameObject : null;
+        }
+
+        // Cache particle system if present (so we can Play() reliably each shot)
+        muzzleFlashPS = null;
+        if (muzzleFlash != null)
+        {
+            muzzleFlashPS = muzzleFlash.GetComponent<ParticleSystem>();
+            if (muzzleFlashPS == null)
+                muzzleFlashPS = muzzleFlash.GetComponentInChildren<ParticleSystem>(true);
+        }
+
+        // Recoil target: use assigned one if you want, otherwise use the active gun's transform.
+        // If you want recoil on a specific mesh child, rename it and add to the list below.
+        recoilTarget = null;
+        if (activeGun != null)
+        {
+            recoilTarget = FindChildAny(activeGun.transform, new[] { "M4_8", "M1911", "Model", "Mesh", "Rifle", "Pistol" });
+            if (recoilTarget == null)
+                recoilTarget = activeGun.transform;
+        }
+
+        // Reset recoil baselines
+        recoilPosCurrent = Vector3.zero;
+        recoilRotCurrent = Vector3.zero;
+        recoilPosVelocity = Vector3.zero;
+        recoilRotVelocity = Vector3.zero;
+
+        if (recoilTarget != null)
+        {
+            recoilPosBase = recoilTarget.localPosition;
+            recoilRotBase = recoilTarget.localEulerAngles;
+        }
+
+        // Recompute shooter colliders to ignore self hits (player + ACTIVE gun only)
+        GatherShooterColliders();
+
+        // Recompute ADS target & optionally snap gunHolder to hip position when switching
+        RecomputeAdsLocalTarget();
+
+        if (instant && gunHolder != null)
+            gunHolder.localPosition = gunStartPos;
+
+        // Clear muzzle flash state so it doesn't "stick" across switches
+        muzzleFlashUntil = 0f;
+        if (muzzleFlash != null) muzzleFlash.SetActive(false);
+        if (muzzleFlashPS != null) muzzleFlashPS.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
+
+        // Update crosshair base scale based on the equipped gun
+        UpdateCrosshairScale();
+
+        // Reset fire timer so switching doesn't "eat" the next shot
+        nextFireTime = 0f;
+    }
+
+    private void RecomputeAdsLocalTarget()
+    {
+        if (adsPoint != null && gunHolder != null && gunHolder.parent != null)
+            adsLocalPos = gunHolder.parent.InverseTransformPoint(adsPoint.position);
+        else
+            adsLocalPos = gunStartPos;
+    }
+
+    private void GatherShooterColliders()
+    {
+        var playerCols = GetComponentsInChildren<Collider>(true);
+
+        Collider[] gunCols = null;
+        if (activeGun != null)
+            gunCols = activeGun.GetComponentsInChildren<Collider>(true);
+
+        shooterColliders = Combine(playerCols, gunCols);
+    }
+
+
+    private void IgnoreShooterCollisions(GameObject bulletObj)
+    {
+        if (bulletObj == null) return;
+
+        // Prefer collider on root; fallback to any child collider.
+        Collider bulletCol = bulletObj.GetComponent<Collider>();
+        if (bulletCol == null)
+            bulletCol = bulletObj.GetComponentInChildren<Collider>(true);
+
+        if (bulletCol == null) return;
+
+        if (shooterColliders == null) return;
+
+        for (int i = 0; i < shooterColliders.Length; i++)
+        {
+            var c = shooterColliders[i];
+            if (c == null || c == bulletCol) continue;
+            Physics.IgnoreCollision(bulletCol, c, true);
+        }
+    }
+
+    private static Transform FindChildAny(Transform root, string[] names)
+    {
+        if (root == null || names == null || names.Length == 0) return null;
+
+        // Simple DFS over children
+        var stack = new Stack<Transform>();
+        stack.Push(root);
+
+        while (stack.Count > 0)
+        {
+            var t = stack.Pop();
+            string tn = t.name;
+
+            for (int i = 0; i < names.Length; i++)
+            {
+                string n = names[i];
+                if (string.IsNullOrEmpty(n)) continue;
+
+                // Exact or partial match (case-insensitive). Partial match helps for names like "ads point Pistol".
+                if (string.Equals(tn, n, System.StringComparison.OrdinalIgnoreCase) ||
+                    tn.IndexOf(n, System.StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return t;
+                }
+            }
+
+            for (int c = 0; c < t.childCount; c++)
+                stack.Push(t.GetChild(c));
+        }
+
+        return null;
+    }
+    private static Collider[] Combine(Collider[] a, Collider[] b)
+    {
+        if (a == null || a.Length == 0) return b ?? new Collider[0];
+        if (b == null || b.Length == 0) return a;
+
+        var list = new List<Collider>(a.Length + b.Length);
+        list.AddRange(a);
+        for (int i = 0; i < b.Length; i++)
+        {
+            if (b[i] == null) continue;
+            if (!list.Contains(b[i]))
+                list.Add(b[i]);
+        }
+        return list.ToArray();
     }
 
     // ---------------------------
@@ -279,6 +529,25 @@ public class Player2Controller : MonoBehaviour
 
         recoilTarget.localPosition = Vector3.Lerp(recoilTarget.localPosition, targetPos, Time.deltaTime * recoilSnappiness);
         recoilTarget.localRotation = Quaternion.Slerp(recoilTarget.localRotation, Quaternion.Euler(targetRot), Time.deltaTime * recoilSnappiness);
+    }
+
+    private void UpdateCrosshairScale()
+    {
+        if (CrosshairRecoilUI.Instance == null) return;
+
+        // Decide if this gun is a "pistol" by gunName or transform name.
+        bool isPistol = false;
+        if (activeGun != null)
+        {
+            string n = activeGun.gunName;
+            if (string.IsNullOrEmpty(n)) n = activeGun.transform.name;
+
+            n = n.ToLowerInvariant();
+            isPistol = n.Contains("pistol") || n.Contains("m1911");
+        }
+
+        float baseScale = isPistol ? crosshairScalePistol : crosshairScaleDefault;
+        CrosshairRecoilUI.Instance.SetBaseScale(baseScale);
     }
 
 }
