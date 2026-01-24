@@ -62,6 +62,15 @@ public class AllyController : MonoBehaviour
     [Tooltip("NavMesh sample radius used when picking a strafe point.")]
     public float strafeSampleRadius = 2.5f;
 
+    [Tooltip("Distance (meters) moved during each short combat burst (diagonal strafe/back-forward).")]
+    public float combatBurstMoveDistance = 2.0f;
+
+    [Tooltip("How much the burst includes moving toward/away from the target (0 = purely sideways).")]
+    public float combatBurstRadialWeight = 0.65f;
+
+    [Tooltip("How much the burst includes moving sideways around the target (0 = no strafing).")]
+    public float combatBurstTangentialWeight = 1.0f;
+
     [Header("Formation Hold (Optional)")]
     [Tooltip("If true, and this ally is currently following a formation slot (target != null), combat movement is clamped so the ally stays near its slot instead of breaking formation.")]
     public bool holdFormationWhenFollowing = true;
@@ -74,6 +83,44 @@ public class AllyController : MonoBehaviour
 
     [Tooltip("Extra meters added to tether when scaling with team size. Effective tether = base + extra * sqrt(teamSize-1).")]
     public float tetherExtraPerSqrtMember = 0.35f;
+
+
+
+    [Header("Manual Move Hold (Player Move Orders)")]
+    [Tooltip("If true, a player-issued Move order creates a 'hold zone'. While holding, the ally will not chase enemies outside manualChaseLeashRadius from the hold point.")]
+    public bool enableManualHoldZone = true;
+
+    [Tooltip("Radius around the move destination that counts as the ally's 'hold area'. Used mainly for editor tuning / future UI. Combat leash uses manualChaseLeashRadius.")]
+    public float manualHoldRadius = 6f;
+
+    [Tooltip("Max distance from the hold point this ally is allowed to chase during combat (prevents chasing 50+ units away after a Move order).")]
+    public float manualChaseLeashRadius = 12f;
+
+    [Tooltip("If false, allies will NOT auto-acquire enemies while holding (they'll only fight if explicitly attacked/ordered).")]
+    public bool manualHoldAllowsAutoAggro = true;
+
+    [Header("Team Focus Fire")]
+    [Tooltip("If true, allies in a team will sometimes prefer the same target as a nearby teammate (reduces split fire).")]
+    public bool enableTeamFocusFire = true;
+
+    [Tooltip("Max distance from this ally to a teammate's target for focus-fire to kick in.")]
+    public float focusFireMaxTargetDistance = 12f;
+
+    [Tooltip("Seconds between allowed focus-fire target switches (prevents oscillation).")]
+    public float focusFireCooldown = 1.0f;
+
+    [Header("Combat Engagement Pause")]
+    [Tooltip("When the ally is in its desired range, it will pause (stand ground) for a bit while shooting instead of constantly strafing.")]
+    public bool pauseWhileShootingInRange = true;
+
+    [Tooltip("Min seconds to stand still while shooting (in-range).")]
+    public float pauseShootMinSeconds = 2f;
+
+    [Tooltip("Max seconds to stand still while shooting (in-range).")]
+    public float pauseShootMaxSeconds = 3f;
+
+    [Tooltip("After a pause, allow a short burst of strafing movement before pausing again (keeps combat from looking too robotic).")]
+    public float pauseMoveBurstSeconds = 0.5f;
 
     [Header("Animation")]
     public Animator soldierAnimator;
@@ -113,6 +160,21 @@ public class AllyController : MonoBehaviour
 
     // Track one enemy target so we don't fight every enemy in the scene at once
     private Transform currentEnemy;
+
+    /// <summary>The enemy this ally is currently chasing (null when idle).</summary>
+    public Transform CurrentEnemy => currentEnemy;
+
+    // Manual hold runtime
+    private bool _hasManualHold;
+    private Vector3 _manualHoldPoint;
+
+    // Focus fire runtime
+    private float _nextFocusFireTime;
+
+    // Combat pause runtime
+    private float _combatPauseTimer;
+    private float _combatMoveBurstTimer;
+
 
     // Combat strafe runtime
     private float _strafeRepathTimer;
@@ -202,6 +264,21 @@ public class AllyController : MonoBehaviour
         }
     }
 
+    // -------------------- MANUAL HOLD API --------------------
+    public void SetManualHoldPoint(Vector3 point)
+    {
+        _hasManualHold = true;
+        _manualHoldPoint = point;
+    }
+
+    public void ClearManualHoldPoint()
+    {
+        _hasManualHold = false;
+    }
+
+    public bool HasManualHoldPoint => _hasManualHold;
+    public Vector3 ManualHoldPoint => _manualHoldPoint;
+
     private void Update()
     {
         // Rotation:
@@ -254,6 +331,21 @@ public class AllyController : MonoBehaviour
             else
             {
                 float dist = Vector3.Distance(transform.position, currentEnemy.position);
+
+                // If we're in a manual hold zone (player-issued Move), never chase outside the leash.
+                if (enableManualHoldZone && _hasManualHold)
+                {
+                    float leash = Mathf.Max(0.1f, manualChaseLeashRadius);
+                    float dSelf = Vector3.Distance(transform.position, _manualHoldPoint);
+                    float dEnemy = Vector3.Distance(currentEnemy.position, _manualHoldPoint);
+
+                    if (dSelf > leash || dEnemy > leash)
+                    {
+                        StopChasingAndResume();
+                        return;
+                    }
+                }
+
                 if (dist > distanceToLose)
                 {
                     StopChasingAndResume();
@@ -347,21 +439,78 @@ public class AllyController : MonoBehaviour
 
     private void TryAcquireEnemy()
     {
-        // Find nearest enemy within distanceToChase
-        GameObject[] enemies = GameObject.FindGameObjectsWithTag("Enemy");
+        // If we're holding a player-issued move position and auto-aggro is disabled, do nothing.
+        if (enableManualHoldZone && _hasManualHold && !manualHoldAllowsAutoAggro)
+            return;
+
         Transform best = null;
         float bestDist = float.MaxValue;
 
-        for (int i = 0; i < enemies.Length; i++)
+        // 1) Team focus-fire: if a nearby teammate is already chasing something, prefer that target (with cooldown).
+        if (enableTeamFocusFire && Time.time >= _nextFocusFireTime && TeamManager.Instance != null)
         {
-            var go = enemies[i];
-            if (go == null) continue;
-
-            float d = Vector3.Distance(transform.position, go.transform.position);
-            if (d < distanceToChase && d < bestDist)
+            Team team = TeamManager.Instance.GetTeamOf(this.transform);
+            if (team != null && team.Members != null && team.Members.Count > 1)
             {
+                float maxTargetDist = Mathf.Max(0.1f, focusFireMaxTargetDistance);
+
+                for (int i = 0; i < team.Members.Count; i++)
+                {
+                    Transform m = team.Members[i];
+                    if (m == null || m == this.transform) continue;
+
+                    AllyController other = m.GetComponent<AllyController>();
+                    if (other == null || !other.IsChasing) continue;
+
+                    Transform enemy = other.CurrentEnemy;
+                    if (enemy == null) continue;
+
+                    float d = Vector3.Distance(transform.position, enemy.position);
+                    if (d > distanceToChase) continue;
+                    if (d > maxTargetDist) continue;
+                    if (d >= bestDist) continue;
+
+                    // Manual-hold leash filter (don't focus-fire something outside our hold zone leash).
+                    if (enableManualHoldZone && _hasManualHold)
+                    {
+                        float leash = Mathf.Max(0.1f, manualChaseLeashRadius);
+                        float dEnemyToHold = Vector3.Distance(enemy.position, _manualHoldPoint);
+                        if (dEnemyToHold > leash) continue;
+                    }
+
+                    bestDist = d;
+                    best = enemy;
+                }
+
+                if (best != null)
+                    _nextFocusFireTime = Time.time + Mathf.Max(0f, focusFireCooldown);
+            }
+        }
+
+        // 2) Normal nearest-enemy search (fallback)
+        if (best == null)
+        {
+            GameObject[] enemies = GameObject.FindGameObjectsWithTag("Enemy");
+
+            for (int i = 0; i < enemies.Length; i++)
+            {
+                var go = enemies[i];
+                if (go == null) continue;
+
+                Transform t = go.transform;
+                float d = Vector3.Distance(transform.position, t.position);
+                if (d >= distanceToChase) continue;
+                if (d >= bestDist) continue;
+
+                if (enableManualHoldZone && _hasManualHold)
+                {
+                    float leash = Mathf.Max(0.1f, manualChaseLeashRadius);
+                    float dEnemyToHold = Vector3.Distance(t.position, _manualHoldPoint);
+                    if (dEnemyToHold > leash) continue;
+                }
+
                 bestDist = d;
-                best = go.transform;
+                best = t;
             }
         }
 
@@ -377,8 +526,13 @@ public class AllyController : MonoBehaviour
 
             chasing = true;
             currentEnemy = best;
+
+            // Reset combat pause cycle when we start a new engagement.
+            _combatPauseTimer = 0f;
+            _combatMoveBurstTimer = 0f;
         }
     }
+
 
     private void StopChasingAndResume()
     {
@@ -394,6 +548,15 @@ public class AllyController : MonoBehaviour
         }
 
         if (agent == null) { hasResumeDestination = false; return; }
+
+        // If we have a manual hold point (player Move order), always return to it after combat.
+        if (enableManualHoldZone && _hasManualHold && target == null)
+        {
+            agent.isStopped = false;
+            agent.SetDestination(_manualHoldPoint);
+            hasResumeDestination = false;
+            return;
+        }
 
         // ✅ KEY FIX:
         // If this unit has a pinned move destination (team/ally move pins), resume to the LATEST pinned destination.
@@ -717,6 +880,10 @@ public class AllyController : MonoBehaviour
             // Too far: move in toward a ring around the enemy (not the exact center).
             if (dist > range + attackRangeBuffer)
             {
+                // Out of ideal range: reset pause cycle so we don't get stuck "paused" while needing to reposition.
+                _combatPauseTimer = 0f;
+                _combatMoveBurstTimer = 0f;
+
                 agent.isStopped = false;
                 Vector3 toward = (targetPoint - transform.position);
                 toward.y = 0f;
@@ -729,6 +896,10 @@ public class AllyController : MonoBehaviour
             // Too close: back off a bit.
             else if (dist < range - attackRangeBuffer)
             {
+                // Too close: reset pause cycle so we can immediately back off.
+                _combatPauseTimer = 0f;
+                _combatMoveBurstTimer = 0f;
+
                 Vector3 away = (transform.position - targetPoint);
                 away.y = 0f;
                 away = away.sqrMagnitude < 0.001f ? transform.forward : away.normalized;
@@ -748,40 +919,130 @@ public class AllyController : MonoBehaviour
             {
                 if (enableCombatStrafe)
                 {
-                    _strafeRepathTimer -= Time.deltaTime;
-                    _strafeChangeTimer -= Time.deltaTime;
-
-                    if (_strafeChangeTimer <= 0f)
+                    // NEW: Pause / stand-ground behavior to reduce constant running around.
+                    if (pauseWhileShootingInRange)
                     {
-                        // Occasionally flip sides so it doesn't look too robotic.
-                        if (Random.value < 0.35f) _strafeSide *= -1;
-                        _strafeAngleOffset = Random.Range(-strafeAngleJitter, strafeAngleJitter);
-                        _strafeChangeTimer = Mathf.Max(0.1f, strafeChangeInterval);
+                        // Initialize pause timer on first entry.
+                        if (_combatPauseTimer <= 0f && _combatMoveBurstTimer <= 0f)
+                            _combatPauseTimer = Random.Range(Mathf.Max(0f, pauseShootMinSeconds), Mathf.Max(pauseShootMinSeconds, pauseShootMaxSeconds));
+
+                        // 1) Stand still and shoot for 2-3 seconds
+                        if (_combatPauseTimer > 0f)
+                        {
+                            _combatPauseTimer -= Time.deltaTime;
+                            agent.isStopped = true;
+                            agent.ResetPath();
+                        }
+                        // 2) Then allow a short movement burst (strafe repath) before pausing again
+                        else
+                        {
+                            if (_combatMoveBurstTimer <= 0f)
+                            {
+                                _combatMoveBurstTimer = Mathf.Max(0.05f, pauseMoveBurstSeconds);
+                                _strafeRepathTimer = 0f; // force a new strafe point immediately
+                            }
+
+                            _combatMoveBurstTimer -= Time.deltaTime;
+
+                            // Normal strafe timers
+                            _strafeRepathTimer -= Time.deltaTime;
+                            _strafeChangeTimer -= Time.deltaTime;
+
+                            if (_strafeChangeTimer <= 0f)
+                            {
+                                // Occasionally flip sides so it doesn't look too robotic.
+                                if (Random.value < 0.35f) _strafeSide *= -1;
+                                _strafeAngleOffset = Random.Range(-strafeAngleJitter, strafeAngleJitter);
+                                _strafeChangeTimer = Mathf.Max(0.1f, strafeChangeInterval);
+                            }
+
+                            if (_strafeRepathTimer <= 0f)
+                            {
+                                Vector3 toTarget = (targetPoint - transform.position);
+                                toTarget.y = 0f;
+                                if (toTarget.sqrMagnitude < 0.001f)
+                                    toTarget = transform.forward;
+
+                                Vector3 forwardToTarget = toTarget.normalized;
+
+                                // Tangential (left/right) component around the target
+                                Quaternion rot = Quaternion.AngleAxis((_strafeSide * 90f) + _strafeAngleOffset, Vector3.up);
+                                Vector3 tangent = rot * forwardToTarget;
+
+                                // Radial (toward/away) component to create diagonal motion ("left/right" + "up/down")
+                                float radialSign = Random.Range(-1f, 1f); // negative = away, positive = toward
+                                Vector3 moveDir = (tangent * Mathf.Max(0f, combatBurstTangentialWeight)) +
+                                                 (forwardToTarget * radialSign * Mathf.Max(0f, combatBurstRadialWeight));
+
+                                if (moveDir.sqrMagnitude < 0.0001f)
+                                    moveDir = tangent;
+
+                                moveDir.Normalize();
+
+                                float step = Mathf.Max(0.25f, combatBurstMoveDistance);
+                                Vector3 desired = transform.position + moveDir * step;
+
+                                if (NavMesh.SamplePosition(desired, out NavMeshHit hit, strafeSampleRadius, NavMesh.AllAreas))
+                                    desired = hit.position;
+
+                                desired = ClampCombatMoveToFormation(desired, formationSlot);
+                                agent.isStopped = false;
+                                agent.SetDestination(desired);
+                                _strafeRepathTimer = Mathf.Max(0.05f, strafeRepathInterval);
+                            }
+
+                            // End burst → start a new pause cycle
+                            if (_combatMoveBurstTimer <= 0f)
+                            {
+                                _combatMoveBurstTimer = 0f;
+                                _combatPauseTimer = Random.Range(Mathf.Max(0f, pauseShootMinSeconds), Mathf.Max(pauseShootMinSeconds, pauseShootMaxSeconds));
+                                agent.isStopped = true;
+                                agent.ResetPath();
+                            }
+                        }
                     }
-
-                    if (_strafeRepathTimer <= 0f)
+                    else
                     {
-                        Vector3 fromTarget = (transform.position - targetPoint);
-                        fromTarget.y = 0f;
-                        if (fromTarget.sqrMagnitude < 0.001f)
-                            fromTarget = transform.forward;
+                        // Original continuous strafe behavior
+                        _strafeRepathTimer -= Time.deltaTime;
+                        _strafeChangeTimer -= Time.deltaTime;
 
-                        // Tangent around the target (left/right) plus small random angle jitter.
-                        Quaternion rot = Quaternion.AngleAxis((_strafeSide * 90f) + _strafeAngleOffset, Vector3.up);
-                        Vector3 strafeDir = rot * fromTarget.normalized;
+                        if (_strafeChangeTimer <= 0f)
+                        {
+                            // Occasionally flip sides so it doesn't look too robotic.
+                            if (Random.value < 0.35f) _strafeSide *= -1;
+                            _strafeAngleOffset = Random.Range(-strafeAngleJitter, strafeAngleJitter);
+                            _strafeChangeTimer = Mathf.Max(0.1f, strafeChangeInterval);
+                        }
 
-                        Vector3 desired = targetPoint + strafeDir.normalized * range;
-                        if (NavMesh.SamplePosition(desired, out NavMeshHit hit, strafeSampleRadius, NavMesh.AllAreas))
-                            desired = hit.position;
+                        if (_strafeRepathTimer <= 0f)
+                        {
+                            Vector3 fromTarget = (transform.position - targetPoint);
+                            fromTarget.y = 0f;
+                            if (fromTarget.sqrMagnitude < 0.001f)
+                                fromTarget = transform.forward;
 
-                        desired = ClampCombatMoveToFormation(desired, formationSlot);
-                        agent.isStopped = false;
-                        agent.SetDestination(desired);
-                        _strafeRepathTimer = Mathf.Max(0.05f, strafeRepathInterval);
+                            // Tangent around the target (left/right) plus small random angle jitter.
+                            Quaternion rot = Quaternion.AngleAxis((_strafeSide * 90f) + _strafeAngleOffset, Vector3.up);
+                            Vector3 strafeDir = rot * fromTarget.normalized;
+
+                            Vector3 desired = targetPoint + strafeDir.normalized * range;
+                            if (NavMesh.SamplePosition(desired, out NavMeshHit hit, strafeSampleRadius, NavMesh.AllAreas))
+                                desired = hit.position;
+
+                            desired = ClampCombatMoveToFormation(desired, formationSlot);
+                            agent.isStopped = false;
+                            agent.SetDestination(desired);
+                            _strafeRepathTimer = Mathf.Max(0.05f, strafeRepathInterval);
+                        }
                     }
                 }
                 else
                 {
+                    // No strafe: stand still at ideal range.
+                    _combatPauseTimer = 0f;
+                    _combatMoveBurstTimer = 0f;
+
                     agent.isStopped = true;
                     agent.ResetPath();
                 }

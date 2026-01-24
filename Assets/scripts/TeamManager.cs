@@ -112,8 +112,9 @@ public class TeamManager : MonoBehaviour
         // One team exists -> add other
         if (teamA != null && teamB == null)
         {
+            // ✅ RECRUIT: add the unit to the existing team, but DO NOT move the team Anchor.
+            // The star should stay where it already is.
             teamA.Add(joinTarget);
-            teamA.Anchor = joinTarget; // star on second ally
             teamA.FormationRadius = Mathf.Max(0.1f, teamA.FormationRadius > 0f ? teamA.FormationRadius : defaultFormationRadius);
 
             ShowTeamHint(teamA, "Team updated!");
@@ -124,8 +125,9 @@ public class TeamManager : MonoBehaviour
 
         if (teamA == null && teamB != null)
         {
+            // ✅ RECRUIT: add the unit to the existing team, but DO NOT move the team Anchor.
+            // The star should stay where it already is.
             teamB.Add(leader);
-            teamB.Anchor = joinTarget; // star on second ally
             teamB.FormationRadius = Mathf.Max(0.1f, teamB.FormationRadius > 0f ? teamB.FormationRadius : defaultFormationRadius);
 
             ShowTeamHint(teamB, "Team updated!");

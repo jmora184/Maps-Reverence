@@ -1,27 +1,61 @@
 using UnityEngine;
 
+/// <summary>
+/// BulletController (collision-based)
+/// - Spawns impact FX ONLY when hitting an Enemy (tag "Enemy" on collider or any parent).
+/// - Applies headshot multiplier when hitting a head collider (tag or name "HeadShot").
+/// 
+/// Backward compatibility:
+/// - Older scripts (ex: AllyController) set bullet.Damage. We keep that API via a property that maps to baseDamage.
+/// </summary>
+[DisallowMultipleComponent]
 public class BulletController : MonoBehaviour
 {
     [Header("Movement")]
     public float moveSpeed = 175f;
-    public float lifeTime = 25f;
+    public float lifeTime = 2.5f;
 
     [Tooltip("Optional; if left empty we'll auto-grab the Rigidbody on this object.")]
     public Rigidbody theRB;
 
     [Header("Impact")]
+    [Tooltip("Spawned ONLY when we hit an Enemy.")]
     public GameObject impactEffect;
 
     [Tooltip("Push the impact slightly out from the surface so it doesn't clip inside.")]
-    public float impactSurfaceOffset = 0.05f;
+    public float impactSurfaceOffset = 0.03f;
+
+    [Tooltip("If true, align the impact effect along the collision normal. If false, use -bulletForward (spray direction).")]
+    public bool alignToCollisionNormal = true;
 
     [Header("Damage")]
-    public int Damage = 2;
-    public bool damageEnemy, damagePlayer;
+    [Tooltip("Base damage for a body shot.")]
+    public int baseDamage = 2;
 
-    // Position at the start of the last physics step.
-    // We raycast from this position to the current position to find the *real* surface hit.
-    private Vector3 _prevPhysicsPos;
+    /// <summary>
+    /// Backward compatible API: other scripts may set BulletController.Damage.
+    /// This maps to baseDamage.
+    /// </summary>
+    public int Damage
+    {
+        get => baseDamage;
+        set => baseDamage = value;
+    }
+
+    [Tooltip("Multiply damage when hitting a head collider.")]
+    public float headshotMultiplier = 2f;
+
+    [Tooltip("If true, bullets damage enemies.")]
+    public bool damageEnemy = true;
+
+    [Header("Headshot Detection")]
+    [Tooltip("If the hit collider has this tag (or any parent does), it counts as headshot. Recommended to create tag 'HeadShot'.")]
+    public string headshotTag = "HeadShot";
+
+    [Tooltip("Fallback: if tag isn't used, collider GameObject name equals this, it counts as headshot.")]
+    public string headshotName = "HeadShot";
+
+    private float _spawnTime;
 
     private void Awake()
     {
@@ -29,154 +63,153 @@ public class BulletController : MonoBehaviour
             theRB = GetComponent<Rigidbody>();
     }
 
-    private void Start()
+    private void OnEnable()
     {
-        _prevPhysicsPos = transform.position;
+        _spawnTime = Time.time;
 
         if (theRB != null)
         {
-            // Best for fast trigger bullets.
-            theRB.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
+            theRB.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
             theRB.interpolation = RigidbodyInterpolation.Interpolate;
+            theRB.isKinematic = false;
+            theRB.useGravity = false;
         }
     }
 
     private void FixedUpdate()
     {
-        // Cache where we were BEFORE the physics step runs.
-        _prevPhysicsPos = transform.position;
-    }
-
-    private void Update()
-    {
-        // Keep your original feel: set velocity every frame.
+        // Drive forward
         if (theRB != null)
             theRB.linearVelocity = transform.forward * moveSpeed;
+        else
+            transform.position += transform.forward * moveSpeed * Time.fixedDeltaTime;
 
-        lifeTime -= Time.deltaTime;
-        if (lifeTime <= 0f)
+        // Lifetime
+        if (Time.time - _spawnTime >= lifeTime)
             Destroy(gameObject);
     }
 
-    private void OnTriggerEnter(Collider other)
+    private void OnCollisionEnter(Collision collision)
     {
-        Debug.Log("BULLET HIT: " + other.name + " tag=" + other.tag + " layer=" + other.gameObject.layer);
+        if (collision == null) return;
 
-        // Damage ENEMY
-        if (damageEnemy && other.CompareTag("Enemy"))
+        Collider hit = collision.collider;
+
+        // Compute a stable hit point / normal
+        Vector3 point = transform.position;
+        Vector3 normal = -transform.forward;
+
+        if (collision.contactCount > 0)
         {
-            var eh = other.GetComponentInParent<EnemyHealthController>();
-            if (eh != null) eh.DamageEnemy(Damage);
+            ContactPoint cp = collision.GetContact(0);
+            point = cp.point;
+            normal = cp.normal;
         }
 
-        // Headshot (enemy child collider)
-        if (damageEnemy && other.CompareTag("HeadShot"))
+        // Only handle enemy hits (damage + impact) — no blood on floor.
+        if (HitIsEnemy(hit))
         {
-            var eh = other.GetComponentInParent<EnemyHealthController>();
-            if (eh != null) eh.DamageEnemy(Damage + 2);
-            Debug.Log("headshot");
-        }
+            if (damageEnemy)
+            {
+                int dmg = ComputeDamage(hit);
+                var eh = hit.GetComponentInParent<EnemyHealthController>();
+                if (eh != null) eh.DamageEnemy(dmg);
+            }
 
-        // Damage ALLY
-        if (damageEnemy && other.CompareTag("Ally"))
-        {
-            var ah = other.GetComponentInParent<AllyHealth>();
-            if (ah != null) ah.DamageAlly(Damage);
+            SpawnImpact(point, normal);
         }
-
-        // Damage PLAYER
-        if (damagePlayer && other.CompareTag("Player"))
-        {
-            if (PlayerHealthController.instance != null)
-                PlayerHealthController.instance.DamagePlayer(Damage);
-        }
-
-        SpawnImpact(other);
 
         Destroy(gameObject);
     }
 
-    private void SpawnImpact(Collider other)
+    // Optional fallback if something is still configured as trigger
+    private void OnTriggerEnter(Collider other)
+    {
+        if (other == null) return;
+
+        if (HitIsEnemy(other))
+        {
+            if (damageEnemy)
+            {
+                int dmg = ComputeDamage(other);
+                var eh = other.GetComponentInParent<EnemyHealthController>();
+                if (eh != null) eh.DamageEnemy(dmg);
+            }
+
+            Vector3 point = other.ClosestPoint(transform.position);
+            Vector3 normal = -transform.forward;
+
+            SpawnImpact(point, normal);
+        }
+
+        Destroy(gameObject);
+    }
+
+    private int ComputeDamage(Collider hit)
+    {
+        float dmg = baseDamage;
+
+        if (IsHeadshot(hit))
+            dmg *= headshotMultiplier;
+
+        return Mathf.Max(1, Mathf.RoundToInt(dmg));
+    }
+
+    private bool HitIsEnemy(Collider hit)
+    {
+        if (hit == null) return false;
+
+        if (hit.CompareTag("Enemy")) return true;
+
+        Transform t = hit.transform;
+        while (t != null)
+        {
+            if (t.CompareTag("Enemy")) return true;
+            t = t.parent;
+        }
+
+        return false;
+    }
+
+    private bool IsHeadshot(Collider hit)
+    {
+        if (hit == null) return false;
+
+        // Prefer tag (cleanest)
+        if (!string.IsNullOrEmpty(headshotTag))
+        {
+            if (hit.CompareTag(headshotTag)) return true;
+
+            Transform t = hit.transform;
+            while (t != null)
+            {
+                if (t.CompareTag(headshotTag)) return true;
+                t = t.parent;
+            }
+        }
+
+        // Fallback: name match (useful if you don't want to create a tag)
+        if (!string.IsNullOrEmpty(headshotName))
+        {
+            if (hit.name == headshotName) return true;
+        }
+
+        return false;
+    }
+
+    private void SpawnImpact(Vector3 point, Vector3 normal)
     {
         if (impactEffect == null) return;
 
-        Vector3 start = _prevPhysicsPos;
-        Vector3 end = transform.position;
-
-        Vector3 delta = end - start;
-        float dist = delta.magnitude;
-
-        // Reasonable fallbacks
-        Vector3 hitPoint = other.ClosestPoint(end);
-        Vector3 hitNormal = -transform.forward;
-
-        // Raycast along the traveled segment to get a trustworthy surface point.
-        // We ONLY accept hits on the collider we actually triggered (or its root), so we won't pick the ground.
-        if (dist > 0.0001f)
-        {
-            Ray ray = new Ray(start, delta / dist);
-            RaycastHit[] hits = Physics.RaycastAll(ray, dist + 0.25f, ~0, QueryTriggerInteraction.Collide);
-
-            float best = float.PositiveInfinity;
-            bool found = false;
-
-            for (int i = 0; i < hits.Length; i++)
-            {
-                RaycastHit h = hits[i];
-                if (h.collider == null) continue;
-
-                if (h.collider == other || h.collider.transform.root == other.transform.root)
-                {
-                    if (h.distance < best)
-                    {
-                        best = h.distance;
-                        hitPoint = h.point;
-                        hitNormal = h.normal;
-                        found = true;
-                    }
-                }
-            }
-
-            if (!found)
-            {
-                // Fallback: closest point based on approach side
-                hitPoint = other.ClosestPoint(start);
-                Vector3 n = (start - hitPoint);
-                if (n.sqrMagnitude > 0.0001f) hitNormal = n.normalized;
-            }
-            else
-            {
-                // Sometimes normals can be zero/invalid for triggers; compute from approach direction if needed.
-                if (hitNormal.sqrMagnitude < 0.0001f)
-                {
-                    Vector3 n = (start - hitPoint);
-                    if (n.sqrMagnitude > 0.0001f) hitNormal = n.normalized;
-                    else hitNormal = -transform.forward;
-                }
-            }
-        }
-        else
-        {
-            // Minimal movement fallback
-            Vector3 n = (start - hitPoint);
-            if (n.sqrMagnitude > 0.0001f) hitNormal = n.normalized;
-        }
-
-        // Ensure the normal faces the shooter/approach side so the offset always pushes
-        // the impact effect toward the camera/shooter (prevents "behind the enemy" flips).
-        Vector3 towardShooter = (start - hitPoint);
-        if (towardShooter.sqrMagnitude > 0.0001f)
-        {
-            towardShooter.Normalize();
-
-            // If the normal points away from the shooter, flip it.
-            if (Vector3.Dot(hitNormal, towardShooter) < 0f)
-                hitNormal = -hitNormal;
-        }
-
+        Vector3 n = normal.sqrMagnitude > 0.0001f ? normal.normalized : -transform.forward;
         float offset = Mathf.Max(0.001f, impactSurfaceOffset);
-        Vector3 spawnPos = hitPoint + hitNormal * offset;
-        Quaternion rot = Quaternion.LookRotation(hitNormal);
+
+        Vector3 spawnPos = point + n * offset;
+
+        Vector3 forward = alignToCollisionNormal ? n : (-transform.forward);
+        if (forward.sqrMagnitude < 0.0001f) forward = n;
+
+        Quaternion rot = Quaternion.LookRotation(forward);
 
         Instantiate(impactEffect, spawnPos, rot);
     }

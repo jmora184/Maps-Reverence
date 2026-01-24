@@ -236,6 +236,11 @@ public class CommandExecutor : MonoBehaviour
 
                 a.isStopped = false;
                 a.SetDestination(destination);
+
+                // Manual hold: move orders create a local hold zone so allies don't chase enemies far away.
+                var ally = a.GetComponent<AllyController>();
+                if (ally != null)
+                    ally.SetManualHoldPoint(destination);
             }
 
             StartPinClearRoutine(expanded, agents);
@@ -326,7 +331,11 @@ public class CommandExecutor : MonoBehaviour
                 if (!go.CompareTag("Ally")) continue;
 
                 var ally = go.GetComponent<AllyController>();
-                if (ally != null) ally.target = null;
+                if (ally != null)
+                {
+                    ally.ClearManualHoldPoint();
+                    ally.target = null;
+                }
             }
 
             followFormationRoutine = StartCoroutine(FollowTargetAsFormationRoutine(team, targetT));
@@ -349,7 +358,10 @@ public class CommandExecutor : MonoBehaviour
 
             var ally = go.GetComponent<AllyController>();
             if (ally != null)
+            {
+                ally.ClearManualHoldPoint();
                 ally.target = targetT;
+            }
 
             var agent = go.GetComponent<NavMeshAgent>();
             if (agent == null) agent = go.GetComponentInChildren<NavMeshAgent>();
@@ -578,8 +590,8 @@ public class CommandExecutor : MonoBehaviour
                 // Keep teams separate from player followers.
                 if (TeamManager.Instance != null)
                 {
-                    Team leaderTeam = TeamManager.Instance.GetTeamOf(leaderGO.transform);
-                    if (leaderTeam != null)
+                    Team leaderTeamForFollowerCheck = TeamManager.Instance.GetTeamOf(leaderGO.transform);
+                    if (leaderTeamForFollowerCheck != null)
                     {
                         HintSystem.Show("Can't add a teamed ally as a player follower.", 2f);
                         return;
@@ -606,12 +618,43 @@ public class CommandExecutor : MonoBehaviour
                 Debug.LogError("[Join] TeamManager.Instance is NULL. Add TeamManager to the scene.");
                 return;
             }
+            // Detect TEAM recruit: if a whole team is selected and you click an unteamed ally,
+            // we add them to the team BUT move the recruit to the team (not the team to the recruit).
+            Team leaderTeam = TeamManager.Instance.GetTeamOf(leaderGO.transform);
+            Team targetTeam = TeamManager.Instance.GetTeamOf(targetGO.transform);
+
+            bool recruitIntoTeam = false;
+            Transform recruitMoveTarget = null;
+
+            if (leaderTeam != null && targetTeam == null && selection != null && selection.Count > 1)
+            {
+                // Ensure the selection represents a single team (the leader's team).
+                List<GameObject> expandedSel = ExpandSelectionForTeams(selection);
+                if (TryGetSingleTeamForSelection(expandedSel, out Team selTeam) && selTeam != null && selTeam == leaderTeam)
+                {
+                    recruitIntoTeam = true;
+
+                    // Prefer moving recruits to the team's Anchor (star holder), else fall back to the join source.
+                    recruitMoveTarget = leaderTeam.Anchor != null ? leaderTeam.Anchor : leaderGO.transform;
+                }
+            }
 
             // ✅ Create/merge team immediately so overlay sees it
             Team team = TeamManager.Instance.JoinUnits(leaderGO.transform, targetGO.transform);
             Debug.Log($"[Join] JoinUnits called. Team={(team != null ? team.Id.ToString() : "null")}");
 
-            // ✅ Move the leader to the target, and mark as in-route so selection can block
+            // ✅ Move: normal join = move leader -> clicked target.
+            // TEAM recruit = move clicked recruit -> existing team anchor.
+            GameObject moveLeaderGO = leaderGO;
+            GameObject moveTargetGO = targetGO;
+
+            if (recruitIntoTeam && recruitMoveTarget != null)
+            {
+                moveLeaderGO = targetGO;                    // recruit walks
+                moveTargetGO = recruitMoveTarget.gameObject; // to the team
+            }
+
+            // ✅ Move the joiner to the target, and mark as in-route so selection can block
             if (joinMoveRoutine != null)
             {
                 StopCoroutine(joinMoveRoutine);
@@ -621,10 +664,15 @@ public class CommandExecutor : MonoBehaviour
 
             // Expose join-route state for DirectionArrowPreview
             IsJoinMoveInProgress = true;
-            JoinMoveLeader = leaderGO.transform;
-            JoinMoveTarget = targetGO.transform;
+            JoinMoveLeader = moveLeaderGO.transform;
 
-            joinMoveRoutine = StartCoroutine(MoveLeaderToJoinTargetRoutine(leaderGO, targetGO));
+            // Join is a new player command; clear any manual hold zone on the leader.
+            var leaderAlly = leaderGO.GetComponent<AllyController>();
+            if (leaderAlly != null)
+                leaderAlly.ClearManualHoldPoint();
+            JoinMoveTarget = moveTargetGO.transform;
+
+            joinMoveRoutine = StartCoroutine(MoveLeaderToJoinTargetRoutine(moveLeaderGO, moveTargetGO));
 
             return;
         }
@@ -1210,6 +1258,12 @@ public class CommandExecutor : MonoBehaviour
                 agent.isStopped = false;
 
             agent.SetDestination(targetPos);
+
+            // Manual hold: formation move slots also create hold zones per-unit.
+            var ally = agent.GetComponent<AllyController>();
+            if (ally != null)
+                ally.SetManualHoldPoint(targetPos);
+
         }
     }
 
@@ -1243,6 +1297,12 @@ public class CommandExecutor : MonoBehaviour
                 agent.isStopped = false;
 
             agent.SetDestination(targetPos);
+
+            // Manual hold: formation move slots also create hold zones per-unit.
+            var ally = agent.GetComponent<AllyController>();
+            if (ally != null)
+                ally.SetManualHoldPoint(targetPos);
+
         }
     }
 
@@ -1287,6 +1347,12 @@ public class CommandExecutor : MonoBehaviour
                 agent.isStopped = false;
 
             agent.SetDestination(targetPos);
+
+            // Manual hold: formation move slots also create hold zones per-unit.
+            var ally = agent.GetComponent<AllyController>();
+            if (ally != null)
+                ally.SetManualHoldPoint(targetPos);
+
         }
     }
     // -------------------- SPLIT (placeholder) --------------------

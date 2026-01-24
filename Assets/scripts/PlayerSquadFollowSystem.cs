@@ -379,7 +379,10 @@ public class PlayerSquadFollowSystem : MonoBehaviour
         }
 
         isPickingFollowers = true;
-        pickSessionHasPickedAny = false;
+        // If we already have followers, treat a new pick session as 'add/remove' so
+        // the first click won't wipe the existing group when returning from FPS mode.
+        // To truly replace the group, use your StopFollow button/flow first.
+        pickSessionHasPickedAny = (followers != null && followers.Count > 0);
 
         if (showPickHint)
             ShowHint(pickHintText, pickHintDuration);

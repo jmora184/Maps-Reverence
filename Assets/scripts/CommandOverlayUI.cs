@@ -6,6 +6,7 @@ using UnityEngine;
 using UnityEngine.AI;
 using UnityEngine.UI;
 using UnityEngine.EventSystems;
+using TMPro;
 
 public class CommandOverlayUI : MonoBehaviour
 {
@@ -99,6 +100,15 @@ public class CommandOverlayUI : MonoBehaviour
     [Header("Button Panel (optional)")]
     public RectTransform commandButtonPanel;
     public Vector2 buttonPanelScreenOffset = new Vector2(0f, 0f);
+
+    [Header("Join Button Label (optional)")]
+    [Tooltip("When a full Team is selected (team star), show 'Recruit' instead of 'Join'.")]
+    public string joinLabelWhenSingle = "Join";
+    public string joinLabelWhenTeamSelected = "Recruit";
+
+    // Cached references to the Join button label under commandButtonPanel.
+    private TMP_Text cachedJoinLabelTMP;
+    private Text cachedJoinLabelLegacy;
 
     [Header("Player Context Panel (optional)")]
     [Tooltip("Optional separate panel shown when clicking the Player icon (personal commands like Follow Me, Hold Fire, etc.).")]
@@ -1439,6 +1449,82 @@ public class CommandOverlayUI : MonoBehaviour
 
     // -------------------- BUTTON PANEL --------------------
 
+
+    // -------------------- JOIN BUTTON LABEL --------------------
+
+    private void EnsureJoinButtonLabelRefs()
+    {
+        if (cachedJoinLabelTMP != null || cachedJoinLabelLegacy != null) return;
+        if (commandButtonPanel == null) return;
+
+        var buttons = commandButtonPanel.GetComponentsInChildren<Button>(true);
+        if (buttons == null) return;
+
+        for (int i = 0; i < buttons.Length; i++)
+        {
+            var b = buttons[i];
+            if (b == null) continue;
+
+            // Prefer name-based match (common: "JoinButton")
+            if (!string.IsNullOrWhiteSpace(b.name) &&
+                b.name.IndexOf("join", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                cachedJoinLabelTMP = b.GetComponentInChildren<TMP_Text>(true);
+                if (cachedJoinLabelTMP == null)
+                    cachedJoinLabelLegacy = b.GetComponentInChildren<Text>(true);
+                return;
+            }
+
+            // Fallback: text-based match
+            var tmp = b.GetComponentInChildren<TMP_Text>(true);
+            if (tmp != null && string.Equals(tmp.text?.Trim(), "Join", StringComparison.OrdinalIgnoreCase))
+            {
+                cachedJoinLabelTMP = tmp;
+                return;
+            }
+
+            var legacy = b.GetComponentInChildren<Text>(true);
+            if (legacy != null && string.Equals(legacy.text?.Trim(), "Join", StringComparison.OrdinalIgnoreCase))
+            {
+                cachedJoinLabelLegacy = legacy;
+                return;
+            }
+        }
+    }
+
+    private bool IsFullTeamSelected()
+    {
+        if (sm == null) return false;
+        if (TeamManager.Instance == null) return false;
+
+        var sel = sm.CurrentSelection;
+        if (sel == null || sel.Count == 0) return false;
+
+        var primary = sm.PrimarySelected;
+        if (primary == null) return false;
+
+        var team = TeamManager.Instance.GetTeamOf(primary.transform);
+        if (team == null || team.Members == null) return false;
+
+        // "Team selected" in your UI means the selection list is the entire team.
+        return team.Members.Count > 1 && sel.Count == team.Members.Count;
+    }
+
+    private void UpdateJoinButtonLabel()
+    {
+        if (commandButtonPanel == null) return;
+
+        EnsureJoinButtonLabelRefs();
+
+        string desired = IsFullTeamSelected() ? joinLabelWhenTeamSelected : joinLabelWhenSingle;
+
+        if (cachedJoinLabelTMP != null && cachedJoinLabelTMP.text != desired)
+            cachedJoinLabelTMP.text = desired;
+
+        if (cachedJoinLabelLegacy != null && cachedJoinLabelLegacy.text != desired)
+            cachedJoinLabelLegacy.text = desired;
+    }
+
     private void UpdateCommandButtonPanel(Camera uiCam)
     {
         if (commandButtonPanel == null) return;
@@ -1477,6 +1563,9 @@ public class CommandOverlayUI : MonoBehaviour
         }
 
         commandButtonPanel.gameObject.SetActive(true);
+
+        // Keep the Join button label context-aware (Join vs Recruit).
+        UpdateJoinButtonLabel();
 
         // Prefer anchoring under team star UI whenever the primary selected unit belongs to a team.
         RectTransform teamStarUI = null;

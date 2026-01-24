@@ -225,12 +225,16 @@ public class Player2Controller : MonoBehaviour
                     float intensity = Input.GetMouseButton(1) ? crosshairRecoilADS : crosshairRecoilHip;
                     CrosshairRecoilUI.Instance.Kick(intensity);
                 }
+
+                // Ensure muzzle flash triggers every single shot (even on semi-auto).
+                TriggerMuzzleFlash();
             }
 
-            // Drive muzzle flash visibility from the timer (stable across frame rates)
-            if (muzzleFlash != null)
+            // If we're using a ParticleSystem muzzle flash, we trigger it per-shot in TriggerMuzzleFlash().
+            // Only use GameObject toggle mode when no ParticleSystem is present.
+            if (muzzleFlash != null && muzzleFlashPS == null)
             {
-                bool showFlash = holdingFire && Time.time < muzzleFlashUntil;
+                bool showFlash = Time.time < muzzleFlashUntil;
                 if (muzzleFlash.activeSelf != showFlash)
                     muzzleFlash.SetActive(showFlash);
             }
