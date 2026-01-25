@@ -99,6 +99,25 @@ public class Enemy2Controller : MonoBehaviour
 
     [Tooltip("NavMesh sample radius used when picking a strafe point.")]
     public float strafeSampleRadius = 2.5f;
+
+    [Header("Team Leash (Stay Near Team)")]
+    [Tooltip("If true and this enemy is under an EnemyTeam_* root, it will try to stay within a radius of the team anchor/centroid.")]
+    public bool enableTeamLeash = true;
+
+    [Tooltip("Soft radius: if the enemy gets beyond this distance from the team anchor, it will start returning.")]
+    public float teamLeashRadius = 22f;
+
+    [Tooltip("Return stop radius (hysteresis). Enemy stops returning when it gets within this distance of the team anchor.")]
+    public float teamLeashReturnRadius = 16f;
+
+    [Tooltip("Hard limit: if the enemy is chasing/fighting and exceeds this distance from the team anchor, it will break off and return.")]
+    public float teamLeashHardLimit = 30f;
+
+    [Tooltip("How often we repath while returning to the team anchor (seconds).")]
+    public float teamLeashRepathInterval = 0.35f;
+
+    [Tooltip("If true, the enemy will break combat when it leaves teamLeashRadius (not just teamLeashHardLimit).")]
+    public bool breakCombatWhenOutsideSoftRadius = false;
     [Header("Refs")]
     public NavMeshAgent agent;
     public GameObject bullet;
@@ -134,6 +153,11 @@ public class Enemy2Controller : MonoBehaviour
     private float _combatLoseCounter;
     private readonly Collider[] _allyHits = new Collider[24];
 
+    // Team leash runtime
+    private EncounterTeamAnchor _teamAnchor;
+    private bool _returningToTeam;
+    private float _leashRepathTimer;
+
     private void Awake()
     {
         if (agent == null) agent = GetComponent<NavMeshAgent>();
@@ -146,6 +170,7 @@ public class Enemy2Controller : MonoBehaviour
         if (agent != null) agent.updateRotation = false;
 
         ResolvePlayerFallback();
+        ResolveTeamAnchor();
     }
 
     private void Start()
@@ -193,6 +218,14 @@ public class Enemy2Controller : MonoBehaviour
         // Otherwise, fall back to tag search.
         var p = GameObject.FindGameObjectWithTag("Player");
         if (p != null) _playerFallback = p.transform;
+    }
+
+    private void ResolveTeamAnchor()
+    {
+        // Prefer a centroid anchor on the team root (added by EncounterDirectorPOC when creating teams).
+        _teamAnchor = GetComponentInParent<EncounterTeamAnchor>();
+
+        // If you aren't using EncounterTeamAnchor, you can still keep enableTeamLeash off.
     }
 
     /// <summary>
@@ -249,6 +282,13 @@ public class Enemy2Controller : MonoBehaviour
         // Keep trying to resolve player if needed (scene load / respawn).
         if (_playerFallback == null)
             ResolvePlayerFallback();
+
+        // Team leash: keep members from wandering too far from their EnemyTeam anchor/centroid.
+        // If this returns true, we are currently returning to the team and should skip normal combat logic this frame.
+        if (UpdateTeamLeash())
+            return;
+
+        ResolveTeamAnchor();
 
         // Passive aggro: if we do NOT already have a combat target, look for nearby allies.
         // Right now this script only auto-acquires based on distance to the CURRENT target,
@@ -462,6 +502,90 @@ public class Enemy2Controller : MonoBehaviour
                 HandleShooting(target);
             }
         }
+    }
+
+
+    /// <summary>
+    /// Keeps this enemy within a radius of its team anchor (centroid) when part of an EnemyTeam_* root.
+    /// Returns true when we are currently overriding behavior to return to the team.
+    /// </summary>
+    private bool UpdateTeamLeash()
+    {
+        if (!enableTeamLeash) return false;
+
+        // Must have an anchor to leash to.
+        if (_teamAnchor == null)
+        {
+            // In case parent roots were created after Awake (rare), try to resolve again.
+            ResolveTeamAnchor();
+            if (_teamAnchor == null) return false;
+        }
+
+        Vector3 anchor = _teamAnchor.AnchorWorldPosition;
+        anchor.y = transform.position.y;
+
+        float distToAnchor = Vector3.Distance(transform.position, anchor);
+
+        // If we're in combat/chasing and we break the hard limit, drop combat and return.
+        bool hasCombat = (_combatTarget != null);
+
+        float soft = Mathf.Max(0.1f, teamLeashRadius);
+        float stop = Mathf.Clamp(teamLeashReturnRadius, 0.05f, soft);
+        float hard = Mathf.Max(soft, teamLeashHardLimit);
+
+        if (hasCombat)
+        {
+            if (distToAnchor > hard || (breakCombatWhenOutsideSoftRadius && distToAnchor > soft))
+            {
+                _combatTarget = null;
+                chasing = false;
+                _returningToTeam = true;
+                _leashRepathTimer = 0f;
+
+                // Stop any current path so the return path wins.
+                StopAgent();
+            }
+        }
+
+        // If we are not in combat but wandered outside the soft radius, start returning.
+        if (!hasCombat && distToAnchor > soft)
+        {
+            _returningToTeam = true;
+        }
+
+        if (_returningToTeam)
+        {
+            // When close enough, stop returning and resume normal behavior.
+            if (distToAnchor <= stop)
+            {
+                _returningToTeam = false;
+                StopAgent();
+                SetMovingAnim(false);
+                return false;
+            }
+
+            _leashRepathTimer -= Time.deltaTime;
+            if (_leashRepathTimer <= 0f)
+            {
+                // Move toward the anchor point.
+                SetDestinationSafe(anchor, 1.5f);
+                _leashRepathTimer = Mathf.Max(0.05f, teamLeashRepathInterval);
+            }
+
+            // Face the anchor while returning (helps animation/aiming look less weird).
+            Vector3 dir = anchor - transform.position;
+            dir.y = 0f;
+            if (dir.sqrMagnitude > 0.0001f)
+            {
+                Quaternion look = Quaternion.LookRotation(dir.normalized, Vector3.up);
+                transform.rotation = Quaternion.Slerp(transform.rotation, look, Time.deltaTime * faceTargetTurnSpeed);
+            }
+
+            SetMovingAnim(true);
+            return true;
+        }
+
+        return false;
     }
 
     private Transform FindNearestAggroAlly()

@@ -71,6 +71,13 @@ public class CommandOverlayUI : MonoBehaviour
     public float iconWorldHeight = 2f;
     public bool enemyIconsClickable = true;
 
+
+    [Header("Enemy Team (UI click rules)")]
+    [Tooltip("If true, enemies that are parented under an object named with this prefix (ex: EnemyTeam_1) cannot be clicked/selected. Use the Enemy Team icon instead.")]
+    public bool makeEnemyTeamMembersUnclickable = true;
+
+    [Tooltip("Parent name prefix that identifies enemies as belonging to an Enemy Team (ex: EnemyTeam_1, EnemyTeam_2...).")]
+    public string enemyTeamMemberParentPrefix = "EnemyTeam_";
     [Header("Selected Ring")]
     public string selectedRingChildName = "SelectedRing";
     [Tooltip("Optional second ring for team selection. Add a child under the ally icon named this (ex: TeamSelectedRing).")]
@@ -127,6 +134,9 @@ public class CommandOverlayUI : MonoBehaviour
 
     private readonly Dictionary<Transform, RectTransform> allyIconByUnit = new();
     private readonly Dictionary<Transform, RectTransform> enemyIconByUnit = new();
+
+    // Scene-spawned enemy team icons (UI) that should stay above unit icons.
+    private readonly List<RectTransform> enemyTeamIcons = new List<RectTransform>();
     private readonly Dictionary<int, RectTransform> teamStarByTeamId = new();
     private readonly HashSet<Transform> teamedUnits = new();
 
@@ -454,6 +464,22 @@ public class CommandOverlayUI : MonoBehaviour
         return null;
     }
 
+
+    private static bool IsUnderParentNamePrefix(Transform t, string prefix)
+    {
+        if (t == null || string.IsNullOrEmpty(prefix)) return false;
+
+        Transform p = t.parent;
+        while (p != null)
+        {
+            if (!string.IsNullOrEmpty(p.name) && p.name.StartsWith(prefix, StringComparison.Ordinal))
+                return true;
+            p = p.parent;
+        }
+        return false;
+    }
+
+
     // -------------------- PLAYER FOLLOW TAG --------------------
 
     public bool IsPlayerFollower(Transform ally)
@@ -547,6 +573,9 @@ public class CommandOverlayUI : MonoBehaviour
             var go = enemies[i];
             if (go == null) continue;
 
+
+            bool isEnemyTeamMember = makeEnemyTeamMembersUnclickable && IsUnderParentNamePrefix(go.transform, enemyTeamMemberParentPrefix);
+
             var icon = Instantiate(enemyIconPrefab, canvasRoot);
             icon.gameObject.SetActive(true);
 
@@ -557,7 +586,8 @@ public class CommandOverlayUI : MonoBehaviour
             AttackTargetIndicatorSystem.Instance?.RegisterEnemyIcon(go.transform, icon);
 
             // When MoveTargeting, swap hover marker sprite to attack while hovering an enemy icon.
-            HookEnemyHoverEvents(icon, go.transform);
+            if (!isEnemyTeamMember)
+                HookEnemyHoverEvents(icon, go.transform);
 
             // Flank bonus hint: bind this enemy transform to the hover-hint component (if present on the prefab).
             icon.GetComponent<EnemyFlankBonusHoverHint>()?.Bind(go.transform);
@@ -573,7 +603,7 @@ public class CommandOverlayUI : MonoBehaviour
                 // Invisible raycast catcher; visuals live on children under IconVisual.
                 rootImg.color = new Color(1f, 1f, 1f, 0f);
             }
-            rootImg.raycastTarget = true;
+            rootImg.raycastTarget = !isEnemyTeamMember;
             // Make sure the Button has a target graphic (required by some Unity versions).
             btn.targetGraphic = rootImg;
 
@@ -594,14 +624,25 @@ public class CommandOverlayUI : MonoBehaviour
                         return;
                     }
 
+                    // If this enemy belongs to an Enemy Team, don't allow selecting individuals.
+                    if (isEnemyTeamMember)
+                        return;
+
                     // Otherwise, only allow normal click behavior if enabled.
                     if (enemyIconsClickable)
                         OnUnitClicked(captured);
                 });
 
-                // Keep the button enabled so MoveTargeting clicks always work.
-                btn.interactable = true;
+                // Keep the component enabled, but optionally block raycasts/interaction for team members.
+                btn.interactable = !isEnemyTeamMember;
                 btn.enabled = true;
+
+                if (isEnemyTeamMember)
+                {
+                    var cgBlock = icon.GetComponent<CanvasGroup>();
+                    if (cgBlock == null) cgBlock = icon.gameObject.AddComponent<CanvasGroup>();
+                    cgBlock.blocksRaycasts = false;
+                }
 
             }
         }
@@ -611,11 +652,147 @@ public class CommandOverlayUI : MonoBehaviour
         if (PlayerSquadFollowSystem.Instance != null)
             PlayerSquadFollowSystem.Instance.RefreshFollowerTagsUI();
 
+        // If enemy team icons already exist in the scene, ensure they render on top after rebuilding icons.
+        BringExistingEnemyTeamIconsToTop();
+
     }
 
     // -------------------- ENEMY HOVER (attack icon preview) --------------------
 
-    private void HookEnemyHoverEvents(RectTransform enemyIcon, Transform enemyTarget)
+    // -------------------- ENEMY TEAM ICON (scene-spawned) --------------------
+
+    /// <summary>
+    /// Registers a scene-spawned enemy team icon so it can show preview + committed "attack" badges,
+    /// just like a single enemy icon. The teamTarget should be a persistent EnemyTeamAnchor/root Transform.
+    /// </summary>
+    public void RegisterEnemyTeamIcon(Transform teamTarget, RectTransform teamIcon, string hoverHintMessage = "Enemy Team")
+    {
+        if (teamTarget == null || teamIcon == null) return;
+
+        teamIcon.gameObject.SetActive(true);
+
+        // Ensure the team icon lives under the same parent as unit icons so sibling order actually matters.
+        if (canvasRoot != null && teamIcon.transform.parent != canvasRoot)
+            teamIcon.SetParent(canvasRoot, false);
+
+        if (!enemyTeamIcons.Contains(teamIcon))
+            enemyTeamIcons.Add(teamIcon);
+
+        // Hover hint (optional).
+        EnsureHoverHint(teamIcon, hoverHintMessage);
+
+        // Badge system uses a Transform key; teamTarget works the same as a single enemy Transform.
+        AttackTargetIndicatorSystem.Instance?.RegisterEnemyIcon(teamTarget, teamIcon);
+
+        // Hover preview (cursor swap + preview badge).
+        HookEnemyHoverEvents(teamIcon, teamTarget);
+
+        // Click-to-commit while in MoveTargeting (does nothing in other states).
+        HookAttackCommitClick(teamIcon, teamTarget);
+
+        // Make sure this icon renders on top (but below the hover cursor).
+        BringOverlayElementToTopBelowCursor(teamIcon);
+    }
+
+    private void HookAttackCommitClick(RectTransform icon, Transform target)
+    {
+        if (icon == null || target == null) return;
+
+        // Ensure the icon can receive pointer events.
+        var img = icon.GetComponent<Image>();
+        if (img == null)
+        {
+            img = icon.gameObject.AddComponent<Image>();
+            // Invisible raycast catcher; visuals can live on children.
+            img.color = new Color(1f, 1f, 1f, 0f);
+        }
+        img.raycastTarget = true;
+
+        var cg = icon.GetComponent<CanvasGroup>();
+        if (cg == null) cg = icon.gameObject.AddComponent<CanvasGroup>();
+        cg.blocksRaycasts = true;
+
+        var trigger = icon.GetComponent<EventTrigger>();
+        if (trigger == null) trigger = icon.gameObject.AddComponent<EventTrigger>();
+
+        if (trigger.triggers == null)
+            trigger.triggers = new List<EventTrigger.Entry>();
+
+        // Prevent duplicates if we register more than once.
+        RemoveEventTrigger(trigger, EventTriggerType.PointerClick);
+
+        var click = new EventTrigger.Entry { eventID = EventTriggerType.PointerClick };
+        click.callback.AddListener(_ =>
+        {
+            if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
+
+            if (sm != null && sm.CurrentState == CommandStateMachine.State.MoveTargeting)
+            {
+                AttackTargetIndicatorSystem.Instance?.RegisterCommittedAttack(sm.CurrentSelection, target);
+                var resolvedTargetGO = ResolveAttackTargetGameObject(target);
+                if (resolvedTargetGO != null)
+                    sm.SubmitFollowTarget(resolvedTargetGO);
+                else
+                    sm.SubmitFollowTarget(target.gameObject);
+            }
+        });
+        trigger.triggers.Add(click);
+    }
+
+
+
+    /// <summary>
+    /// When clicking an Enemy Team icon, the 'target' Transform is the team root (EnemyTeam_X),
+    /// which usually stays at its original spawn position. To issue correct attack orders, we
+    /// resolve a live member GameObject from that team and submit that instead.
+    /// </summary>
+    private GameObject ResolveAttackTargetGameObject(Transform target)
+    {
+        if (target == null) return null;
+
+        // Enemy team roots are named like EnemyTeam_1, EnemyTeam_2...
+        if (!string.IsNullOrEmpty(enemyTeamMemberParentPrefix) && target.name.StartsWith(enemyTeamMemberParentPrefix))
+        {
+            var member = FindBestEnemyTeamMember(target);
+            if (member != null) return member.gameObject;
+        }
+
+        return target.gameObject;
+    }
+
+    private Transform FindBestEnemyTeamMember(Transform teamRoot)
+    {
+        if (teamRoot == null) return null;
+
+        Transform firstChild = null;
+
+        // Prefer a direct child that looks like an enemy root (NavMeshAgent/Collider).
+        for (int i = 0; i < teamRoot.childCount; i++)
+        {
+            var child = teamRoot.GetChild(i);
+            if (child == null) continue;
+
+            if (child.name == "Anchor") // ignore optional helper child
+                continue;
+
+            if (firstChild == null)
+                firstChild = child;
+
+            if (child.GetComponent<NavMeshAgent>() != null || child.GetComponent<Collider>() != null)
+                return child;
+        }
+
+        // Fallback: search descendants.
+        var agent = teamRoot.GetComponentInChildren<NavMeshAgent>(true);
+        if (agent != null && agent.transform != teamRoot) return agent.transform;
+
+        var col = teamRoot.GetComponentInChildren<Collider>(true);
+        if (col != null && col.transform != teamRoot) return col.transform;
+
+        return firstChild;
+    }
+
+    void HookEnemyHoverEvents(RectTransform enemyIcon, Transform enemyTarget)
     {
         if (enemyIcon == null) return;
 
@@ -772,6 +949,10 @@ public class CommandOverlayUI : MonoBehaviour
 
         // Optional command button panel anchoring
         UpdateCommandButtonPanel(uiCam);
+
+
+        // Keep enemy team icons rendered above unit icons (but below hover cursor)
+        EnsureEnemyTeamIconsOnTop();
     }
 
     private bool IsInCommandView()
@@ -880,6 +1061,80 @@ public class CommandOverlayUI : MonoBehaviour
         if (!show)
             hoverCursorIcon.SetOverEnemy(false);
     }
+
+    /// <summary>
+    /// Ensures a UI element renders above normal icons, but (if possible) stays below the hover cursor icon.
+    /// Useful for enemy team icons that should sit "on top" of other unit icons.
+    /// </summary>
+    public void BringOverlayElementToTopBelowCursor(RectTransform element)
+    {
+        if (element == null) return;
+
+        // If the hover cursor icon exists and shares the same parent, place this element just before it.
+        if (hoverCursorIcon != null && hoverCursorIcon.transform != null && hoverCursorIcon.transform.parent == element.parent)
+        {
+            int cursorIndex = hoverCursorIcon.transform.GetSiblingIndex();
+            element.SetSiblingIndex(Mathf.Clamp(cursorIndex, 0, element.parent.childCount - 1));
+            return;
+        }
+
+
+        // Otherwise just put it on top of its parent.
+        element.SetAsLastSibling();
+    }
+
+    private void BringExistingEnemyTeamIconsToTop()
+    {
+        // Enemy team icons are spawned by EncounterDirectorPOC and may exist outside this script's control.
+        // After BuildIcons, we want them to sit above normal unit icons (but still below the hover cursor).
+#if UNITY_2023_1_OR_NEWER
+        var bridges = UnityEngine.Object.FindObjectsByType<EnemyTeamIconTargetingBridge>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+#else
+        var bridges = UnityEngine.Object.FindObjectsOfType<EnemyTeamIconTargetingBridge>(true);
+#endif
+        if (bridges == null) return;
+
+        for (int i = 0; i < bridges.Length; i++)
+        {
+            var b = bridges[i];
+            if (b == null) continue;
+            var rt = b.GetComponent<RectTransform>();
+            if (rt != null)
+            {
+                if (canvasRoot != null && rt.transform.parent != canvasRoot)
+                    rt.SetParent(canvasRoot, false);
+
+                if (!enemyTeamIcons.Contains(rt))
+                    enemyTeamIcons.Add(rt);
+
+                BringOverlayElementToTopBelowCursor(rt);
+            }
+        }
+
+    }
+    private void EnsureEnemyTeamIconsOnTop()
+    {
+        if (enemyTeamIcons == null || enemyTeamIcons.Count == 0) return;
+
+        for (int i = enemyTeamIcons.Count - 1; i >= 0; i--)
+        {
+            var rt = enemyTeamIcons[i];
+            if (rt == null)
+            {
+                enemyTeamIcons.RemoveAt(i);
+                continue;
+            }
+
+            // If something re-parented it, pull it back under the overlay root.
+            if (canvasRoot != null && rt.transform.parent != canvasRoot)
+                rt.SetParent(canvasRoot, false);
+
+            BringOverlayElementToTopBelowCursor(rt);
+        }
+    }
+
+
+
     private void UpdateIcons(Dictionary<Transform, RectTransform> dict, float worldHeight, Camera uiCam, bool isEnemy)
     {
         if (dict == null) return;
