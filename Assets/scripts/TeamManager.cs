@@ -34,6 +34,16 @@ public class TeamManager : MonoBehaviour
     [Tooltip("If true, we immediately issue SetDestination() orders to spread members when teams form/update/merge.")]
     public bool applyFormationOnTeamChange = true;
 
+
+
+    [Header("Team Anchor (Leader)")]
+    [Tooltip("If true, teams will automatically switch their Anchor (star/leader) to another alive member when the current Anchor is dead/disabled.")]
+    public bool autoSwitchAnchorWhenDead = true;
+
+    [Tooltip("How often (seconds) we prune dead members + validate/switch the team Anchor.")]
+    public float anchorMaintenanceInterval = 0.25f;
+
+    private float _anchorMaintenanceTimer;
     private void Awake()
     {
         if (Instance != null && Instance != this)
@@ -41,7 +51,80 @@ public class TeamManager : MonoBehaviour
             enabled = false;
             return;
         }
+
         Instance = this;
+        _anchorMaintenanceTimer = Mathf.Max(0.05f, anchorMaintenanceInterval);
+    }
+
+    private void Update()
+    {
+        if (!autoSwitchAnchorWhenDead) return;
+
+        _anchorMaintenanceTimer -= Time.deltaTime;
+        if (_anchorMaintenanceTimer > 0f) return;
+
+        _anchorMaintenanceTimer = Mathf.Max(0.05f, anchorMaintenanceInterval);
+        MaintainTeams();
+    }
+
+    private void MaintainTeams()
+    {
+        for (int ti = teams.Count - 1; ti >= 0; ti--)
+        {
+            Team team = teams[ti];
+            if (team == null)
+            {
+                teams.RemoveAt(ti);
+                continue;
+            }
+
+            // Prune dead/disabled members.
+            if (team.Members != null)
+            {
+                for (int mi = team.Members.Count - 1; mi >= 0; mi--)
+                {
+                    Transform m = team.Members[mi];
+                    if (m == null || !m.gameObject.activeInHierarchy)
+                        team.Members.RemoveAt(mi);
+                }
+            }
+
+            // If the team has no living members left, remove it.
+            if (team.Members == null || team.Members.Count == 0)
+            {
+                ClearTeamPin(team);
+                teams.RemoveAt(ti);
+                continue;
+            }
+
+            // Ensure the Anchor is a living member.
+            bool anchorValid = team.Anchor != null
+                               && team.Anchor.gameObject.activeInHierarchy
+                               && team.Members.Contains(team.Anchor);
+
+            if (!anchorValid)
+            {
+                Transform newAnchor = FindFirstAliveMember(team);
+                if (newAnchor != null)
+                {
+                    team.Anchor = newAnchor;
+                    ApplyFormationIfEnabled(team);
+                }
+            }
+        }
+    }
+
+    private Transform FindFirstAliveMember(Team team)
+    {
+        if (team == null || team.Members == null) return null;
+
+        for (int i = 0; i < team.Members.Count; i++)
+        {
+            Transform m = team.Members[i];
+            if (m != null && m.gameObject.activeInHierarchy)
+                return m;
+        }
+        return null;
     }
 
     private void ShowTeamHint(Team team, string prefix)

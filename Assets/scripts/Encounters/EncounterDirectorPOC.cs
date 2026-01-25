@@ -70,6 +70,12 @@ public class EncounterDirectorPOC : MonoBehaviour
     // Track LIVE members per enemy team so icon follows their centroid
     private readonly Dictionary<string, List<Transform>> _enemyTeamMembers = new Dictionary<string, List<Transform>>();
 
+
+
+    // Spawned ALLY teams (POC): register groups with TeamManager so your existing ally-team star/icon logic works.
+    // Keyed by SpawnGroup.teamIndex.
+    private readonly Dictionary<int, Transform> _allyTeamLeaders = new Dictionary<int, Transform>();
+    private readonly Dictionary<int, Team> _allyTeams = new Dictionary<int, Team>();
     private Canvas _iconsCanvas;
 
 
@@ -116,6 +122,8 @@ public class EncounterDirectorPOC : MonoBehaviour
         // Clear cached members so repeat spawns don't accumulate old references (POC convenience)
         _enemyTeamMembers.Clear();
 
+        _allyTeamLeaders.Clear();
+        _allyTeams.Clear();
         SpawnGroups(enemyGroups, enemyTeamRootPrefix, Faction.Enemy);
         SpawnGroups(allyGroups, allyTeamRootPrefix, Faction.Ally);
     }
@@ -215,6 +223,12 @@ public class EncounterDirectorPOC : MonoBehaviour
                         RegisterEnemyTeamMember(teamRootName, go.transform);
                 }
 
+
+                // Register spawned ALLY groups into TeamManager so the ally team icon/star
+                // can follow a leader (first spawned) and keep working with your existing command UI.
+                if (faction == Faction.Ally && group.teamIndex > 0)
+                    RegisterSpawnedAllyTeamMember(group.teamIndex, go.transform);
+
                 ApplyFactionTag(go, group);
                 BroadcastBehavior(go, group);
             }
@@ -234,6 +248,39 @@ public class EncounterDirectorPOC : MonoBehaviour
         if (!list.Contains(member))
             list.Add(member);
     }
+
+    private void RegisterSpawnedAllyTeamMember(int teamIndex, Transform member)
+    {
+        if (teamIndex <= 0) return;
+        if (member == null) return;
+        if (TeamManager.Instance == null) return;
+
+        // First spawned member becomes the leader.
+        if (!_allyTeamLeaders.TryGetValue(teamIndex, out var leader) || leader == null)
+        {
+            _allyTeamLeaders[teamIndex] = member;
+            return;
+        }
+
+        // Create the Team the moment we have at least two members.
+        if (!_allyTeams.TryGetValue(teamIndex, out var team) || team == null)
+        {
+            team = TeamManager.Instance.CreateTeam(leader, member);
+            if (team != null)
+            {
+                // Spawned ally teams are LEADER-based (star sits on the leader).
+                team.Anchor = leader;
+                _allyTeams[teamIndex] = team;
+            }
+            return;
+        }
+
+        // Add additional members WITHOUT triggering TeamManager's auto-formation.
+        // This keeps spawned teams "stay put" at their spawn positions.
+        team.Add(member);
+        team.Anchor = leader;
+    }
+
 
     // ---------------- Spawn Separation ----------------
 
