@@ -40,6 +40,28 @@ public class AllyController : MonoBehaviour
     [Tooltip("Small buffer around desiredAttackRange to prevent jitter (hysteresis).")]
     public float attackRangeBuffer = 0.75f;
 
+    [Header("Dynamic Desired Range")]
+    [Tooltip("If true, the ally will fluctuate its desired attack range between Min and Max while in combat.")]
+    public bool fluctuateDesiredAttackRange = false;
+
+    [Tooltip("Minimum desired attack range when fluctuation is enabled.")]
+    public float desiredAttackRangeMin = 30f;
+
+    [Tooltip("Maximum desired attack range when fluctuation is enabled.")]
+    public float desiredAttackRangeMax = 50f;
+
+    [Tooltip("How often (seconds) we pick a new desired range target while in combat.")]
+    public float desiredAttackRangeRetargetInterval = 2.5f;
+
+    [Tooltip("How quickly the desired range blends toward the chosen target.")]
+    public float desiredAttackRangeLerpSpeed = 4f;
+
+    // Runtime state for fluctuating range
+    private float _desiredRangeCurrent = 0f;
+    private float _desiredRangeTarget = 0f;
+    private float _desiredRangeRetargetTimer = 0f;
+
+
     [Tooltip("NavMesh sample radius used when backing away from a target.")]
     public float backoffSampleRadius = 2.5f;
 
@@ -160,6 +182,8 @@ public class AllyController : MonoBehaviour
 
     // Track one enemy target so we don't fight every enemy in the scene at once
     private Transform currentEnemy;
+    private bool forcedCombatOrder = false; // true when combat target was set by an explicit player attack order
+
 
     /// <summary>The enemy this ally is currently chasing (null when idle).</summary>
     public Transform CurrentEnemy => currentEnemy;
@@ -278,6 +302,35 @@ public class AllyController : MonoBehaviour
 
     public bool HasManualHoldPoint => _hasManualHold;
     public Vector3 ManualHoldPoint => _manualHoldPoint;
+    // -------------------- COMBAT STATE (read-only) --------------------
+    // Exposed so CommandExecutor can avoid overriding movement while this unit is actively fighting,
+    // and to allow "attack" orders to force a specific combat target.
+    public Transform CurrentEnemyTarget => currentEnemy;
+
+    /// <summary>
+    /// Force this ally to engage a specific enemy target immediately (used by Attack/Follow orders).
+    /// Clears follow-slot targeting so combat movement (standoff/strafe) is fully controlled by this script.
+    /// </summary>
+    public void ForceCombatTarget(Transform enemy)
+    {
+        if (enemy == null) return;
+
+        // Mark this as an explicit player attack order so we ignore formation/slot tethering while fighting.
+        forcedCombatOrder = true;
+
+        // Best-effort: clear any formation slot / follow target, but follow systems may re-assign it.
+        target = null;
+        // Attack orders should not resume old destinations after combat.
+        resumeWasFollowing = false;
+        hasResumeDestination = false;
+
+        chasing = true;
+        currentEnemy = enemy;
+
+        // Reset combat pause cycle when we start/force a new engagement.
+        _combatPauseTimer = 0f;
+        _combatMoveBurstTimer = 0f;
+    }
 
     private void Update()
     {
@@ -538,6 +591,13 @@ public class AllyController : MonoBehaviour
     {
         chasing = false;
         currentEnemy = null;
+
+        forcedCombatOrder = false;
+
+        // Reset dynamic range for next engagement
+        _desiredRangeCurrent = 0f;
+        _desiredRangeTarget = 0f;
+        _desiredRangeRetargetTimer = 0f;
 
         // If we were following a dynamic target (e.g., joining a moving team),
         // don't restore a stale point destination; the follow logic below will resume naturally.
@@ -842,7 +902,42 @@ public class AllyController : MonoBehaviour
         clamped.y = desired.y;
         return clamped;
     }
-    private void ChaseAndShoot(Transform enemy)
+    private float GetDesiredAttackRangeNow()
+    {
+        // Default behavior (no fluctuation)
+        float baseRange = Mathf.Max(0.5f, desiredAttackRange);
+
+        if (!fluctuateDesiredAttackRange)
+            return baseRange;
+
+        // Clamp authoring values
+        float minR = Mathf.Max(0.5f, desiredAttackRangeMin);
+        float maxR = Mathf.Max(minR, desiredAttackRangeMax);
+
+        // Lazy init on first combat tick
+        if (_desiredRangeCurrent <= 0f)
+        {
+            _desiredRangeCurrent = Mathf.Clamp(baseRange, minR, maxR);
+            _desiredRangeTarget = _desiredRangeCurrent;
+            _desiredRangeRetargetTimer = Random.Range(0.15f, Mathf.Max(0.25f, desiredAttackRangeRetargetInterval));
+        }
+
+        // Retarget periodically
+        _desiredRangeRetargetTimer -= Time.deltaTime;
+        if (_desiredRangeRetargetTimer <= 0f)
+        {
+            _desiredRangeTarget = Random.Range(minR, maxR);
+            // Add some jitter so a whole squad doesn't retarget on the exact same frame
+            float jitter = Mathf.Clamp(desiredAttackRangeRetargetInterval * 0.35f, 0f, 1.25f);
+            _desiredRangeRetargetTimer = Mathf.Max(0.25f, desiredAttackRangeRetargetInterval + Random.Range(-jitter, jitter));
+        }
+
+        float lerpSpeed = Mathf.Max(0.1f, desiredAttackRangeLerpSpeed);
+        _desiredRangeCurrent = Mathf.Lerp(_desiredRangeCurrent, _desiredRangeTarget, Time.deltaTime * lerpSpeed);
+        return Mathf.Clamp(_desiredRangeCurrent, minR, maxR);
+    }
+
+    void ChaseAndShoot(Transform enemy)
     {
         if (enemy == null) return;
 
@@ -850,7 +945,7 @@ public class AllyController : MonoBehaviour
 
         // If we're following a formation slot (PlayerSquadFollowSystem sets AllyController.target to a slot transform),
         // keep combat movement tethered to that slot so we don't break formation.
-        Transform formationSlot = (target != null) ? target : null;
+        Transform formationSlot = (!forcedCombatOrder && target != null) ? target : null;
 
         // Maintain a stable standoff distance instead of running into the target's center.
         // NOTE: We manage standoff in code; do NOT set agent.stoppingDistance = desiredAttackRange.
@@ -858,8 +953,7 @@ public class AllyController : MonoBehaviour
         // and it won't move (and your run animation never triggers). Keep stoppingDistance small.
         if (agent != null)
         {
-            float range = Mathf.Max(0.5f, desiredAttackRange);
-
+            float range = GetDesiredAttackRangeNow();
             // Let the agent actually travel to strafe points.
             // We still maintain standoff ourselves via range/buffer logic.
             float combatStop = Mathf.Max(0.1f, range * 0.25f);
@@ -890,6 +984,14 @@ public class AllyController : MonoBehaviour
                 if (toward.sqrMagnitude < 0.001f) toward = transform.forward;
 
                 Vector3 ringPoint = targetPoint - toward.normalized * range;
+
+
+                // Spread approach points a bit per-ally so teams don't all stack on the same ring point.
+                Vector3 right = Vector3.Cross(Vector3.up, toward.normalized);
+                float spread = Mathf.Clamp(range * 0.15f, 1f, 6f);
+                float seed = (GetInstanceID() * 0.1234f);
+                float side = Mathf.Sin(seed) * spread;
+                ringPoint += right * side;
                 ringPoint = ClampCombatMoveToFormation(ringPoint, formationSlot);
                 agent.SetDestination(ringPoint);
             }

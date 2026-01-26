@@ -84,6 +84,18 @@ public class Enemy2Controller : MonoBehaviour
     public float combatRepathInterval = 0.2f;
 
 
+    [Header("Aim / Fire Gate")]
+    [Tooltip("If true, we only fire when our aim is within fireConeDegrees of the target (prevents shooting backwards).")]
+    public bool useFireConeGate = true;
+
+    [Tooltip("Cone half-angle in degrees for allowed firing. 30 is very strict; 60-90 feels better for moving gunfights.")]
+    [Range(5f, 180f)]
+    public float fireConeDegrees = 75f;
+
+    [Tooltip("If true, the firing cone uses firePoint.forward (aim) instead of transform.forward (body).")]
+    public bool useFirePointForAimGate = true;
+
+
     [Header("Combat Dodge / Strafing")]
     [Tooltip("If true, the enemy will strafe/circle while shooting instead of standing still.")]
     public bool enableCombatStrafe = true;
@@ -668,11 +680,22 @@ public class Enemy2Controller : MonoBehaviour
         Vector3 aimPos = target.position + new Vector3(0f, 0.5f, 0f);
         firePoint.LookAt(aimPos);
 
-        // Angle gate (keeps it from shooting backwards)
-        Vector3 targetDir = target.position - transform.position;
-        float angle = Vector3.SignedAngle(targetDir, transform.forward, Vector3.up);
+        // Aim gate: allow firing when our aim is reasonably aligned with the target.
+        // Using firePoint.forward makes ranged combat feel better while strafing.
+        Vector3 aimFrom = firePoint.position;
+        Vector3 aimFwd = (useFirePointForAimGate ? firePoint.forward : transform.forward);
+        Vector3 toAim = aimPos - aimFrom;
 
-        if (Mathf.Abs(angle) < 30f)
+        // Ignore vertical angle for gating (helps on slopes / uneven ground)
+        toAim.y = 0f;
+
+        float aimAngle = 0f;
+        if (toAim.sqrMagnitude > 0.0001f)
+            aimAngle = Vector3.Angle(aimFwd, toAim.normalized);
+
+        bool canFire = !useFireConeGate || aimAngle <= Mathf.Clamp(fireConeDegrees, 1f, 179f);
+
+        if (canFire)
         {
             Instantiate(bullet, firePoint.position, firePoint.rotation);
             if (anim != null) anim.SetTrigger("fireShot");
@@ -709,7 +732,7 @@ public class Enemy2Controller : MonoBehaviour
 
         // Ensure stopping distance is not zero.
         // NOTE: we still manage standoff ourselves; this is just for nicer braking.
-        agent.stoppingDistance = Mathf.Max(0.1f, range * 0.25f);
+        agent.stoppingDistance = Mathf.Clamp(range * 0.05f, 0.1f, 1.5f);
 
         agent.SetDestination(pos);
     }

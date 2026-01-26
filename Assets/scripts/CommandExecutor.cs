@@ -252,13 +252,25 @@ public class CommandExecutor : MonoBehaviour
         spacing = Mathf.Max(0.1f, spacing);
 
         ApplyFormationToAgents(
-            agents,
-            destination,
-            spacing,
-            cols,
-            sampleRadius: 2.5f,
-            forceUnstop: true
-        );
+    agents,
+    destination,
+    spacing,
+    cols,
+    sampleRadius: 2.5f,
+    forceUnstop: true
+);
+
+        // ✅ Manual hold: even when using formation, remember each unit's *actual* assigned slot
+        // so they defend that spot (and return to it) after chasing an enemy.
+        for (int i = 0; i < agents.Count; i++)
+        {
+            var a = agents[i];
+            if (a == null) continue;
+
+            var ally = a.GetComponent<AllyController>();
+            if (ally != null)
+                ally.SetManualHoldPoint(a.destination);
+        }
 
         StartPinClearRoutine(expanded, agents);
     }
@@ -283,6 +295,8 @@ public class CommandExecutor : MonoBehaviour
 
         // Any new command breaks TEAM hold-ground.
         Transform targetT = targetUnit != null ? targetUnit.transform : null;
+
+        bool isCombatTarget = targetUnit != null && (targetUnit.CompareTag("Enemy") || targetUnit.CompareTag("Boss"));
         if (targetT == null) return;
 
 
@@ -315,6 +329,40 @@ public class CommandExecutor : MonoBehaviour
             StopCoroutine(joinMoveRoutine);
             joinMoveRoutine = null;
             ClearJoinRouteState();
+        }
+
+        // -------------------- COMBAT FOLLOW / ATTACK --------------------
+        // If the follow target is an enemy/boss, we want AllyController to run its own standoff + strafe combat.
+        // Team formation-follow tends to override combat movement (it keeps setting destinations), so we bypass it here.
+        if (isCombatTarget)
+        {
+            // Stop any previous formation-follow coroutine so it doesn't fight our combat movement.
+            StopFollowFormationRoutine();
+
+            // Force selected allies to engage this target directly.
+            for (int i = 0; i < expanded.Count; i++)
+            {
+                var go = expanded[i];
+                if (go == null) continue;
+                if (!go.CompareTag("Ally")) continue;
+
+                var ally = go.GetComponent<AllyController>();
+                if (ally != null)
+                {
+                    ally.ClearManualHoldPoint();
+                    ally.target = null;
+                    ally.ForceCombatTarget(targetT);
+                }
+            }
+
+            // Clear the destination pin when the target is destroyed, so attack/follow pins don't linger.
+            if (TeamManager.Instance != null && TryGetSingleTeamForSelection(expanded, out Team atkTeam) && atkTeam != null)
+                StartFollowPinClearRoutine_Team(atkTeam, targetT);
+
+            if (showMoveHints)
+                HintSystem.Show("Attacking target.", moveHintDuration);
+
+            return;
         }
 
         // ✅ Team formation-follow: keep members in formation while chasing to prevent piling onto one center point.
