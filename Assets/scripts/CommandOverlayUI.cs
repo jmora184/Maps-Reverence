@@ -764,9 +764,12 @@ public class CommandOverlayUI : MonoBehaviour
     {
         if (teamRoot == null) return null;
 
-        Transform firstChild = null;
+        // Prefer an actual enemy root (tagged Enemy/Boss) so downstream systems recognize it as a combat target.
+        // (If we return a child collider/agent object without the Enemy tag, Attack orders can fall back to
+        //  passive auto-aggro, which only triggers when units are already nearby.)
+        Transform firstNonAnchor = null;
 
-        // Prefer a direct child that looks like an enemy root (NavMeshAgent/Collider).
+        // 1) Direct children: prefer tagged Enemy/Boss.
         for (int i = 0; i < teamRoot.childCount; i++)
         {
             var child = teamRoot.GetChild(i);
@@ -775,22 +778,35 @@ public class CommandOverlayUI : MonoBehaviour
             if (child.name == "Anchor") // ignore optional helper child
                 continue;
 
-            if (firstChild == null)
-                firstChild = child;
+            if (firstNonAnchor == null)
+                firstNonAnchor = child;
 
-            if (child.GetComponent<NavMeshAgent>() != null || child.GetComponent<Collider>() != null)
+            if (child.CompareTag("Enemy") || child.CompareTag("Boss"))
                 return child;
         }
 
-        // Fallback: search descendants.
+        // 2) Descendants: look for any tagged Enemy/Boss.
+        var all = teamRoot.GetComponentsInChildren<Transform>(true);
+        for (int i = 0; i < all.Length; i++)
+        {
+            var t = all[i];
+            if (t == null || t == teamRoot) continue;
+            if (t.name == "Anchor") continue;
+
+            if (t.CompareTag("Enemy") || t.CompareTag("Boss"))
+                return t;
+        }
+
+        // 3) Fallbacks (legacy behavior): pick something "physical" so at least we target a live member.
         var agent = teamRoot.GetComponentInChildren<NavMeshAgent>(true);
         if (agent != null && agent.transform != teamRoot) return agent.transform;
 
         var col = teamRoot.GetComponentInChildren<Collider>(true);
         if (col != null && col.transform != teamRoot) return col.transform;
 
-        return firstChild;
+        return firstNonAnchor;
     }
+
 
     void HookEnemyHoverEvents(RectTransform enemyIcon, Transform enemyTarget)
     {

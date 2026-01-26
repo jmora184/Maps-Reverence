@@ -252,25 +252,13 @@ public class CommandExecutor : MonoBehaviour
         spacing = Mathf.Max(0.1f, spacing);
 
         ApplyFormationToAgents(
-    agents,
-    destination,
-    spacing,
-    cols,
-    sampleRadius: 2.5f,
-    forceUnstop: true
-);
-
-        // ✅ Manual hold: even when using formation, remember each unit's *actual* assigned slot
-        // so they defend that spot (and return to it) after chasing an enemy.
-        for (int i = 0; i < agents.Count; i++)
-        {
-            var a = agents[i];
-            if (a == null) continue;
-
-            var ally = a.GetComponent<AllyController>();
-            if (ally != null)
-                ally.SetManualHoldPoint(a.destination);
-        }
+            agents,
+            destination,
+            spacing,
+            cols,
+            sampleRadius: 2.5f,
+            forceUnstop: true
+        );
 
         StartPinClearRoutine(expanded, agents);
     }
@@ -349,7 +337,6 @@ public class CommandExecutor : MonoBehaviour
                 var ally = go.GetComponent<AllyController>();
                 if (ally != null)
                 {
-                    ally.ClearManualHoldPoint();
                     ally.target = null;
                     ally.ForceCombatTarget(targetT);
                 }
@@ -381,7 +368,6 @@ public class CommandExecutor : MonoBehaviour
                 var ally = go.GetComponent<AllyController>();
                 if (ally != null)
                 {
-                    ally.ClearManualHoldPoint();
                     ally.target = null;
                 }
             }
