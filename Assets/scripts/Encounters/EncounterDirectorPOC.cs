@@ -61,6 +61,29 @@ public class EncounterDirectorPOC : MonoBehaviour
     public Vector3 iconWorldOffset = new Vector3(0f, 2f, 0f);
     public Vector2 iconScreenOffsetPixels = Vector2.zero;
 
+    [Header("Enemy Team Icon Scaling (by team size)")]
+    [Tooltip("If enabled, enemy team icons scale up as the team size grows.")]
+    public bool scaleEnemyTeamIconsBySize = true;
+
+    [Tooltip("Scale when team size == 1.")]
+    public float enemyIconBaseScale = 1f;
+
+    [Tooltip("Growth factor. Start with 0.20 to confirm it works, then tune down (0.04-0.08).")]
+    public float enemyIconGrowth = 0.20f;
+
+    [Tooltip("Minimum clamp for the icon scale.")]
+    public float enemyIconMinScale = 0.90f;
+
+    [Tooltip("Maximum clamp for the icon scale.")]
+    public float enemyIconMaxScale = 2.00f;
+
+    [Tooltip("If true, uses sqrt growth (nice for larger teams). If false, linear growth.")]
+    public bool enemyIconUseSqrt = true;
+
+    [Header("Enemy Team Icon Debug")]
+    public bool debugLogEnemyIconScale = false;
+    public float debugEnemyIconScaleInterval = 1.0f;
+
     // runtime caches
     private readonly Dictionary<string, Transform> _teamRoots = new Dictionary<string, Transform>();
 
@@ -69,6 +92,8 @@ public class EncounterDirectorPOC : MonoBehaviour
 
     // Track LIVE members per enemy team so icon follows their centroid
     private readonly Dictionary<string, List<Transform>> _enemyTeamMembers = new Dictionary<string, List<Transform>>();
+
+    private readonly Dictionary<string, float> _nextEnemyIconScaleLogTime = new Dictionary<string, float>();
 
 
 
@@ -541,6 +566,16 @@ public class EncounterDirectorPOC : MonoBehaviour
                 local += iconScreenOffsetPixels;
                 data.iconRect.anchoredPosition = local;
             }
+            // Scale by live team size (applied here, once per frame).
+            if (scaleEnemyTeamIconsBySize)
+            {
+                int liveCount = GetEnemyTeamLiveMemberCount(data.teamRootName);
+                float s = ComputeEnemyTeamIconScale(liveCount);
+                data.iconRect.localScale = new Vector3(s, s, 1f);
+                MaybeLogEnemyIconScale(data.teamRootName, liveCount, s, data.iconRect);
+            }
+
+
 
             // Keep above other UI elements that may be rebuilt/reordered.
             data.iconRect.SetAsLastSibling();
@@ -639,6 +674,65 @@ public class EncounterDirectorPOC : MonoBehaviour
         Enemy,
         Ally
     }
+
+    // ---------------- Enemy Team Icon Scaling Helpers ----------------
+
+    private float ComputeEnemyTeamIconScale(int teamSize)
+    {
+        int c = Mathf.Max(1, teamSize);
+
+        float s;
+        if (enemyIconUseSqrt)
+            s = enemyIconBaseScale + enemyIconGrowth * (Mathf.Sqrt(c) - 1f);
+        else
+            s = enemyIconBaseScale + enemyIconGrowth * (c - 1f);
+
+        return Mathf.Clamp(s, enemyIconMinScale, enemyIconMaxScale);
+    }
+
+    /// <summary>
+    /// Returns the live (non-null) member count for a team and cleans null references.
+    /// </summary>
+    private int GetEnemyTeamLiveMemberCount(string teamRootName)
+    {
+        if (string.IsNullOrEmpty(teamRootName)) return 0;
+
+        if (_enemyTeamMembers.TryGetValue(teamRootName, out var list) && list != null)
+        {
+            int alive = 0;
+
+            for (int i = list.Count - 1; i >= 0; i--)
+            {
+                var t = list[i];
+                if (t == null)
+                {
+                    list.RemoveAt(i);
+                    continue;
+                }
+
+                alive++;
+            }
+
+            return alive;
+        }
+
+        return 0;
+    }
+
+    private void MaybeLogEnemyIconScale(string teamRootName, int count, float scale, RectTransform iconRect)
+    {
+        if (!debugLogEnemyIconScale) return;
+        float interval = Mathf.Max(0.05f, debugEnemyIconScaleInterval);
+
+        float now = Time.unscaledTime;
+        if (_nextEnemyIconScaleLogTime.TryGetValue(teamRootName, out float next) && now < next)
+            return;
+
+        _nextEnemyIconScaleLogTime[teamRootName] = now + interval;
+
+        Debug.Log($"[EncounterDirectorPOC] Enemy icon '{teamRootName}' count={count} scale={scale:0.00} rectScale={iconRect.localScale}", this);
+    }
+
 }
 
 public enum EncounterBehavior
