@@ -27,6 +27,19 @@ public class AllyController : MonoBehaviour
     public float distanceToChase = 10f, distanceToLose = 15f, distanceToStop = 2f;
     public NavMeshAgent agent;
 
+
+    [Header("Water Slow")]
+    [Tooltip("If true, this unit's NavMeshAgent speed is multiplied while inside a WaterSlowZone trigger.")]
+    public bool enableWaterSlow = true;
+    [Range(0.05f, 1f)]
+    public float defaultWaterSpeedMultiplier = 0.65f;
+
+    // Runtime multiplier set by WaterSlowZone (1 = normal).
+    private float _waterSpeedMultiplier = 1f;
+
+    // Fallback baseline when no AllyCombatStats is present.
+    private float _baseAgentSpeedFallback = 0f;
+
     [Header("Combat")]
     public GameObject bullet;
     public Transform firePoint;
@@ -268,6 +281,25 @@ public class AllyController : MonoBehaviour
         }
     }
 
+    /// <summary>
+    /// Called by WaterSlowZone triggers. Multiplier is clamped and applied on top of team-size speed scaling.
+    /// </summary>
+    public void SetWaterSlow(bool inWater, float speedMultiplier)
+    {
+        if (!enableWaterSlow) return;
+
+        if (inWater)
+            _waterSpeedMultiplier = Mathf.Clamp(speedMultiplier > 0f ? speedMultiplier : defaultWaterSpeedMultiplier, 0.05f, 1f);
+        else
+            _waterSpeedMultiplier = 1f;
+    }
+
+    private float GetWaterMult()
+    {
+        return enableWaterSlow ? _waterSpeedMultiplier : 1f;
+    }
+
+
     // -------------------- MANUAL HOLD API --------------------
     public void SetManualHoldPoint(Vector3 point)
     {
@@ -339,7 +371,15 @@ public class AllyController : MonoBehaviour
         // (Prevents unexpected slowdowns if you tune speed in the Inspector.)
         if (agent != null && combatStats != null)
         {
-            float desired = combatStats.GetMoveSpeed();
+            float desired = combatStats.GetMoveSpeed() * GetWaterMult();
+            if (!Mathf.Approximately(agent.speed, desired))
+                agent.speed = desired;
+        }
+        else if (agent != null && combatStats == null && enableWaterSlow)
+        {
+            // If no combat stats system is present, at least apply water slow using the agent's baseline speed.
+            if (_baseAgentSpeedFallback <= 0f) _baseAgentSpeedFallback = agent.speed;
+            float desired = _baseAgentSpeedFallback * GetWaterMult();
             if (!Mathf.Approximately(agent.speed, desired))
                 agent.speed = desired;
         }

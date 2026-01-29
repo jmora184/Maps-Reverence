@@ -11,6 +11,16 @@ public class Player2Controller : MonoBehaviour
     public Transform camTrans;
     private Vector3 moveInput;
 
+
+    [Header("Water Slow")]
+    [Tooltip("If true, movement speed is multiplied while the player is inside a WaterSlowZone trigger.")]
+    public bool enableWaterSlow = true;
+    [Range(0.05f, 1f)]
+    public float defaultWaterSpeedMultiplier = 0.6f;
+
+    // Runtime multiplier set by WaterSlowZone (1 = normal).
+    private float _waterSpeedMultiplier = 1f;
+
     [Header("Look")]
     public float mouseSensitivity;
     public bool invertX;
@@ -95,6 +105,20 @@ public class Player2Controller : MonoBehaviour
         instance = this;
     }
 
+
+
+    /// <summary>
+    /// Called by WaterSlowZone triggers. Multiplier is clamped and applied to both walk and run speed.
+    /// </summary>
+    public void SetWaterSlow(bool inWater, float speedMultiplier)
+    {
+        if (!enableWaterSlow) return;
+
+        if (inWater)
+            _waterSpeedMultiplier = Mathf.Clamp(speedMultiplier > 0f ? speedMultiplier : defaultWaterSpeedMultiplier, 0.05f, 1f);
+        else
+            _waterSpeedMultiplier = 1f;
+    }
     void Start()
     {
         if (gunHolder != null)
@@ -133,10 +157,12 @@ public class Player2Controller : MonoBehaviour
             moveInput = horiMove + vertMove;
             moveInput.Normalize();
 
+            float waterMult = (enableWaterSlow ? _waterSpeedMultiplier : 1f);
+
             if (Input.GetKey(KeyCode.LeftShift))
-                moveInput *= runSpeed;
+                moveInput *= (runSpeed * waterMult);
             else
-                moveInput *= moveSpeed;
+                moveInput *= (moveSpeed * waterMult);
 
             moveInput.y = yStore;
             moveInput.y += Physics.gravity.y * gravityModifier * Time.deltaTime;

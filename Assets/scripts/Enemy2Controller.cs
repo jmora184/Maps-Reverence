@@ -132,6 +132,18 @@ public class Enemy2Controller : MonoBehaviour
     public bool breakCombatWhenOutsideSoftRadius = false;
     [Header("Refs")]
     public NavMeshAgent agent;
+
+
+    [Header("Water Slow")]
+    [Tooltip("If true, this enemy's NavMeshAgent speed is multiplied while inside a WaterSlowZone trigger.")]
+    public bool enableWaterSlow = true;
+    [Range(0.05f, 1f)]
+    public float defaultWaterSpeedMultiplier = 0.65f;
+
+    // Runtime multiplier set by WaterSlowZone (1 = normal).
+    private float _waterSpeedMultiplier = 1f;
+
+    private float _baseAgentSpeed = 0f;
     public GameObject bullet;
     public Transform firePoint;
     public Animator anim;
@@ -173,6 +185,7 @@ public class Enemy2Controller : MonoBehaviour
     private void Awake()
     {
         if (agent == null) agent = GetComponent<NavMeshAgent>();
+        if (agent != null && _baseAgentSpeed <= 0f) _baseAgentSpeed = agent.speed;
         if (anim == null) anim = GetComponentInChildren<Animator>();
 
         // Root motion can move the character even when agent is stopped.
@@ -289,11 +302,43 @@ public class Enemy2Controller : MonoBehaviour
         GetShot();
     }
 
+    /// <summary>
+    /// Called by WaterSlowZone triggers. Multiplier is clamped and applied to this enemy's NavMeshAgent speed.
+    /// </summary>
+    public void SetWaterSlow(bool inWater, float speedMultiplier)
+    {
+        if (!enableWaterSlow) return;
+
+        if (inWater)
+            _waterSpeedMultiplier = Mathf.Clamp(speedMultiplier > 0f ? speedMultiplier : defaultWaterSpeedMultiplier, 0.05f, 1f);
+        else
+            _waterSpeedMultiplier = 1f;
+    }
+
+    private float GetWaterMult()
+    {
+        return enableWaterSlow ? _waterSpeedMultiplier : 1f;
+    }
+
+    private void ApplyWaterSlowToAgent()
+    {
+        if (agent == null) return;
+        if (_baseAgentSpeed <= 0f) _baseAgentSpeed = agent.speed;
+
+        float desired = _baseAgentSpeed * GetWaterMult();
+        if (!Mathf.Approximately(agent.speed, desired))
+            agent.speed = desired;
+    }
+
+
     private void Update()
     {
         // Keep trying to resolve player if needed (scene load / respawn).
         if (_playerFallback == null)
             ResolvePlayerFallback();
+
+        // Apply water slow (if any) before movement decisions.
+        ApplyWaterSlowToAgent();
 
         // Team leash: keep members from wandering too far from their EnemyTeam anchor/centroid.
         // If this returns true, we are currently returning to the team and should skip normal combat logic this frame.
