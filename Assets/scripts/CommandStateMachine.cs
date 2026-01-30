@@ -278,6 +278,36 @@ public class CommandStateMachine : MonoBehaviour
         return true;
     }
 
+
+    /// <summary>
+    /// Resolve a clicked collider to a unit root GameObject by walking up the hierarchy.
+    /// This prevents "child collider not tagged" issues when using store-bought rigs/prefabs.
+    /// </summary>
+    private GameObject ResolveUnitRootFromCollider(Collider col)
+    {
+        if (col == null) return null;
+
+        // Prefer components if present (more robust than tags alone)
+        var ally = col.GetComponentInParent<AllyController>();
+        if (ally != null) return ally.gameObject;
+
+        var enemy = col.GetComponentInParent<Enemy2Controller>();
+        if (enemy != null) return enemy.gameObject;
+
+        // Fallback: climb by tag
+        Transform t = col.transform;
+        while (t != null)
+        {
+            if (t.CompareTag("Ally")) return t.gameObject;
+            if (allowEnemySelect && t.CompareTag("Enemy")) return t.gameObject;
+            if (allowBossSelect && t.CompareTag("Boss")) return t.gameObject;
+            t = t.parent;
+        }
+
+        return null;
+    }
+
+
     private bool TryGetClickedUnit(Ray r, out GameObject unitGO)
     {
         unitGO = null;
@@ -285,11 +315,15 @@ public class CommandStateMachine : MonoBehaviour
         if (!Physics.Raycast(r, out RaycastHit hit, raycastMaxDistance, selectableMask.value != 0 ? selectableMask : ~0))
             return false;
 
-        var go = hit.collider.gameObject;
+        // IMPORTANT: Many prefabs have colliders on child bones/meshes with different tags.
+        // Resolve to the actual unit root (AllyController/Enemy2Controller parent or tagged parent).
+        var resolved = ResolveUnitRootFromCollider(hit.collider);
+        if (resolved == null) return false;
 
-        if (go.CompareTag("Ally")) { unitGO = go; return true; }
-        if (allowEnemySelect && go.CompareTag("Enemy")) { unitGO = go; return true; }
-        if (allowBossSelect && go.CompareTag("Boss")) { unitGO = go; return true; }
+        // Final tag gate (unit root should carry the proper tag).
+        if (resolved.CompareTag("Ally")) { unitGO = resolved; return true; }
+        if (allowEnemySelect && resolved.CompareTag("Enemy")) { unitGO = resolved; return true; }
+        if (allowBossSelect && resolved.CompareTag("Boss")) { unitGO = resolved; return true; }
 
         return false;
     }

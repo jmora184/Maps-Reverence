@@ -25,6 +25,18 @@ public class AllyController : MonoBehaviour
 
     private float travelFollowTimer;
     public float distanceToChase = 10f, distanceToLose = 15f, distanceToStop = 2f;
+
+    [Header("Commanded Attack Chase Override")]
+    [Tooltip("If true, a direct Attack order will keep chasing the target even if it's beyond distanceToLose.")]
+    public bool allowCommandedAttackChaseBeyondLose = true;
+
+    [Tooltip("How long (seconds) a commanded attack may ignore distanceToLose. Set 0 for unlimited.")]
+    public float commandedAttackChaseMaxSeconds = 0f;
+
+    private bool _hasCommandedAttack;
+    private float _commandedAttackUntilTime;
+    private Transform _commandedAttackTarget;
+
     public NavMeshAgent agent;
 
 
@@ -50,8 +62,36 @@ public class AllyController : MonoBehaviour
     [Tooltip("Preferred distance to keep from the enemy while fighting.")]
     public float desiredAttackRange = 6f;
 
+    [Tooltip("Enable a minimum/maximum preferred combat distance band (ex: keep between 20 and 60). If disabled, the ally uses desiredAttackRange as a single ideal distance.")]
+    public bool enableDesiredAttackRangeBand = false;
+
+    [Tooltip("If enableDesiredAttackRangeBand is true: the ally will back off if closer than this distance.")]
+    public float desiredAttackRangeMin = 20f;
+
+    [Tooltip("If enableDesiredAttackRangeBand is true: the ally will move in if farther than this distance.")]
+    public float desiredAttackRangeMax = 60f;
+
+
     [Tooltip("Small buffer around desiredAttackRange to prevent jitter (hysteresis).")]
     public float attackRangeBuffer = 0.75f;
+
+
+
+    [Header("Dynamic Desired Range")]
+    [Tooltip("If true, this ally will periodically pick a new preferred attack distance (desiredAttackRange) so fights feel less robotic and squads don't clump at the exact same radius.")]
+    public bool enableDynamicDesiredAttackRange = false;
+
+    [Tooltip("Minimum seconds between picking a new desired attack range.")]
+    public float desiredAttackRangeUpdateIntervalMin = 1.8f;
+
+    [Tooltip("Maximum seconds between picking a new desired attack range.")]
+    public float desiredAttackRangeUpdateIntervalMax = 3.2f;
+
+    [Tooltip("When NOT using the min/max band, randomize desired range by +/- this amount around desiredAttackRange.")]
+    public float desiredAttackRangeJitter = 1.5f;
+
+    [Tooltip("If true, desired range is only re-picked while actively chasing (recommended).")]
+    public bool desiredAttackRangeUpdateOnlyWhenChasing = true;
 
     [Tooltip("NavMesh sample radius used when backing away from a target.")]
     public float backoffSampleRadius = 2.5f;
@@ -193,6 +233,12 @@ public class AllyController : MonoBehaviour
     private float _forceStrafeUntilTime;
 
 
+
+
+    // Dynamic desired range runtime
+    private float _currentDesiredAttackRangeRuntime;
+    private float _nextDesiredAttackRangeUpdateTime;
+
     // Combat strafe runtime
     private float _strafeRepathTimer;
     private float _strafeChangeTimer;
@@ -279,7 +325,11 @@ public class AllyController : MonoBehaviour
                 agent.speed = moveSpeed;
             }
         }
+
+        // Initialize dynamic desired range (optional)
+        InitializeDesiredAttackRangeRuntime();
     }
+
 
     /// <summary>
     /// Called by WaterSlowZone triggers. Multiplier is clamped and applied on top of team-size speed scaling.
@@ -337,6 +387,14 @@ public class AllyController : MonoBehaviour
         chasing = true;
         currentEnemy = enemy;
 
+
+        // Mark this as a player-commanded attack so we don't drop chase due to distanceToLose.
+        _hasCommandedAttack = true;
+        _commandedAttackTarget = enemy;
+        _commandedAttackUntilTime = (commandedAttackChaseMaxSeconds <= 0f) ? Mathf.Infinity : (Time.time + commandedAttackChaseMaxSeconds);
+        // Re-pick preferred range immediately when a direct attack order is issued.
+        ResetDesiredAttackRangeCycle(pickImmediately: true);
+
         // Direct attack orders should feel active: temporarily disable the in-range pause so we keep repositioning/straffing.
         _forceStrafeUntilTime = Time.time + Mathf.Max(0f, forceStrafeAfterAttackOrderSeconds);
 
@@ -344,6 +402,40 @@ public class AllyController : MonoBehaviour
         _combatPauseTimer = 0f;
         _combatMoveBurstTimer = 0f;
     }
+
+    /// <summary>
+    /// Returns true if we should ignore distanceToLose for the current enemy (player-issued Attack order).
+    /// This prevents the unit from "giving up" on long-distance commanded attacks and falling back to team-follow.
+    /// </summary>
+    private bool ShouldIgnoreLoseDistance(Transform enemy)
+    {
+        if (!allowCommandedAttackChaseBeyondLose) return false;
+        if (!_hasCommandedAttack) return false;
+
+        if (enemy == null)
+        {
+            _hasCommandedAttack = false;
+            _commandedAttackTarget = null;
+            return false;
+        }
+
+        // Only ignore lose distance for the same target that was commanded.
+        if (_commandedAttackTarget != null && enemy != _commandedAttackTarget)
+        {
+            return false;
+        }
+
+        // Optional timeout.
+        if (commandedAttackChaseMaxSeconds > 0f && Time.time > _commandedAttackUntilTime)
+        {
+            _hasCommandedAttack = false;
+            _commandedAttackTarget = null;
+            return false;
+        }
+
+        return true;
+    }
+
 
     private void Update()
     {
@@ -420,7 +512,7 @@ public class AllyController : MonoBehaviour
                     }
                 }
 
-                if (dist > distanceToLose)
+                if (dist > distanceToLose && !ShouldIgnoreLoseDistance(currentEnemy))
                 {
                     StopChasingAndResume();
                 }
@@ -601,6 +693,9 @@ public class AllyController : MonoBehaviour
             chasing = true;
             currentEnemy = best;
 
+            // Re-pick preferred range immediately on engagement start.
+            ResetDesiredAttackRangeCycle(pickImmediately: true);
+
             // Reset combat pause cycle when we start a new engagement.
             _combatPauseTimer = 0f;
             _combatMoveBurstTimer = 0f;
@@ -610,6 +705,8 @@ public class AllyController : MonoBehaviour
 
     private void StopChasingAndResume()
     {
+        _hasCommandedAttack = false;
+        _commandedAttackTarget = null;
         chasing = false;
         currentEnemy = null;
 
@@ -935,6 +1032,109 @@ public class AllyController : MonoBehaviour
         clamped.y = desired.y;
         return clamped;
     }
+
+
+    // -------------------- DYNAMIC DESIRED RANGE --------------------
+    private void InitializeDesiredAttackRangeRuntime()
+    {
+        _currentDesiredAttackRangeRuntime = Mathf.Max(0.5f, desiredAttackRange);
+        _nextDesiredAttackRangeUpdateTime = Time.time + GetNextDesiredRangeInterval();
+    }
+
+    private float GetNextDesiredRangeInterval()
+    {
+        float a = Mathf.Max(0.05f, desiredAttackRangeUpdateIntervalMin);
+        float b = Mathf.Max(a, desiredAttackRangeUpdateIntervalMax);
+        return Random.Range(a, b);
+    }
+
+    private void ResetDesiredAttackRangeCycle(bool pickImmediately)
+    {
+        if (!enableDynamicDesiredAttackRange) return;
+
+        if (pickImmediately)
+            _nextDesiredAttackRangeUpdateTime = Time.time; // forces an immediate repick on next update
+        else
+            _nextDesiredAttackRangeUpdateTime = Time.time + GetNextDesiredRangeInterval();
+    }
+
+    private void UpdateDesiredAttackRangeRuntime(bool useBand, float bandMin, float bandMax)
+    {
+        if (!enableDynamicDesiredAttackRange)
+        {
+            _currentDesiredAttackRangeRuntime = Mathf.Max(0.5f, desiredAttackRange);
+            return;
+        }
+
+        if (desiredAttackRangeUpdateOnlyWhenChasing && !chasing)
+            return;
+
+        if (Time.time < _nextDesiredAttackRangeUpdateTime)
+            return;
+
+        _nextDesiredAttackRangeUpdateTime = Time.time + GetNextDesiredRangeInterval();
+
+        if (useBand)
+        {
+            _currentDesiredAttackRangeRuntime = Random.Range(bandMin, bandMax);
+        }
+        else
+        {
+            float baseRange = Mathf.Max(0.5f, desiredAttackRange);
+            float j = Mathf.Max(0f, desiredAttackRangeJitter);
+            _currentDesiredAttackRangeRuntime = Mathf.Max(0.5f, baseRange + Random.Range(-j, j));
+        }
+    }
+
+    private float GetCurrentDesiredAttackRange(bool useBand, float bandMin, float bandMax)
+    {
+        float r = enableDynamicDesiredAttackRange ? _currentDesiredAttackRangeRuntime : desiredAttackRange;
+        r = Mathf.Max(0.5f, r);
+        if (useBand) r = Mathf.Clamp(r, bandMin, bandMax);
+        return r;
+    }
+
+    private bool TryGetCombatRangeBand(out float minRange, out float maxRange)
+    {
+        // Returns true if the min/max range band is valid and enabled.
+        minRange = Mathf.Max(0.5f, desiredAttackRangeMin);
+        maxRange = Mathf.Max(minRange, desiredAttackRangeMax);
+
+        if (!enableDesiredAttackRangeBand) return false;
+
+        // Require a meaningful band.
+        if (maxRange <= minRange + 0.01f) return false;
+
+        return true;
+    }
+
+    private Vector3 ClampToCombatRangeBandOnNavMesh(Vector3 desired, Vector3 targetPoint, float minRange, float maxRange, float sampleRadius)
+    {
+        // Adjust 'desired' so its horizontal distance to targetPoint stays within [minRange, maxRange],
+        // then sample onto the NavMesh to avoid unreachable points.
+        Vector3 flat = desired - targetPoint;
+        flat.y = 0f;
+
+        if (flat.sqrMagnitude < 0.0001f)
+        {
+            flat = (transform.position - targetPoint);
+            flat.y = 0f;
+            if (flat.sqrMagnitude < 0.0001f)
+                flat = transform.forward;
+        }
+
+        float mag = flat.magnitude;
+        float clamped = Mathf.Clamp(mag, minRange, maxRange);
+
+        Vector3 adjusted = targetPoint + flat.normalized * clamped;
+        adjusted.y = desired.y;
+
+        if (NavMesh.SamplePosition(adjusted, out NavMeshHit hit, Mathf.Max(0.25f, sampleRadius), NavMesh.AllAreas))
+            adjusted = hit.position;
+
+        return adjusted;
+    }
+
     private void ChaseAndShoot(Transform enemy)
     {
         if (enemy == null) return;
@@ -951,11 +1151,21 @@ public class AllyController : MonoBehaviour
         // and it won't move (and your run animation never triggers). Keep stoppingDistance small.
         if (agent != null)
         {
-            float range = Mathf.Max(0.5f, desiredAttackRange);
+            // Optional min/max band (ex: keep between 20 and 60).
+            bool useBand = TryGetCombatRangeBand(out float minRange, out float maxRange);
+
+            // Optionally re-pick the preferred distance every couple seconds.
+            UpdateDesiredAttackRangeRuntime(useBand, minRange, maxRange);
+
+            float range = GetCurrentDesiredAttackRange(useBand, minRange, maxRange);
 
             // Let the agent actually travel to strafe points.
             // We still maintain standoff ourselves via range/buffer logic.
-            float combatStop = Mathf.Max(0.1f, range * 0.25f);
+            // Keep stoppingDistance SMALL so the agent doesn't think it's "already arrived" at most strafe points.
+            float stopBase = (useBand && !enableDynamicDesiredAttackRange)
+                ? Mathf.Clamp((minRange + maxRange) * 0.5f, 0.5f, 50f)
+                : range;
+            float combatStop = Mathf.Clamp(stopBase * 0.25f, 0.1f, 1.25f);
             if (!Mathf.Approximately(agent.stoppingDistance, combatStop))
                 agent.stoppingDistance = combatStop;
 
@@ -971,7 +1181,9 @@ public class AllyController : MonoBehaviour
             float dist = Vector3.Distance(transform.position, targetPoint);
 
             // Too far: move in toward a ring around the enemy (not the exact center).
-            if (dist > range + attackRangeBuffer)
+            bool useDynamicRange = enableDynamicDesiredAttackRange;
+
+            if ((useBand && !useDynamicRange) ? (dist > maxRange + attackRangeBuffer) : (dist > range + attackRangeBuffer))
             {
                 // Out of ideal range: reset pause cycle so we don't get stuck "paused" while needing to reposition.
                 _combatPauseTimer = 0f;
@@ -982,20 +1194,24 @@ public class AllyController : MonoBehaviour
                 toward.y = 0f;
                 if (toward.sqrMagnitude < 0.001f) toward = transform.forward;
 
-                Vector3 ringPoint = targetPoint - toward.normalized * range;
+                float approachRange = (useBand && !useDynamicRange) ? maxRange : range;
+
+                Vector3 ringPoint = targetPoint - toward.normalized * approachRange;
 
 
                 // Spread approach points a bit per-ally so teams don't all stack on the same ring point.
                 Vector3 right = Vector3.Cross(Vector3.up, toward.normalized);
-                float spread = Mathf.Clamp(range * 0.15f, 1f, 6f);
+                float spread = Mathf.Clamp(((useBand && !useDynamicRange) ? maxRange : range) * 0.15f, 1f, 6f);
                 float seed = (GetInstanceID() * 0.1234f);
                 float side = Mathf.Sin(seed) * spread;
                 ringPoint += right * side;
                 ringPoint = ClampCombatMoveToFormation(ringPoint, formationSlot);
+                if (useBand)
+                    ringPoint = ClampToCombatRangeBandOnNavMesh(ringPoint, targetPoint, minRange, maxRange, strafeSampleRadius);
                 agent.SetDestination(ringPoint);
             }
             // Too close: back off a bit.
-            else if (dist < range - attackRangeBuffer)
+            else if ((useBand && !useDynamicRange) ? (dist < minRange - attackRangeBuffer) : (dist < range - attackRangeBuffer))
             {
                 // Too close: reset pause cycle so we can immediately back off.
                 _combatPauseTimer = 0f;
@@ -1005,13 +1221,17 @@ public class AllyController : MonoBehaviour
                 away.y = 0f;
                 away = away.sqrMagnitude < 0.001f ? transform.forward : away.normalized;
 
-                float push = (range - dist) + 0.5f;
+                float backoffBase = (useBand && !useDynamicRange) ? minRange : range;
+
+                float push = (backoffBase - dist) + 0.5f;
                 Vector3 desired = transform.position + away * push;
 
                 if (NavMesh.SamplePosition(desired, out NavMeshHit hit, backoffSampleRadius, NavMesh.AllAreas))
                     desired = hit.position;
 
                 desired = ClampCombatMoveToFormation(desired, formationSlot);
+                if (useBand)
+                    desired = ClampToCombatRangeBandOnNavMesh(desired, targetPoint, minRange, maxRange, backoffSampleRadius);
                 agent.isStopped = false;
                 agent.SetDestination(desired);
             }
@@ -1087,7 +1307,12 @@ public class AllyController : MonoBehaviour
                                 if (NavMesh.SamplePosition(desired, out NavMeshHit hit, strafeSampleRadius, NavMesh.AllAreas))
                                     desired = hit.position;
 
+                                if (useBand)
+                                    desired = ClampToCombatRangeBandOnNavMesh(desired, targetPoint, minRange, maxRange, strafeSampleRadius);
+
                                 desired = ClampCombatMoveToFormation(desired, formationSlot);
+                                if (useBand)
+                                    desired = ClampToCombatRangeBandOnNavMesh(desired, targetPoint, minRange, maxRange, strafeSampleRadius);
                                 agent.isStopped = false;
                                 agent.SetDestination(desired);
                                 _strafeRepathTimer = Mathf.Max(0.05f, strafeRepathInterval);
@@ -1128,11 +1353,18 @@ public class AllyController : MonoBehaviour
                             Quaternion rot = Quaternion.AngleAxis((_strafeSide * 90f) + _strafeAngleOffset, Vector3.up);
                             Vector3 strafeDir = rot * fromTarget.normalized;
 
-                            Vector3 desired = targetPoint + strafeDir.normalized * range;
+                            float strafeRingRadius = useBand ? Mathf.Clamp(range, minRange, maxRange) : range;
+
+                            Vector3 desired = targetPoint + strafeDir.normalized * strafeRingRadius;
                             if (NavMesh.SamplePosition(desired, out NavMeshHit hit, strafeSampleRadius, NavMesh.AllAreas))
                                 desired = hit.position;
 
+                            if (useBand)
+                                desired = ClampToCombatRangeBandOnNavMesh(desired, targetPoint, minRange, maxRange, strafeSampleRadius);
+
                             desired = ClampCombatMoveToFormation(desired, formationSlot);
+                            if (useBand)
+                                desired = ClampToCombatRangeBandOnNavMesh(desired, targetPoint, minRange, maxRange, strafeSampleRadius);
                             agent.isStopped = false;
                             agent.SetDestination(desired);
                             _strafeRepathTimer = Mathf.Max(0.05f, strafeRepathInterval);

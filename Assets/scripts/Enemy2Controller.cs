@@ -55,6 +55,29 @@ public class Enemy2Controller : MonoBehaviour
     [Tooltip("Preferred distance to keep from the current combat target while fighting.")]
     public float desiredAttackRange = 6f;
 
+
+    [Tooltip("If true, use a min/max band instead of a single desiredAttackRange.")]
+    public bool enableDesiredAttackRangeBand = false;
+
+    [Tooltip("Minimum desired combat distance when using a range band.")]
+    public float desiredAttackRangeMin = 4f;
+
+    [Tooltip("Maximum desired combat distance when using a range band.")]
+    public float desiredAttackRangeMax = 8f;
+
+    [Header("Dynamic Desired Range")]
+    [Tooltip("If true, we periodically pick a new preferred distance (inside the band) every few seconds.")]
+    public bool enableDynamicDesiredAttackRange = false;
+
+    [Tooltip("Minimum seconds between re-picking the desired range.")]
+    public float desiredRangeUpdateIntervalMin = 2f;
+
+    [Tooltip("Maximum seconds between re-picking the desired range.")]
+    public float desiredRangeUpdateIntervalMax = 3f;
+
+    [Tooltip("If true, we only update the desired range while in combat/chasing.")]
+    public bool updateDesiredRangeOnlyWhenInCombat = true;
+
     [Tooltip("Buffer around desiredAttackRange to prevent jitter (hysteresis).")]
     public float attackRangeBuffer = 0.75f;
 
@@ -82,6 +105,26 @@ public class Enemy2Controller : MonoBehaviour
 
     [Tooltip("How often we repath while approaching/backing off (seconds).")]
     public float combatRepathInterval = 0.2f;
+
+
+    [Header("Pause While Shooting (In Range)")]
+    [Tooltip("If true, the enemy will periodically pause in place (for a short duration) while shooting in-range, then reposition briefly.")]
+    public bool pauseWhileShootingInRange = true;
+
+    [Tooltip("Min seconds to pause and hold position while shooting.")]
+    public float pauseShootMinSeconds = 0.9f;
+
+    [Tooltip("Max seconds to pause and hold position while shooting.")]
+    public float pauseShootMaxSeconds = 1.3f;
+
+    [Tooltip("Min seconds of movement/strafe between pause windows.")]
+    public float pauseMoveBurstMinSeconds = 0.4f;
+
+    [Tooltip("Max seconds of movement/strafe between pause windows.")]
+    public float pauseMoveBurstMaxSeconds = 0.8f;
+
+    [Tooltip("If true, the pause system only runs when we are within the desired range band (in-range).")]
+    public bool pauseOnlyWhenInRange = true;
 
 
     [Header("Aim / Fire Gate")]
@@ -154,6 +197,15 @@ public class Enemy2Controller : MonoBehaviour
     public float timeToShoot = 1f;
 
     // --- runtime ---
+
+    // Desired range runtime
+    private float _currentDesiredAttackRange = -1f;
+    private float _nextDesiredRangeUpdateTime = 0f;
+
+    // Pause / move burst runtime
+    private float _pauseShootTimer = 0f;
+    private float _pauseMoveBurstTimer = 0f;
+
     private bool chasing;
     private float chaseCounter;
 
@@ -206,6 +258,14 @@ public class Enemy2Controller : MonoBehaviour
         // Defaults: if not set in Inspector, use distanceToChase as the "awareness" radius.
         if (aggroFromDamageMaxDistance <= 0f) aggroFromDamageMaxDistance = distanceToChase;
         if (aggroFromOrdersMaxDistance <= 0f) aggroFromOrdersMaxDistance = distanceToChase;
+
+
+        // Initialize desired range & pause cycle so combat doesn't start with invalid timers.
+        _currentDesiredAttackRange = desiredAttackRange;
+        ResetDesiredRangeNow();
+        _pauseShootTimer = 0f;
+        _pauseMoveBurstTimer = 0f;
+
     }
 
     private bool IsWithinAggroRange(Transform t, float maxDistance)
@@ -226,6 +286,12 @@ public class Enemy2Controller : MonoBehaviour
         fireCount = 0f;
         shootTimeCounter = timeToShoot;
         shotWaitCounter = 0f;
+
+        // Re-pick a preferred distance and restart pause cycle for this engagement.
+        ResetDesiredRangeNow();
+        _pauseShootTimer = 0f;
+        _pauseMoveBurstTimer = 0f;
+
 
         if (agent != null && agent.isActiveAndEnabled)
             agent.isStopped = false;
@@ -449,8 +515,12 @@ public class Enemy2Controller : MonoBehaviour
             transform.rotation = Quaternion.Slerp(transform.rotation, look, Time.deltaTime * faceTargetTurnSpeed);
         }
 
-        float range = Mathf.Max(0.5f, desiredAttackRange);
-        float inner = Mathf.Max(0.1f, range - attackRangeBuffer - Mathf.Max(0f, backoffSlack));
+        // Update desired range periodically (if enabled). We treat Min/Max as the "hard" in-range band,
+        // and the current desired range as a soft preference within that band.
+        bool inCombatNow = chasing;
+        UpdateDesiredRangeTick(inCombatNow);
+
+        float range = GetDesiredRange(); float inner = Mathf.Max(0.1f, range - attackRangeBuffer - Mathf.Max(0f, backoffSlack));
         float outer = range + attackRangeBuffer + Mathf.Max(0f, approachSlack);
 
         _repathTimer -= Time.deltaTime;
@@ -458,6 +528,8 @@ public class Enemy2Controller : MonoBehaviour
 
         if (dist > outer)
         {
+            TickPauseCycle(inRange: false);
+
             if (canRepath)
             {
                 // Approach to the ring around target (not its exact center).
@@ -481,6 +553,8 @@ public class Enemy2Controller : MonoBehaviour
         }
         else if (dist < inner)
         {
+            TickPauseCycle(inRange: false);
+
             if (canRepath)
             {
                 // Too close: back off a bit.
@@ -514,6 +588,18 @@ public class Enemy2Controller : MonoBehaviour
         }
         else
         {
+
+            // Pause/move-burst cycle while in-range (optional).
+            TickPauseCycle(inRange: true);
+
+            if (IsInShootPause())
+            {
+                // Hold position and shoot for a short duration.
+                StopAgent();
+                SetMovingAnim(false);
+                HandleShooting(target);
+                return;
+            }
             // In range: optionally strafe/circle while shooting (more dynamic combat).
             if (enableCombatStrafe)
             {
@@ -701,7 +787,117 @@ public class Enemy2Controller : MonoBehaviour
         return best;
     }
 
-    private void HandleShooting(Transform target)
+
+// -------------------- Desired Range + Pause While Shooting --------------------
+
+private float GetDesiredRange()
+    {
+        float r = desiredAttackRange;
+
+        if (enableDesiredAttackRangeBand)
+        {
+            float min = Mathf.Max(0.5f, desiredAttackRangeMin);
+            float max = Mathf.Max(min, desiredAttackRangeMax);
+
+            if (_currentDesiredAttackRange < 0f)
+                _currentDesiredAttackRange = Mathf.Clamp(r, min, max);
+
+            r = Mathf.Clamp(_currentDesiredAttackRange, min, max);
+        }
+
+        return Mathf.Max(0.5f, r);
+    }
+
+    private void ResetDesiredRangeNow()
+    {
+        if (enableDesiredAttackRangeBand)
+        {
+            float min = Mathf.Max(0.5f, desiredAttackRangeMin);
+            float max = Mathf.Max(min, desiredAttackRangeMax);
+            _currentDesiredAttackRange = Random.Range(min, max);
+        }
+        else
+        {
+            _currentDesiredAttackRange = Mathf.Max(0.5f, desiredAttackRange);
+        }
+
+        // schedule next update
+        float a = Mathf.Max(0.05f, desiredRangeUpdateIntervalMin);
+        float b = Mathf.Max(a, desiredRangeUpdateIntervalMax);
+        float interval = enableDynamicDesiredAttackRange ? Random.Range(a, b) : 999999f;
+        _nextDesiredRangeUpdateTime = Time.time + interval;
+    }
+
+    private void UpdateDesiredRangeTick(bool inCombat)
+    {
+        if (!enableDynamicDesiredAttackRange) return;
+        if (updateDesiredRangeOnlyWhenInCombat && !inCombat) return;
+
+        // Don't change the preferred range while we are in the "shoot pause" window,
+        // otherwise it can immediately force a reposition and visually cancel the pause.
+        if (pauseWhileShootingInRange && _pauseShootTimer > 0f) return;
+
+        if (Time.time < _nextDesiredRangeUpdateTime) return;
+
+        ResetDesiredRangeNow();
+    }
+
+    private void TickPauseCycle(bool inRange)
+    {
+        if (!pauseWhileShootingInRange)
+        {
+            _pauseShootTimer = 0f;
+            _pauseMoveBurstTimer = 0f;
+            return;
+        }
+
+        if (pauseOnlyWhenInRange && !inRange)
+        {
+            _pauseShootTimer = 0f;
+            _pauseMoveBurstTimer = 0f;
+            return;
+        }
+
+        float dt = Time.deltaTime;
+
+        if (_pauseShootTimer > 0f)
+        {
+            _pauseShootTimer -= dt;
+            if (_pauseShootTimer <= 0f)
+            {
+                _pauseMoveBurstTimer = Random.Range(
+                    Mathf.Max(0f, pauseMoveBurstMinSeconds),
+                    Mathf.Max(pauseMoveBurstMinSeconds, pauseMoveBurstMaxSeconds));
+            }
+
+            return;
+        }
+
+        if (_pauseMoveBurstTimer > 0f)
+        {
+            _pauseMoveBurstTimer -= dt;
+            if (_pauseMoveBurstTimer <= 0f)
+            {
+                _pauseShootTimer = Random.Range(
+                    Mathf.Max(0f, pauseShootMinSeconds),
+                    Mathf.Max(pauseShootMinSeconds, pauseShootMaxSeconds));
+            }
+
+            return;
+        }
+
+        // Start with a pause window.
+        _pauseShootTimer = Random.Range(
+            Mathf.Max(0f, pauseShootMinSeconds),
+            Mathf.Max(pauseShootMinSeconds, pauseShootMaxSeconds));
+    }
+
+    private bool IsInShootPause()
+    {
+        return pauseWhileShootingInRange && _pauseShootTimer > 0f;
+    }
+
+    void HandleShooting(Transform target)
     {
         if (bullet == null || firePoint == null) return;
 

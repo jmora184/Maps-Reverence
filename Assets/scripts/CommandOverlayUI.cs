@@ -603,7 +603,8 @@ public class CommandOverlayUI : MonoBehaviour
                 // Invisible raycast catcher; visuals live on children under IconVisual.
                 rootImg.color = new Color(1f, 1f, 1f, 0f);
             }
-            rootImg.raycastTarget = !isEnemyTeamMember;
+            rootImg.raycastTarget = true; // allow clicking enemy icons even for team members
+
             // Make sure the Button has a target graphic (required by some Unity versions).
             btn.targetGraphic = rootImg;
 
@@ -615,33 +616,36 @@ public class CommandOverlayUI : MonoBehaviour
                 {
                     if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
 
-                    // If we're currently choosing a MOVE destination, clicking an enemy icon should
-                    // submit a move target at that enemy's position.
+                    // Resolve what this click should target.
+                    // - If this enemy is part of an Enemy Team, we resolve to the team/anchor target (so clicks still work).
+                    // - Otherwise we resolve to the clicked enemy.
+                    var resolvedTargetGO = ResolveAttackTargetGameObject(captured);
+                    if (resolvedTargetGO == null) return;
+
+                    // If we're currently choosing a MOVE/ATTACK target, clicking an enemy icon should submit a target.
                     if (sm != null && sm.CurrentState == CommandStateMachine.State.MoveTargeting)
                     {
-                        AttackTargetIndicatorSystem.Instance?.RegisterCommittedAttack(sm.CurrentSelection, captured);
-                        sm.SubmitFollowTarget(captured.gameObject);
+                        AttackTargetIndicatorSystem.Instance?.RegisterCommittedAttack(sm.CurrentSelection, resolvedTargetGO.transform);
+                        sm.SubmitFollowTarget(resolvedTargetGO);
                         return;
                     }
 
-                    // If this enemy belongs to an Enemy Team, don't allow selecting individuals.
-                    if (isEnemyTeamMember)
-                        return;
-
-                    // Otherwise, only allow normal click behavior if enabled.
+                    // Otherwise, treat as a normal click selection (if enabled).
                     if (enemyIconsClickable)
-                        OnUnitClicked(captured);
+                        OnUnitClicked(resolvedTargetGO.transform);
                 });
 
                 // Keep the component enabled, but optionally block raycasts/interaction for team members.
-                btn.interactable = !isEnemyTeamMember;
+                btn.interactable = true; // allow clicking enemy icons even for team members
+
                 btn.enabled = true;
 
                 if (isEnemyTeamMember)
                 {
                     var cgBlock = icon.GetComponent<CanvasGroup>();
                     if (cgBlock == null) cgBlock = icon.gameObject.AddComponent<CanvasGroup>();
-                    cgBlock.blocksRaycasts = false;
+                    cgBlock.blocksRaycasts = true; // keep clickable
+
                 }
 
             }

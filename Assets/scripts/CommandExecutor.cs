@@ -185,7 +185,7 @@ public class CommandExecutor : MonoBehaviour
         if (selection == null || selection.Count == 0) return;
 
         // ✅ Team expansion (team members move together)
-        List<GameObject> expanded = ExpandSelectionForTeams(selection);
+        List<GameObject> expanded = ExpandSelectionForTeams(selection, true);
 
         // Any new command breaks TEAM hold-ground.
         // Cancel any ongoing team-follow formation routine (move order overrides follow).
@@ -279,7 +279,7 @@ public class CommandExecutor : MonoBehaviour
         StopPinClearRoutine();
 
         // Expand selection to whole team if requested
-        List<GameObject> expanded = (expandFollowToWholeTeam ? ExpandSelectionForTeams(selection) : UniqueNonNull(selection));
+        List<GameObject> expanded = (expandFollowToWholeTeam ? ExpandSelectionForTeams(selection, true) : UniqueNonNull(selection));
 
         // Any new command breaks TEAM hold-ground.
         Transform targetT = targetUnit != null ? targetUnit.transform : null;
@@ -515,10 +515,10 @@ public class CommandExecutor : MonoBehaviour
             HintSystem.Show("Moving to location.", moveHintDuration);
     }
 
-    private List<GameObject> ExpandSelectionForTeams(IReadOnlyList<GameObject> selection)
+    private List<GameObject> ExpandSelectionForTeams(IReadOnlyList<GameObject> selection, bool expandEnabled)
     {
         // If off, just return a cleaned list (unique, non-null).
-        if (!expandMoveToWholeTeam || TeamManager.Instance == null)
+        if (!expandEnabled || TeamManager.Instance == null)
             return UniqueNonNull(selection);
 
         HashSet<Transform> added = new HashSet<Transform>();
@@ -529,6 +529,13 @@ public class CommandExecutor : MonoBehaviour
             var go = selection[i];
             if (go == null) continue;
 
+            // If selection is a child/proxy object (icon, collider child, etc.),
+            // try to resolve to the AllyController root so team expansion still works.
+            if (!go.CompareTag("Ally"))
+            {
+                var allyRoot = go.GetComponentInParent<AllyController>();
+                if (allyRoot != null) go = allyRoot.gameObject;
+            }
             // Only allies participate in Team logic
             if (go.CompareTag("Ally"))
             {
@@ -663,7 +670,7 @@ public class CommandExecutor : MonoBehaviour
             if (leaderTeam != null && targetTeam == null && selection != null && selection.Count > 1)
             {
                 // Ensure the selection represents a single team (the leader's team).
-                List<GameObject> expandedSel = ExpandSelectionForTeams(selection);
+                List<GameObject> expandedSel = ExpandSelectionForTeams(selection, true);
                 if (TryGetSingleTeamForSelection(expandedSel, out Team selTeam) && selTeam != null && selTeam == leaderTeam)
                 {
                     recruitIntoTeam = true;
