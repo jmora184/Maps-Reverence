@@ -58,6 +58,17 @@ public class AllyController : MonoBehaviour
     public float fireRate = 0.5f;
     private float fireCount;
 
+
+    [Header("Aim")]
+    [Tooltip("If the target has a child transform with this name, the ally will aim at it (recommended).")]
+    public string aimPointChildName = "AimPoint";
+
+    [Tooltip("If true, the ally will aim at the target's Collider bounds center when no AimPoint is found.")]
+    public bool useColliderBoundsForAim = true;
+
+    [Tooltip("Fallback vertical offset added to target.position when no AimPoint/Collider is found.")]
+    public float aimHeightOffset = 1.2f;
+
     [Header("Combat Range")]
     [Tooltip("Preferred distance to keep from the enemy while fighting.")]
     public float desiredAttackRange = 6f;
@@ -1135,11 +1146,34 @@ public class AllyController : MonoBehaviour
         return adjusted;
     }
 
+
+    private Vector3 GetAimPosition(Transform target)
+    {
+        if (target == null) return transform.position + (Vector3.up * aimHeightOffset);
+
+        // 1) Preferred: explicit AimPoint child.
+        if (!string.IsNullOrWhiteSpace(aimPointChildName))
+        {
+            Transform aimChild = target.Find(aimPointChildName);
+            if (aimChild != null) return aimChild.position;
+        }
+
+        // 2) Next: collider bounds center (usually torso-ish).
+        if (useColliderBoundsForAim)
+        {
+            Collider c = target.GetComponentInChildren<Collider>();
+            if (c != null) return c.bounds.center;
+        }
+
+        // 3) Fallback: target pivot + vertical offset.
+        return target.position + (Vector3.up * aimHeightOffset);
+    }
+
     private void ChaseAndShoot(Transform enemy)
     {
         if (enemy == null) return;
 
-        Vector3 targetPoint = enemy.position;
+        Vector3 targetPoint = GetAimPosition(enemy);
 
         // If we're following a formation slot (PlayerSquadFollowSystem sets AllyController.target to a slot transform),
         // keep combat movement tethered to that slot so we don't break formation.

@@ -139,6 +139,18 @@ public class Enemy2Controller : MonoBehaviour
     public bool useFirePointForAimGate = true;
 
 
+
+
+    [Header("Aim Targeting")]
+    [Tooltip("If the target has a child Transform with this name, we aim at it (recommended: add AimPoint on Player/Allies at chest height).")]
+    public string aimPointChildName = "AimPoint";
+
+    [Tooltip("If no AimPoint is found, aim at the target collider bounds center (usually torso).")]
+    public bool useColliderBoundsForAim = true;
+
+    [Tooltip("Fallback vertical offset added to target.position if AimPoint and collider are missing.")]
+    public float aimHeightOffset = 1.2f;
+
     [Header("Combat Dodge / Strafing")]
     [Tooltip("If true, the enemy will strafe/circle while shooting instead of standing still.")]
     public bool enableCombatStrafe = true;
@@ -191,10 +203,28 @@ public class Enemy2Controller : MonoBehaviour
     public Transform firePoint;
     public Animator anim;
 
+    [Header("Death")]
+    [Tooltip("Optional: if present, we will use this to play death animation + disable AI/nav + cleanup instead of vanishing instantly.")]
+    public MnR.DeathController deathController;
+
+    [Tooltip("Fallback Animator Trigger name if no DeathController is present.")]
+    public string deathTriggerName = "Die";
+
+    [Tooltip("If true, this Enemy2Controller disables itself after death so no AI logic continues running.")]
+    public bool disableThisAIOnDeath = true;
+
+    public bool IsDead => _isDead || (deathController != null && deathController.IsDead);
+    private bool _isDead;
+
+
     [Header("Shooting")]
     public float fireRate = 0.5f;
     public float waitBetweenShots = 2f;
     public float timeToShoot = 1f;
+
+
+    [Tooltip("How many bullets to fire per burst (e.g., 3).")]
+    public int shotsPerBurst = 3;
 
     // --- runtime ---
 
@@ -213,8 +243,14 @@ public class Enemy2Controller : MonoBehaviour
     private float shotWaitCounter;
     private float shootTimeCounter;
 
+
+    // Burst runtime
+    private int _burstRemaining;
+    private float _burstShotTimer;
     // Targeting
-    private Transform _combatTarget;     // ally (or player) we are currently fighting
+    private Transform _combatTarget;
+    private AllyHealth _subscribedAllyHealth;
+    // ally (or player) we are currently fighting
     private Transform _playerFallback;   // resolved player transform if available
     private float _repathTimer;
 
@@ -239,6 +275,10 @@ public class Enemy2Controller : MonoBehaviour
         if (agent == null) agent = GetComponent<NavMeshAgent>();
         if (agent != null && _baseAgentSpeed <= 0f) _baseAgentSpeed = agent.speed;
         if (anim == null) anim = GetComponentInChildren<Animator>();
+        if (deathController == null) deathController = GetComponent<MnR.DeathController>();
+
+        if (deathController != null)
+            deathController.OnDied += HandleDeathControllerDied;
 
         // Root motion can move the character even when agent is stopped.
         if (anim != null) anim.applyRootMotion = false;
@@ -250,7 +290,13 @@ public class Enemy2Controller : MonoBehaviour
         ResolveTeamAnchor();
     }
 
-    private void Start()
+    private void OnDestroy()
+    {
+        if (deathController != null)
+            deathController.OnDied -= HandleDeathControllerDied;
+    }
+
+    void Start()
     {
         shootTimeCounter = timeToShoot;
         shotWaitCounter = waitBetweenShots;
@@ -277,6 +323,14 @@ public class Enemy2Controller : MonoBehaviour
 
     private void SetCombatTargetInternal(Transform t)
     {
+        // If we previously subscribed to an ally target death event, remove it.
+        if (_subscribedAllyHealth != null)
+        {
+            _subscribedAllyHealth.OnDied -= OnCombatTargetDied;
+            _subscribedAllyHealth = null;
+        }
+
+
         _combatTarget = t;
         chasing = true;
         chaseCounter = 0f;
@@ -340,6 +394,7 @@ public class Enemy2Controller : MonoBehaviour
     /// </summary>
     public void GetShot()
     {
+        if (_isDead) return;
         // Without an attacker, at least start chasing (fallback to player if available).
         chasing = true;
         chaseCounter = 0f;
@@ -354,6 +409,7 @@ public class Enemy2Controller : MonoBehaviour
     /// </summary>
     public void GetShot(Transform attacker)
     {
+        if (_isDead) return;
         if (attacker != null)
         {
             // Damage aggro can have its own radius, separate from SetCombatTarget orders.
@@ -399,6 +455,13 @@ public class Enemy2Controller : MonoBehaviour
 
     private void Update()
     {
+        // If DeathController has already marked us dead, do nothing.
+        if (IsDead)
+        {
+            if (disableThisAIOnDeath) enabled = false;
+            return;
+        }
+
         // Keep trying to resolve player if needed (scene load / respawn).
         if (_playerFallback == null)
             ResolvePlayerFallback();
@@ -439,6 +502,14 @@ public class Enemy2Controller : MonoBehaviour
         }
 
         Transform target = _combatTarget != null ? _combatTarget : _playerFallback;
+
+        // If target is dead/disabled/inactive, drop it so we don't keep firing at last known position forever.
+        if (TargetIsDeadOrInvalid(target))
+        {
+            ClearCombatTarget();
+            return;
+        }
+
 
         if (target == null)
         {
@@ -788,9 +859,9 @@ public class Enemy2Controller : MonoBehaviour
     }
 
 
-// -------------------- Desired Range + Pause While Shooting --------------------
+    // -------------------- Desired Range + Pause While Shooting --------------------
 
-private float GetDesiredRange()
+    private float GetDesiredRange()
     {
         float r = desiredAttackRange;
 
@@ -899,30 +970,77 @@ private float GetDesiredRange()
 
     void HandleShooting(Transform target)
     {
-        if (bullet == null || firePoint == null) return;
+        if (_isDead) return;
+        if (bullet == null || firePoint == null || target == null) return;
+        if (TargetIsDeadOrInvalid(target)) return;
 
-        if (shotWaitCounter > 0f)
+        float dt = Time.deltaTime;
+
+        // If we're mid-burst, keep firing until we finish.
+        if (_burstRemaining > 0)
         {
-            shotWaitCounter -= Time.deltaTime;
+            _burstShotTimer -= dt;
+            if (_burstShotTimer > 0f)
+                return;
+
+            FireOnceAt(target);
+
+            _burstRemaining--;
+
+            if (_burstRemaining > 0)
+            {
+                // Seconds between bullets inside a burst.
+                _burstShotTimer = Mathf.Max(0.02f, fireRate);
+            }
+            else
+            {
+                // Burst finished: apply cooldown + optional windup for next burst.
+                shotWaitCounter = Mathf.Max(0f, waitBetweenShots);
+                shootTimeCounter = Mathf.Max(0f, timeToShoot);
+            }
+
             return;
         }
 
-        shootTimeCounter -= Time.deltaTime;
+        // Between-burst cooldown
+        if (shotWaitCounter > 0f)
+        {
+            shotWaitCounter -= dt;
+            return;
+        }
+
+        // Optional windup before starting a burst
+        shootTimeCounter -= dt;
         if (shootTimeCounter > 0f)
             return;
 
-        fireCount -= Time.deltaTime;
-        if (fireCount > 0f)
-            return;
+        // Start a new burst
+        _burstRemaining = Mathf.Max(1, shotsPerBurst);
+        _burstShotTimer = 0f;
 
-        fireCount = fireRate;
+        // Fire first bullet immediately
+        FireOnceAt(target);
+        _burstRemaining--;
+
+        if (_burstRemaining > 0)
+            _burstShotTimer = Mathf.Max(0.02f, fireRate);
+        else
+        {
+            shotWaitCounter = Mathf.Max(0f, waitBetweenShots);
+            shootTimeCounter = Mathf.Max(0f, timeToShoot);
+        }
+    }
+
+    private void FireOnceAt(Transform target)
+    {
+        if (bullet == null || firePoint == null || target == null) return;
+        if (TargetIsDeadOrInvalid(target)) return;
 
         // Aim
-        Vector3 aimPos = target.position + new Vector3(0f, 0.5f, 0f);
+        Vector3 aimPos = GetAimPosition(target);
         firePoint.LookAt(aimPos);
 
         // Aim gate: allow firing when our aim is reasonably aligned with the target.
-        // Using firePoint.forward makes ranged combat feel better while strafing.
         Vector3 aimFrom = firePoint.position;
         Vector3 aimFwd = (useFirePointForAimGate ? firePoint.forward : transform.forward);
         Vector3 toAim = aimPos - aimFrom;
@@ -936,16 +1054,12 @@ private float GetDesiredRange()
 
         bool canFire = !useFireConeGate || aimAngle <= Mathf.Clamp(fireConeDegrees, 1f, 179f);
 
-        if (canFire)
-        {
-            Instantiate(bullet, firePoint.position, firePoint.rotation);
-            if (anim != null) anim.SetTrigger("fireShot");
-        }
+        if (!canFire) return;
 
-        // reset cadence windows
-        shotWaitCounter = waitBetweenShots;
-        shootTimeCounter = timeToShoot;
+        Instantiate(bullet, firePoint.position, firePoint.rotation);
+        if (anim != null) anim.SetTrigger("fireShot");
     }
+
 
     private void StopAgent()
     {
@@ -985,10 +1099,212 @@ private float GetDesiredRange()
         anim.SetBool("isMoving", moving);
     }
 
+
+    private void SetShootingAnim(bool shooting)
+    {
+        if (anim == null) return;
+
+        // Preferred: bool parameter "fireShot"
+        bool hasFireBool = false;
+        bool hasShootTrigger = false;
+        var ps = anim.parameters;
+        for (int i = 0; i < ps.Length; i++)
+        {
+            if (ps[i].name == "fireShot" && ps[i].type == AnimatorControllerParameterType.Bool)
+                hasFireBool = true;
+            if ((ps[i].name == "Shoot" || ps[i].name == "fireShot") && ps[i].type == AnimatorControllerParameterType.Trigger)
+                hasShootTrigger = true;
+        }
+
+        if (hasFireBool)
+        {
+            anim.SetBool("fireShot", shooting);
+        }
+        else if (shooting && hasShootTrigger)
+        {
+            // If your controller uses a trigger instead of a bool
+            if (HasParamTrigger(anim, "Shoot")) anim.SetTrigger("Shoot");
+            else if (HasParamTrigger(anim, "fireShot")) anim.SetTrigger("fireShot");
+        }
+    }
+
+    private bool HasParamTrigger(Animator animator, string paramName)
+    {
+        if (animator == null || string.IsNullOrWhiteSpace(paramName)) return false;
+        var ps = animator.parameters;
+        for (int i = 0; i < ps.Length; i++)
+        {
+            if (ps[i].name == paramName && ps[i].type == AnimatorControllerParameterType.Trigger) return true;
+        }
+        return false;
+    }
+
     private void OnDrawGizmosSelected()
     {
         // Helpful debug rings
         Gizmos.color = Color.yellow;
         Gizmos.DrawWireSphere(transform.position, allyAggroRadius);
     }
+    // -------------------- DEATH --------------------
+    private void HandleDeathControllerDied()
+    {
+        // DeathController was triggered (usually by EnemyHealthController). Make sure this AI cannot keep acting.
+        _isDead = true;
+
+        if (agent != null)
+        {
+            agent.isStopped = true;
+            agent.ResetPath();
+            agent.enabled = false;
+        }
+
+        // Clear animator params that can force transitions back to shoot/run.
+        if (anim != null)
+        {
+            if (HasParamBool(anim, "isMoving")) anim.SetBool("isMoving", false);
+            if (HasParamBool(anim, "fireShot")) anim.SetBool("fireShot", false);
+        }
+
+        if (disableThisAIOnDeath)
+            enabled = false;
+    }
+
+
+    /// <summary>
+    /// Call this from your health script when HP reaches 0.
+    /// Plays the Animator death trigger via DeathController (preferred) or directly on Animator (fallback).
+    /// Also disables NavMeshAgent so the enemy stops moving/shooting.
+    /// </summary>
+    public void Die()
+    {
+        if (_isDead) return;
+        _isDead = true;
+
+        // Stop movement immediately.
+        if (agent != null)
+        {
+            agent.isStopped = true;
+            agent.ResetPath();
+            agent.enabled = false;
+        }
+
+        // Use the shared pipeline if present.
+        if (deathController != null)
+        {
+            deathController.Die();
+        }
+        else
+        {
+            // Fallback: just trigger the animator.
+            if (anim != null && !string.IsNullOrWhiteSpace(deathTriggerName))
+                anim.SetTrigger(deathTriggerName);
+        }
+
+        // Prevent any further AI updates.
+        if (disableThisAIOnDeath)
+            enabled = false;
+    }
+
+    /// <summary>Alias for callers that already have a "Kill" style method name.</summary>
+    public void OnKilled() => Die();
+
+
+
+
+    private Vector3 GetAimPosition(Transform target)
+    {
+        if (target == null) return transform.position + transform.forward * 10f;
+
+        // 1) AimPoint child (best)
+        if (!string.IsNullOrWhiteSpace(aimPointChildName))
+        {
+            var ap = target.Find(aimPointChildName);
+            if (ap != null) return ap.position;
+        }
+
+        // 2) Collider bounds center (good fallback)
+        if (useColliderBoundsForAim)
+        {
+            Collider best = null;
+            var cols = target.GetComponentsInChildren<Collider>(true);
+            for (int i = 0; i < cols.Length; i++)
+            {
+                if (cols[i] == null) continue;
+                if (cols[i].isTrigger) continue;
+                best = cols[i];
+                break;
+            }
+
+            if (best != null) return best.bounds.center;
+        }
+
+        // 3) Fallback offset from pivot (feet)
+        return target.position + Vector3.up * Mathf.Max(0f, aimHeightOffset);
+    }
+
+
+
+    private static bool HasParamBool(Animator animator, string paramName)
+    {
+        if (animator == null || string.IsNullOrWhiteSpace(paramName)) return false;
+        var ps = animator.parameters;
+        for (int i = 0; i < ps.Length; i++)
+        {
+            if (ps[i].name == paramName && ps[i].type == AnimatorControllerParameterType.Bool)
+                return true;
+        }
+        return false;
+    }
+
+
+
+    void ClearCombatTarget()
+    {
+        // Unsubscribe from old target events
+        if (_subscribedAllyHealth != null)
+        {
+            _subscribedAllyHealth.OnDied -= OnCombatTargetDied;
+            _subscribedAllyHealth = null;
+        }
+
+        _combatTarget = null;
+        chasing = false;
+        _combatLoseCounter = 0f;
+        chaseCounter = 0f;
+
+        // Stop shooting immediately
+        shootTimeCounter = 0f;
+        shotWaitCounter = 0f;
+        fireCount = 0f;
+
+        StopAgent();
+        SetMovingAnim(false);
+
+        // If your animator uses fireShot bool, force it off
+        SetShootingAnim(false);
+    }
+
+    void OnCombatTargetDied()
+    {
+        ClearCombatTarget();
+    }
+
+    private bool TargetIsDeadOrInvalid(Transform t)
+    {
+        if (t == null) return true;
+
+        // If the target object is disabled, treat as invalid.
+        if (!t.gameObject.activeInHierarchy) return true;
+
+        // If the target has a DeathController and is dead, invalid.
+        var dc = t.GetComponentInParent<MnR.DeathController>();
+        if (dc != null && dc.IsDead) return true;
+
+        // If the target is an ally with AllyHealth and is dead, invalid.
+        var ah = t.GetComponentInParent<AllyHealth>();
+        if (ah != null && ah.IsDead) return true;
+
+        return false;
+    }
+
 }

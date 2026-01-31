@@ -1,61 +1,79 @@
 using UnityEngine;
 
 /// <summary>
-/// BulletController (collision-based)
-/// - Spawns impact FX ONLY when hitting an Enemy (tag "Enemy" on collider or any parent).
-/// - Applies headshot multiplier when hitting a head collider (tag or name "HeadShot").
-/// 
-/// Backward compatibility:
-/// - Older scripts (ex: AllyController) set bullet.Damage. We keep that API via a property that maps to baseDamage.
+/// BulletController (collision/trigger based)
+///
+/// Robust damage routing for MnR + BACKWARD COMPATIBILITY:
+/// - Some of your scripts (e.g., AllyController) set bullet.Damage.
+///   This file includes a public float Damage field + property wrapper so old code still compiles.
+///
+/// Damage routing:
+/// - ENEMY damage: if EnemyHealthController exists in parents -> DamageEnemy(int)
+/// - ALLY damage: if AllyHealth exists in parents -> DamageAlly(int)
+/// - Fallback: optional tag + SendMessage for custom setups
+///
+/// Notes:
+/// - Targets (enemy/ally) MUST have colliders to receive hits.
 /// </summary>
 [DisallowMultipleComponent]
 public class BulletController : MonoBehaviour
 {
     [Header("Movement")]
-    public float moveSpeed = 175f;
-    public float lifeTime = 2.5f;
+    public float moveSpeed = 40f;
+    public float lifeTime = 12f;
 
     [Tooltip("Optional; if left empty we'll auto-grab the Rigidbody on this object.")]
     public Rigidbody theRB;
 
     [Header("Impact")]
-    [Tooltip("Spawned ONLY when we hit an Enemy.")]
     public GameObject impactEffect;
-
-    [Tooltip("Push the impact slightly out from the surface so it doesn't clip inside.")]
     public float impactSurfaceOffset = 0.03f;
-
-    [Tooltip("If true, align the impact effect along the collision normal. If false, use -bulletForward (spray direction).")]
     public bool alignToCollisionNormal = true;
 
     [Header("Damage")]
-    [Tooltip("Base damage for a body shot.")]
-    public int baseDamage = 2;
-
-    /// <summary>
-    /// Backward compatible API: other scripts may set BulletController.Damage.
-    /// This maps to baseDamage.
-    /// </summary>
-    public int Damage
-    {
-        get => baseDamage;
-        set => baseDamage = value;
-    }
+    [Tooltip("Base damage before headshot multiplier. (Legacy field name also exists: Damage)")]
+    public float baseDamage = 2f;
 
     [Tooltip("Multiply damage when hitting a head collider.")]
     public float headshotMultiplier = 2f;
 
-    [Tooltip("If true, bullets damage enemies.")]
+    [Tooltip("If true, bullets can damage enemies.")]
     public bool damageEnemy = true;
 
-    [Header("Headshot Detection")]
-    [Tooltip("If the hit collider has this tag (or any parent does), it counts as headshot. Recommended to create tag 'HeadShot'.")]
-    public string headshotTag = "HeadShot";
+    [Tooltip("If true, bullets can damage allies/players.")]
+    public bool damageAlly = true;
 
-    [Tooltip("Fallback: if tag isn't used, collider GameObject name equals this, it counts as headshot.")]
+    [Header("Legacy Compatibility")]
+    [Tooltip("Legacy field used by older scripts (e.g., AllyController). Keep this in sync with baseDamage.")]
+    public float Damage = 2f;
+
+    /// <summary>
+    /// Legacy property access (some code might use bullet.Damage as property in other versions).
+    /// </summary>
+    public float DamageAmount
+    {
+        get => baseDamage;
+        set
+        {
+            baseDamage = value;
+            Damage = value;
+        }
+    }
+
+    [Header("Optional Tag Filtering (fallback)")]
+    public string enemyTag = "Enemy";
+    public string allyTag = "Ally";
+    public string playerTag = "Player";
+
+    [Header("Fallback Ally Damage Message")]
+    [Tooltip("Only used if AllyHealth isn't found. Example: TakeDamage, ApplyDamage, DamagePlayer.")]
+    public string allyDamageMessageName = "DamageAlly";
+
+    [Header("Headshot Detection")]
+    public string headshotTag = "HeadShot";
     public string headshotName = "HeadShot";
 
-    private float _spawnTime;
+    float _spawnTime;
 
     private void Awake()
     {
@@ -66,6 +84,10 @@ public class BulletController : MonoBehaviour
     private void OnEnable()
     {
         _spawnTime = Time.time;
+
+        // Ensure legacy Damage stays synced when prefab overrides are present
+        if (Mathf.Abs(Damage - baseDamage) > 0.0001f)
+            baseDamage = Damage;
 
         if (theRB != null)
         {
@@ -78,15 +100,25 @@ public class BulletController : MonoBehaviour
 
     private void FixedUpdate()
     {
-        // Drive forward
         if (theRB != null)
+        {
+            // Unity 6: linearVelocity exists; velocity works too.
             theRB.linearVelocity = transform.forward * moveSpeed;
+        }
         else
+        {
             transform.position += transform.forward * moveSpeed * Time.fixedDeltaTime;
+        }
 
-        // Lifetime
         if (Time.time - _spawnTime >= lifeTime)
             Destroy(gameObject);
+    }
+
+    private void OnTriggerEnter(Collider other)
+    {
+        if (other == null) return;
+        HandleHit(other, transform.position, -transform.forward);
+        Destroy(gameObject);
     }
 
     private void OnCollisionEnter(Collision collision)
@@ -95,7 +127,6 @@ public class BulletController : MonoBehaviour
 
         Collider hit = collision.collider;
 
-        // Compute a stable hit point / normal
         Vector3 point = transform.position;
         Vector3 normal = -transform.forward;
 
@@ -106,111 +137,122 @@ public class BulletController : MonoBehaviour
             normal = cp.normal;
         }
 
-        // Only handle enemy hits (damage + impact) — no blood on floor.
-        if (HitIsEnemy(hit))
-        {
-            if (damageEnemy)
-            {
-                int dmg = ComputeDamage(hit);
-                var eh = hit.GetComponentInParent<EnemyHealthController>();
-                if (eh != null) eh.DamageEnemy(dmg);
-            }
-
-            SpawnImpact(point, normal);
-        }
-
+        HandleHit(hit, point, normal);
         Destroy(gameObject);
     }
 
-    // Optional fallback if something is still configured as trigger
-    private void OnTriggerEnter(Collider other)
+    private void HandleHit(Collider hit, Vector3 point, Vector3 normal)
     {
-        if (other == null) return;
+        if (hit == null) return;
 
-        if (HitIsEnemy(other))
+        // Keep legacy Damage synced (in case some spawner sets Damage at runtime)
+        if (Mathf.Abs(Damage - baseDamage) > 0.0001f)
+            baseDamage = Damage;
+
+        // Compute damage (float + int)
+        float dmgFloat = ComputeDamageFloat(hit);
+        int dmgInt = Mathf.Max(1, Mathf.RoundToInt(dmgFloat));
+
+        // Prefer component-based detection (most reliable)
+        EnemyHealthController enemyHealth = hit.GetComponentInParent<EnemyHealthController>();
+        AllyHealth allyHealth = hit.GetComponentInParent<AllyHealth>();
+
+        bool isEnemy = enemyHealth != null || HasTagInParents(hit, enemyTag);
+        bool isAlly = allyHealth != null || HasTagInParents(hit, allyTag) || HasTagInParents(hit, playerTag);
+
+        if (isEnemy && damageEnemy)
         {
-            if (damageEnemy)
+            if (enemyHealth != null)
             {
-                int dmg = ComputeDamage(other);
-                var eh = other.GetComponentInParent<EnemyHealthController>();
-                if (eh != null) eh.DamageEnemy(dmg);
+                enemyHealth.DamageEnemy(dmgInt);
             }
-
-            Vector3 point = other.ClosestPoint(transform.position);
-            Vector3 normal = -transform.forward;
-
-            SpawnImpact(point, normal);
+            else
+            {
+                // fallback if you have some other enemy script
+                hit.SendMessageUpwards("DamageEnemy", dmgInt, SendMessageOptions.DontRequireReceiver);
+                hit.SendMessageUpwards("TakeDamage", dmgFloat, SendMessageOptions.DontRequireReceiver);
+            }
+        }
+        else if (isAlly && damageAlly)
+        {
+            if (allyHealth != null)
+            {
+                allyHealth.DamageAlly(dmgInt);
+            }
+            else if (!string.IsNullOrEmpty(allyDamageMessageName))
+            {
+                // fallback for custom ally/player health scripts
+                hit.SendMessageUpwards(allyDamageMessageName, dmgInt, SendMessageOptions.DontRequireReceiver);
+                hit.SendMessageUpwards("TakeDamage", dmgFloat, SendMessageOptions.DontRequireReceiver);
+            }
         }
 
-        Destroy(gameObject);
+        // FX (optional): spawn only when hitting a character
+        if (impactEffect != null && (isEnemy || isAlly))
+        {
+            Vector3 p = hit.ClosestPoint(transform.position);
+            SpawnImpact(p, normal);
+        }
     }
 
-    private int ComputeDamage(Collider hit)
+    private float ComputeDamageFloat(Collider hit)
     {
-        float dmg = baseDamage;
-
+        float dmg = Mathf.Max(0.01f, baseDamage);
         if (IsHeadshot(hit))
-            dmg *= headshotMultiplier;
-
-        return Mathf.Max(1, Mathf.RoundToInt(dmg));
-    }
-
-    private bool HitIsEnemy(Collider hit)
-    {
-        if (hit == null) return false;
-
-        if (hit.CompareTag("Enemy")) return true;
-
-        Transform t = hit.transform;
-        while (t != null)
-        {
-            if (t.CompareTag("Enemy")) return true;
-            t = t.parent;
-        }
-
-        return false;
+            dmg *= Mathf.Max(1f, headshotMultiplier);
+        return dmg;
     }
 
     private bool IsHeadshot(Collider hit)
     {
         if (hit == null) return false;
 
-        // Prefer tag (cleanest)
         if (!string.IsNullOrEmpty(headshotTag))
         {
             if (hit.CompareTag(headshotTag)) return true;
 
             Transform t = hit.transform;
-            while (t != null)
+            int safety = 0;
+            while (t != null && safety++ < 16)
             {
                 if (t.CompareTag(headshotTag)) return true;
                 t = t.parent;
             }
         }
 
-        // Fallback: name match (useful if you don't want to create a tag)
         if (!string.IsNullOrEmpty(headshotName))
-        {
-            if (hit.name == headshotName) return true;
-        }
+            return hit.gameObject.name == headshotName;
 
+        return false;
+    }
+
+    private bool HasTagInParents(Collider hit, string tag)
+    {
+        if (hit == null) return false;
+        if (string.IsNullOrEmpty(tag)) return false;
+
+        if (hit.CompareTag(tag)) return true;
+
+        Transform t = hit.transform;
+        int safety = 0;
+        while (t != null && safety++ < 16)
+        {
+            if (t.CompareTag(tag)) return true;
+            t = t.parent;
+        }
         return false;
     }
 
     private void SpawnImpact(Vector3 point, Vector3 normal)
     {
-        if (impactEffect == null) return;
-
         Vector3 n = normal.sqrMagnitude > 0.0001f ? normal.normalized : -transform.forward;
         float offset = Mathf.Max(0.001f, impactSurfaceOffset);
-
         Vector3 spawnPos = point + n * offset;
 
         Vector3 forward = alignToCollisionNormal ? n : (-transform.forward);
         if (forward.sqrMagnitude < 0.0001f) forward = n;
 
         Quaternion rot = Quaternion.LookRotation(forward);
-
         Instantiate(impactEffect, spawnPos, rot);
     }
 }
