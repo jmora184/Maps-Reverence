@@ -201,6 +201,21 @@ public class Enemy2Controller : MonoBehaviour
     private float _baseAgentSpeed = 0f;
     public GameObject bullet;
     public Transform firePoint;
+
+    [Header("Muzzle Flash (Simple Toggle)")]
+    [Tooltip("Assign your Muzzle Flash GameObject (mesh spheres/cubes). It can live anywhere; we'll move it to firePoint when firing.")]
+    public GameObject muzzleFlashObject;
+    [Range(0.005f, 0.2f)]
+    [Tooltip("How long the muzzle flash stays visible per shot (seconds). Typical 0.03 - 0.08")]
+    public float muzzleFlashDuration = 0.05f;
+    [Tooltip("If true, we snap the muzzle flash object to firePoint position/rotation when firing.")]
+    public bool muzzleFlashFollowFirePoint = true;
+    [Tooltip("Optional local offset from firePoint when snapping.")]
+    public Vector3 muzzleFlashLocalOffset = Vector3.zero;
+
+    [Header("Muzzle Flash Debug")]
+    public bool debugMuzzleFlash = false;
+    private Coroutine _muzzleFlashRoutine;
     public Animator anim;
 
     [Header("Death")]
@@ -1057,6 +1072,8 @@ public class Enemy2Controller : MonoBehaviour
         if (!canFire) return;
 
         Instantiate(bullet, firePoint.position, firePoint.rotation);
+        if (debugMuzzleFlash) Debug.Log($"[Enemy2Controller] Shot fired -> triggering muzzle flash on {name}", this);
+        TriggerMuzzleFlashSimple();
         if (anim != null) anim.SetTrigger("fireShot");
     }
 
@@ -1307,4 +1324,41 @@ public class Enemy2Controller : MonoBehaviour
         return false;
     }
 
+
+    private void TriggerMuzzleFlashSimple()
+    {
+        if (muzzleFlashObject == null) return;
+
+        if (muzzleFlashFollowFirePoint && firePoint != null)
+        {
+            muzzleFlashObject.transform.position = firePoint.TransformPoint(muzzleFlashLocalOffset);
+            muzzleFlashObject.transform.rotation = firePoint.rotation;
+        }
+
+        if (muzzleFlashObject.activeSelf) muzzleFlashObject.SetActive(false);
+        if (debugMuzzleFlash) Debug.Log($"[Enemy2Controller] MuzzleFlash OFF: {muzzleFlashObject.name}", muzzleFlashObject);
+
+        muzzleFlashObject.SetActive(true);
+        if (debugMuzzleFlash) Debug.Log($"[Enemy2Controller] MuzzleFlash ON: {muzzleFlashObject.name}", muzzleFlashObject);
+
+        if (_muzzleFlashRoutine != null)
+            StopCoroutine(_muzzleFlashRoutine);
+
+        _muzzleFlashRoutine = StartCoroutine(DisableMuzzleFlashAfterDelay());
+    }
+
+    private IEnumerator DisableMuzzleFlashAfterDelay()
+    {
+        yield return new WaitForSeconds(Mathf.Max(0.005f, muzzleFlashDuration));
+        if (muzzleFlashObject != null)
+            muzzleFlashObject.SetActive(false);
+        if (debugMuzzleFlash) Debug.Log($"[Enemy2Controller] MuzzleFlash OFF: {muzzleFlashObject.name}", muzzleFlashObject);
+        _muzzleFlashRoutine = null;
+    }
+
+    // Optional: call this from an Animation Event on the fire frame
+    public void AnimEvent_MuzzleFlash()
+    {
+        TriggerMuzzleFlashSimple();
+    }
 }
