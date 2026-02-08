@@ -112,19 +112,33 @@ public class Enemy2Controller : MonoBehaviour
     public bool pauseWhileShootingInRange = true;
 
     [Tooltip("Min seconds to pause and hold position while shooting.")]
-    public float pauseShootMinSeconds = 0.9f;
+    public float pauseShootMinSeconds = 0.5f;
 
     [Tooltip("Max seconds to pause and hold position while shooting.")]
-    public float pauseShootMaxSeconds = 1.3f;
+    public float pauseShootMaxSeconds = 0.8f;
 
     [Tooltip("Min seconds of movement/strafe between pause windows.")]
-    public float pauseMoveBurstMinSeconds = 0.4f;
+    public float pauseMoveBurstMinSeconds = 0.8f;
 
     [Tooltip("Max seconds of movement/strafe between pause windows.")]
-    public float pauseMoveBurstMaxSeconds = 0.8f;
+    public float pauseMoveBurstMaxSeconds = 1.4f;
 
     [Tooltip("If true, the pause system only runs when we are within the desired range band (in-range).")]
     public bool pauseOnlyWhenInRange = true;
+
+    [Header("Pause Cooldown (Optional)")]
+    [Tooltip("If enabled, the in-range pause window can only START once per cooldown period (so the enemy idles only occasionally).")]
+    public bool usePauseCooldown = true;
+
+    [Tooltip("Minimum seconds between pause windows (randomized per pause).")]
+    public float pauseCooldownMinSeconds = 8f;
+
+    [Tooltip("Maximum seconds between pause windows (randomized per pause).")]
+    public float pauseCooldownMaxSeconds = 12f;
+
+    [Tooltip("If enabled, each enemy gets a random initial cooldown offset so squads don't pause in sync.")]
+    public bool randomizeInitialPauseOffset = true;
+
     [Header("Ally-Like Combat Movement")]
     [Tooltip("If false, we behave like AllyController: outer/inner thresholds use only desiredRange +/- attackRangeBuffer (no extra slack).")]
     public bool useApproachBackoffSlack = false;
@@ -161,6 +175,7 @@ public class Enemy2Controller : MonoBehaviour
     private float _forceStrafeUntilTime = 0f;
 
 
+    private float _nextPauseAllowedTime = 0f;
     [Header("Aim / Fire Gate")]
     [Tooltip("If true, we only fire when our aim is within fireConeDegrees of the target (prevents shooting backwards).")]
     public bool useFireConeGate = true;
@@ -337,6 +352,16 @@ public class Enemy2Controller : MonoBehaviour
 
         ResolvePlayerFallback();
         ResolveTeamAnchor();
+
+        // De-sync pause cooldown across squad members so they don't all idle at once.
+        if (usePauseCooldown && randomizeInitialPauseOffset)
+        {
+            float cdMax = Mathf.Max(pauseCooldownMinSeconds, pauseCooldownMaxSeconds);
+            if (cdMax > 0f)
+            {
+                _nextPauseAllowedTime = Time.time + Random.Range(0f, cdMax);
+            }
+        }
     }
 
     private void OnDestroy()
@@ -990,13 +1015,27 @@ public class Enemy2Controller : MonoBehaviour
         // In range: optionally strafe/circle while shooting (more dynamic combat).
         if (enableCombatStrafe)
         {
-            bool allowPause = pauseWhileShootingInRange && (Time.time >= _forceStrafeUntilTime);
+            bool pauseEpisodeActive = (_combatPauseTimer > 0f) || (_combatMoveBurstTimer > 0f);
+            float _cooldownMax = Mathf.Max(pauseCooldownMinSeconds, pauseCooldownMaxSeconds);
+            bool cooldownReady = (!usePauseCooldown) || (_cooldownMax <= 0f) || (Time.time >= _nextPauseAllowedTime);
+            bool allowPause = pauseWhileShootingInRange && (Time.time >= _forceStrafeUntilTime) && (pauseEpisodeActive || cooldownReady);
 
             if (allowPause)
             {
-                // Initialize pause timer on first entry.
+                // Initialize pause timer on first entry (and start cooldown gate).
                 if (_combatPauseTimer <= 0f && _combatMoveBurstTimer <= 0f)
+                {
                     _combatPauseTimer = Random.Range(Mathf.Max(0f, pauseShootMinSeconds), Mathf.Max(pauseShootMinSeconds, pauseShootMaxSeconds));
+                    if (usePauseCooldown)
+                    {
+                        float cdMax = Mathf.Max(pauseCooldownMinSeconds, pauseCooldownMaxSeconds);
+                        if (cdMax > 0f)
+                        {
+                            float cdMin = Mathf.Max(0f, Mathf.Min(pauseCooldownMinSeconds, pauseCooldownMaxSeconds));
+                            _nextPauseAllowedTime = Time.time + Random.Range(cdMin, cdMax);
+                        }
+                    }
+                }
 
                 // 1) Stand still and shoot for a short duration
                 if (_combatPauseTimer > 0f)
@@ -1036,44 +1075,60 @@ public class Enemy2Controller : MonoBehaviour
 
                     Vector3 forwardToTarget = toTarget.normalized;
 
-                    // Tangential (left/right) component around the target
+                    // Pick a point on a ring around the target (same idea as the continuous strafe),
+                    // but during burst windows. This avoids "forward/back only" bursts when NavMesh sampling
+                    // snaps near the radial line.
                     Quaternion rot = Quaternion.AngleAxis((_strafeSide * 90f) + _strafeAngleOffset, Vector3.up);
-                    Vector3 tangent = rot * forwardToTarget;
 
-                    // Radial (toward/away) component
-                    float radialSign = Random.Range(-1f, 1f); // negative = away, positive = toward
-                    Vector3 moveDir =
-                        (tangent * Mathf.Max(0f, combatBurstTangentialWeight)) +
-                        (forwardToTarget * radialSign * Mathf.Max(0f, combatBurstRadialWeight));
+                    // Use the direction from the TARGET to US, then rotate it to get a circle point.
+                    Vector3 fromTarget = (transform.position - aimPoint);
+                    fromTarget.y = 0f;
+                    if (fromTarget.sqrMagnitude < 0.001f)
+                        fromTarget = -(forwardToTarget); // fallback
+                    fromTarget.Normalize();
 
-                    if (moveDir.sqrMagnitude < 0.0001f)
-                        moveDir = tangent;
+                    // Tangential direction around the target.
+                    Vector3 ringDir = (rot * fromTarget).normalized;
 
-                    moveDir.Normalize();
+                    // Choose radius: keep within the band if available, else use desired range.
+                    float radius = range;
+                    if (useBand)
+                    {
+                        Vector3 curFlat = (transform.position - aimPoint);
+                        curFlat.y = 0f;
+                        float cur = curFlat.magnitude;
+                        radius = Mathf.Clamp(cur, bandMin, bandMax);
+                    }
+                    else
+                    {
+                        radius = Mathf.Max(0.5f, range);
+                    }
 
-                    float step = Mathf.Max(0.25f, combatBurstMoveDistance);
-                    Vector3 desired = transform.position + moveDir * step;
+                    // Optional small radial variation (keeps motion lively but still mostly sideways).
+                    float radialJitter = Random.Range(-1f, 1f) * Mathf.Max(0f, attackRangeBuffer) * 0.25f;
+                    radius = Mathf.Max(0.5f, radius + radialJitter);
 
-                    if (NavMesh.SamplePosition(desired, out NavMeshHit hit, strafeSampleRadius, NavMesh.AllAreas))
+                    Vector3 desired = aimPoint + ringDir * radius;
+
+                    // Sample onto NavMesh near that ring point.
+                    if (NavMesh.SamplePosition(desired, out NavMeshHit hit, Mathf.Max(0.25f, strafeSampleRadius), NavMesh.AllAreas))
                         desired = hit.position;
 
                     if (useBand)
-                        desired = ClampToCombatRangeBandOnNavMesh(desired, aimPoint, bandMin, bandMax, strafeSampleRadius);
+                        desired = ClampToCombatRangeBandOnNavMesh(desired, aimPoint, bandMin, bandMax, Mathf.Max(0.25f, strafeSampleRadius));
 
-                    SetDestinationSafe(desired, range);
+                    SetDestinationSafe(desired, radius);
                     _strafeRepathTimer = Mathf.Max(0.05f, strafeRepathInterval);
                 }
 
                 SetMovingAnim(true);
                 HandleShooting(target);
 
-                // End burst → start a new pause cycle
+                // End burst → return to normal combat movement. Cooldown (if enabled) prevents immediate re-pause.
                 if (_combatMoveBurstTimer <= 0f)
                 {
                     _combatMoveBurstTimer = 0f;
-                    _combatPauseTimer = Random.Range(Mathf.Max(0f, pauseShootMinSeconds), Mathf.Max(pauseShootMinSeconds, pauseShootMaxSeconds));
-                    StopAgent();
-                    SetMovingAnim(false);
+                    _combatPauseTimer = 0f;
                 }
 
                 return;
