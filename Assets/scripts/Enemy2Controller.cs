@@ -1,4 +1,4 @@
-using System.Collections;
+﻿using System.Collections;
 using UnityEngine;
 using UnityEngine.AI;
 
@@ -125,6 +125,40 @@ public class Enemy2Controller : MonoBehaviour
 
     [Tooltip("If true, the pause system only runs when we are within the desired range band (in-range).")]
     public bool pauseOnlyWhenInRange = true;
+    [Header("Ally-Like Combat Movement")]
+    [Tooltip("If false, we behave like AllyController: outer/inner thresholds use only desiredRange +/- attackRangeBuffer (no extra slack).")]
+    public bool useApproachBackoffSlack = false;
+
+    [Tooltip("Max per-enemy sideways offset when approaching to reduce stacking (scaled by range).")]
+    public float approachSpreadScale = 0.15f;
+
+    [Tooltip("Min/Max approach spread (world units).")]
+    public float approachSpreadMin = 1f;
+    public float approachSpreadMax = 6f;
+
+    [Header("Combat Burst Strafing (Ally Style)")]
+    [Tooltip("When using pauseWhileShootingInRange, movement bursts use a diagonal blend of tangential + radial motion.")]
+    public float combatBurstMoveDistance = 6f;
+    [Tooltip("Weight of the radial (toward/away) component during burst movement.")]
+    public float combatBurstRadialWeight = 0.65f;
+    [Tooltip("Weight of the tangential (left/right) component during burst movement.")]
+    public float combatBurstTangentialWeight = 1f;
+
+    [Header("Combat Engagement Pause (Ally Style)")]
+    [Tooltip("After receiving a combat target via orders/damage, temporarily disable the in-range pause so the enemy keeps repositioning.")]
+    public float forceStrafeAfterAggroSeconds = 6f;
+
+    [Header("Animator Params (Optional)")]
+    [Tooltip("If your animator uses AllyController params, set runBoolParam to 'isRunning' and speedFloatParam to 'Speed'.")]
+    public string runBoolParam = "isRunning";
+    [Tooltip("Legacy bool param some enemy animators use.")]
+    public string legacyMoveBoolParam = "isMoving";
+    public string speedFloatParam = "Speed";
+
+    // Ally-style pause timers (separate from legacy TickPauseCycle).
+    private float _combatPauseTimer = 0f;
+    private float _combatMoveBurstTimer = 0f;
+    private float _forceStrafeUntilTime = 0f;
 
 
     [Header("Aim / Fire Gate")]
@@ -327,6 +361,13 @@ public class Enemy2Controller : MonoBehaviour
         _pauseShootTimer = 0f;
         _pauseMoveBurstTimer = 0f;
 
+        // Ally-style pause cycle (used by ChaseAndFightLikeAlly).
+        _combatPauseTimer = 0f;
+        _combatMoveBurstTimer = 0f;
+
+        // When we newly aggro (damage/orders), stay active for a bit (don't immediately enter stand-still pause).
+        _forceStrafeUntilTime = Time.time + Mathf.Max(0f, forceStrafeAfterAggroSeconds);
+
     }
 
     private bool IsWithinAggroRange(Transform t, float maxDistance)
@@ -491,10 +532,7 @@ public class Enemy2Controller : MonoBehaviour
 
         ResolveTeamAnchor();
 
-        // Passive aggro: if we do NOT already have a combat target, look for nearby allies.
-        // Right now this script only auto-acquires based on distance to the CURRENT target,
-        // which is usually the player (see original logic). That is why allies passing by are ignored.
-        // This scan fixes that.
+        // Passive aggro scan (optional): if we do NOT already have a combat target, look for nearby allies.
         if (_combatTarget == null)
         {
             _allyScanTimer -= Time.deltaTime;
@@ -504,16 +542,8 @@ public class Enemy2Controller : MonoBehaviour
 
                 Transform nearbyAlly = FindNearestAggroAlly();
                 if (nearbyAlly != null)
-                {
                     SetCombatTarget(nearbyAlly);
-                }
             }
-        }
-
-        // If our combat target got destroyed, fall back to player.
-        if (_combatTarget == null)
-        {
-            // nothing to do here, we'll fall back below
         }
 
         Transform target = _combatTarget != null ? _combatTarget : _playerFallback;
@@ -525,12 +555,11 @@ public class Enemy2Controller : MonoBehaviour
             return;
         }
 
-
         if (target == null)
         {
-            // No target exists yet -> park safely.
             StopAgent();
             SetMovingAnim(false);
+            UpdateSpeedParam();
             return;
         }
 
@@ -540,8 +569,6 @@ public class Enemy2Controller : MonoBehaviour
         float dist = Vector3.Distance(transform.position, targetPoint);
 
         // Acquire chase if close enough (only when we don't have an aggro target).
-        // NOTE: In the original code, this only checked distance to the PLAYER fallback,
-        // so allies passing by would never trigger. (target == _playerFallback in that case)
         if (_combatTarget == null && !chasing)
         {
             if (dist <= distanceToChase)
@@ -576,6 +603,7 @@ public class Enemy2Controller : MonoBehaviour
 
                     StopAgent();
                     SetMovingAnim(false);
+                    UpdateSpeedParam();
                     return;
                 }
             }
@@ -589,148 +617,15 @@ public class Enemy2Controller : MonoBehaviour
         {
             StopAgent();
             SetMovingAnim(false);
+            UpdateSpeedParam();
             return;
         }
 
-        // Face target (flat)
-        Vector3 flatDir = targetPoint - transform.position;
-        flatDir.y = 0f;
-        if (flatDir.sqrMagnitude > 0.0001f)
-        {
-            Quaternion look = Quaternion.LookRotation(flatDir.normalized, Vector3.up);
-            transform.rotation = Quaternion.Slerp(transform.rotation, look, Time.deltaTime * faceTargetTurnSpeed);
-        }
+        // Ally-like combat movement + shooting.
+        ChaseAndFightLikeAlly(target);
 
-        // Update desired range periodically (if enabled). We treat Min/Max as the "hard" in-range band,
-        // and the current desired range as a soft preference within that band.
-        bool inCombatNow = chasing;
-        UpdateDesiredRangeTick(inCombatNow);
-
-        float range = GetDesiredRange(); float inner = Mathf.Max(0.1f, range - attackRangeBuffer - Mathf.Max(0f, backoffSlack));
-        float outer = range + attackRangeBuffer + Mathf.Max(0f, approachSlack);
-
-        _repathTimer -= Time.deltaTime;
-        bool canRepath = _repathTimer <= 0f;
-
-        if (dist > outer)
-        {
-            TickPauseCycle(inRange: false);
-
-            if (canRepath)
-            {
-                // Approach to the ring around target (not its exact center).
-                Vector3 toward = (targetPoint - transform.position);
-                toward.y = 0f;
-
-                if (toward.sqrMagnitude < 0.0001f)
-                    toward = transform.forward;
-
-                Vector3 ringPoint = targetPoint - toward.normalized * range;
-
-                SetDestinationSafe(ringPoint, range);
-                _repathTimer = combatRepathInterval;
-            }
-
-            SetMovingAnim(true);
-
-            // Optionally keep shooting while repositioning (feels more like a gunfight).
-            if (allowShootingWhileMoving && dist <= (outer + Mathf.Max(0f, shootWhileMovingExtraDistance)))
-                HandleShooting(target);
-        }
-        else if (dist < inner)
-        {
-            TickPauseCycle(inRange: false);
-
-            if (canRepath)
-            {
-                // Too close: back off a bit.
-                Vector3 away = (transform.position - targetPoint);
-                away.y = 0f;
-
-                if (away.sqrMagnitude < 0.0001f)
-                    away = -transform.forward;
-
-                float push = (range - dist) + 0.5f;
-
-                if (maxBackoffStep > 0.01f)
-                    push = Mathf.Clamp(push, 1f, maxBackoffStep);
-                else
-                    push = Mathf.Max(1f, push);
-
-                Vector3 desired = transform.position + away.normalized * push;
-
-                if (NavMesh.SamplePosition(desired, out NavMeshHit hit, backoffSampleRadius, NavMesh.AllAreas))
-                    desired = hit.position;
-
-                SetDestinationSafe(desired, range);
-                _repathTimer = combatRepathInterval;
-            }
-
-            SetMovingAnim(true);
-
-            // Optionally keep shooting while repositioning (feels more like a gunfight).
-            if (allowShootingWhileMoving && dist <= (outer + Mathf.Max(0f, shootWhileMovingExtraDistance)))
-                HandleShooting(target);
-        }
-        else
-        {
-
-            // Pause/move-burst cycle while in-range (optional).
-            TickPauseCycle(inRange: true);
-
-            if (IsInShootPause())
-            {
-                // Hold position and shoot for a short duration.
-                StopAgent();
-                SetMovingAnim(false);
-                HandleShooting(target);
-                return;
-            }
-            // In range: optionally strafe/circle while shooting (more dynamic combat).
-            if (enableCombatStrafe)
-            {
-                _strafeRepathTimer -= Time.deltaTime;
-                _strafeChangeTimer -= Time.deltaTime;
-
-                if (_strafeChangeTimer <= 0f)
-                {
-                    if (Random.value < 0.35f) _strafeSide *= -1;
-                    _strafeAngleOffset = Random.Range(-strafeAngleJitter, strafeAngleJitter);
-                    _strafeChangeTimer = Mathf.Max(0.1f, strafeChangeInterval);
-                }
-
-                if (agent != null && (!agent.hasPath || agent.remainingDistance <= agent.stoppingDistance + 0.05f))
-                    _strafeRepathTimer = 0f;
-
-                if (_strafeRepathTimer <= 0f)
-                {
-                    Vector3 fromTarget = (transform.position - targetPoint);
-                    fromTarget.y = 0f;
-                    if (fromTarget.sqrMagnitude < 0.001f)
-                        fromTarget = transform.forward;
-
-                    Quaternion rot = Quaternion.AngleAxis((_strafeSide * 90f) + _strafeAngleOffset, Vector3.up);
-                    Vector3 strafeDir = rot * fromTarget.normalized;
-
-                    Vector3 desired = targetPoint + strafeDir.normalized * range;
-                    if (NavMesh.SamplePosition(desired, out NavMeshHit hit, strafeSampleRadius, NavMesh.AllAreas))
-                        desired = hit.position;
-
-                    SetDestinationSafe(desired, range);
-                    _strafeRepathTimer = Mathf.Max(0.05f, strafeRepathInterval);
-                }
-
-                SetMovingAnim(true);
-                HandleShooting(target);
-            }
-            else
-            {
-                // In range: stop and shoot.
-                StopAgent();
-                SetMovingAnim(false);
-                HandleShooting(target);
-            }
-        }
+        // Animator speed float (optional).
+        UpdateSpeedParam();
     }
 
 
@@ -983,6 +878,311 @@ public class Enemy2Controller : MonoBehaviour
         return pauseWhileShootingInRange && _pauseShootTimer > 0f;
     }
 
+
+    private void ChaseAndFightLikeAlly(Transform target)
+    {
+        if (agent == null || !agent.isActiveAndEnabled || target == null) return;
+
+        Vector3 aimPoint = GetAimPosition(target);
+
+        // Face target (flat) while fighting.
+        Vector3 flatDir = aimPoint - transform.position;
+        flatDir.y = 0f;
+        if (flatDir.sqrMagnitude > 0.0001f)
+        {
+            Quaternion look = Quaternion.LookRotation(flatDir.normalized, Vector3.up);
+            transform.rotation = Quaternion.Slerp(transform.rotation, look, Time.deltaTime * faceTargetTurnSpeed);
+        }
+
+        // Range band support (same concept as AllyController).
+        bool useBand = TryGetCombatRangeBand(out float bandMin, out float bandMax);
+
+        // Update desired range periodically (if enabled).
+        UpdateDesiredRangeTick(inCombat: true);
+
+        float range = GetDesiredRange();
+        if (useBand) range = Mathf.Clamp(range, bandMin, bandMax);
+
+        float dist = Vector3.Distance(transform.position, aimPoint);
+
+        // Ally-like thresholds: just +/- buffer (optionally include slack if enabled).
+        float inner = range - attackRangeBuffer;
+        float outer = range + attackRangeBuffer;
+
+        if (useApproachBackoffSlack)
+        {
+            inner = (range - attackRangeBuffer) - Mathf.Max(0f, backoffSlack);
+            outer = (range + attackRangeBuffer) + Mathf.Max(0f, approachSlack);
+        }
+
+        // Too far: move in toward a ring around the target (not the exact center).
+        if ((useBand && !enableDynamicDesiredAttackRange) ? (dist > bandMax + attackRangeBuffer) : (dist > outer))
+        {
+            // Out of ideal range: reset Ally-style pause cycle so we can immediately reposition.
+            _combatPauseTimer = 0f;
+            _combatMoveBurstTimer = 0f;
+
+            Vector3 toward = (aimPoint - transform.position);
+            toward.y = 0f;
+            if (toward.sqrMagnitude < 0.001f) toward = transform.forward;
+
+            float approachRange = (useBand && !enableDynamicDesiredAttackRange) ? bandMax : range;
+
+            Vector3 ringPoint = aimPoint - toward.normalized * approachRange;
+
+            // Per-enemy spread to reduce stacking (matches AllyController feel).
+            Vector3 right = Vector3.Cross(Vector3.up, toward.normalized);
+            float spread = Mathf.Clamp(approachRange * Mathf.Max(0f, approachSpreadScale), approachSpreadMin, approachSpreadMax);
+            float seed = (GetInstanceID() * 0.1234f);
+            float side = Mathf.Sin(seed) * spread;
+            ringPoint += right * side;
+
+            if (useBand)
+                ringPoint = ClampToCombatRangeBandOnNavMesh(ringPoint, aimPoint, bandMin, bandMax, strafeSampleRadius);
+
+            SetDestinationSafe(ringPoint, approachRange);
+            SetMovingAnim(true);
+
+            // Optionally keep shooting while repositioning.
+            if (allowShootingWhileMoving && dist <= (outer + Mathf.Max(0f, shootWhileMovingExtraDistance)))
+                HandleShooting(target);
+
+            return;
+        }
+
+        // Too close: back off a bit.
+        if ((useBand && !enableDynamicDesiredAttackRange) ? (dist < bandMin - attackRangeBuffer) : (dist < inner))
+        {
+            _combatPauseTimer = 0f;
+            _combatMoveBurstTimer = 0f;
+
+            Vector3 away = (transform.position - aimPoint);
+            away.y = 0f;
+            away = away.sqrMagnitude < 0.001f ? transform.forward : away.normalized;
+
+            float backoffBase = (useBand && !enableDynamicDesiredAttackRange) ? bandMin : range;
+
+            float push = (backoffBase - dist) + 0.5f;
+
+            if (maxBackoffStep > 0.01f)
+                push = Mathf.Clamp(push, 1f, maxBackoffStep);
+            else
+                push = Mathf.Max(1f, push);
+
+            Vector3 desired = transform.position + away * push;
+
+            if (NavMesh.SamplePosition(desired, out NavMeshHit hit, backoffSampleRadius, NavMesh.AllAreas))
+                desired = hit.position;
+
+            if (useBand)
+                desired = ClampToCombatRangeBandOnNavMesh(desired, aimPoint, bandMin, bandMax, backoffSampleRadius);
+
+            SetDestinationSafe(desired, backoffBase);
+            SetMovingAnim(true);
+
+            // Optionally keep shooting while repositioning.
+            if (allowShootingWhileMoving && dist <= (outer + Mathf.Max(0f, shootWhileMovingExtraDistance)))
+                HandleShooting(target);
+
+            return;
+        }
+
+        // In range: optionally strafe/circle while shooting (more dynamic combat).
+        if (enableCombatStrafe)
+        {
+            bool allowPause = pauseWhileShootingInRange && (Time.time >= _forceStrafeUntilTime);
+
+            if (allowPause)
+            {
+                // Initialize pause timer on first entry.
+                if (_combatPauseTimer <= 0f && _combatMoveBurstTimer <= 0f)
+                    _combatPauseTimer = Random.Range(Mathf.Max(0f, pauseShootMinSeconds), Mathf.Max(pauseShootMinSeconds, pauseShootMaxSeconds));
+
+                // 1) Stand still and shoot for a short duration
+                if (_combatPauseTimer > 0f)
+                {
+                    _combatPauseTimer -= Time.deltaTime;
+                    StopAgent();
+                    SetMovingAnim(false);
+                    HandleShooting(target);
+                    return;
+                }
+
+                // 2) Movement burst window
+                if (_combatMoveBurstTimer <= 0f)
+                {
+                    _combatMoveBurstTimer = Random.Range(Mathf.Max(0.05f, pauseMoveBurstMinSeconds), Mathf.Max(pauseMoveBurstMinSeconds, pauseMoveBurstMaxSeconds));
+                    _strafeRepathTimer = 0f; // force a new strafe point immediately
+                }
+
+                _combatMoveBurstTimer -= Time.deltaTime;
+
+                _strafeRepathTimer -= Time.deltaTime;
+                _strafeChangeTimer -= Time.deltaTime;
+
+                if (_strafeChangeTimer <= 0f)
+                {
+                    if (Random.value < 0.35f) _strafeSide *= -1;
+                    _strafeAngleOffset = Random.Range(-strafeAngleJitter, strafeAngleJitter);
+                    _strafeChangeTimer = Mathf.Max(0.1f, strafeChangeInterval);
+                }
+
+                if (_strafeRepathTimer <= 0f)
+                {
+                    Vector3 toTarget = (aimPoint - transform.position);
+                    toTarget.y = 0f;
+                    if (toTarget.sqrMagnitude < 0.001f)
+                        toTarget = transform.forward;
+
+                    Vector3 forwardToTarget = toTarget.normalized;
+
+                    // Tangential (left/right) component around the target
+                    Quaternion rot = Quaternion.AngleAxis((_strafeSide * 90f) + _strafeAngleOffset, Vector3.up);
+                    Vector3 tangent = rot * forwardToTarget;
+
+                    // Radial (toward/away) component
+                    float radialSign = Random.Range(-1f, 1f); // negative = away, positive = toward
+                    Vector3 moveDir =
+                        (tangent * Mathf.Max(0f, combatBurstTangentialWeight)) +
+                        (forwardToTarget * radialSign * Mathf.Max(0f, combatBurstRadialWeight));
+
+                    if (moveDir.sqrMagnitude < 0.0001f)
+                        moveDir = tangent;
+
+                    moveDir.Normalize();
+
+                    float step = Mathf.Max(0.25f, combatBurstMoveDistance);
+                    Vector3 desired = transform.position + moveDir * step;
+
+                    if (NavMesh.SamplePosition(desired, out NavMeshHit hit, strafeSampleRadius, NavMesh.AllAreas))
+                        desired = hit.position;
+
+                    if (useBand)
+                        desired = ClampToCombatRangeBandOnNavMesh(desired, aimPoint, bandMin, bandMax, strafeSampleRadius);
+
+                    SetDestinationSafe(desired, range);
+                    _strafeRepathTimer = Mathf.Max(0.05f, strafeRepathInterval);
+                }
+
+                SetMovingAnim(true);
+                HandleShooting(target);
+
+                // End burst → start a new pause cycle
+                if (_combatMoveBurstTimer <= 0f)
+                {
+                    _combatMoveBurstTimer = 0f;
+                    _combatPauseTimer = Random.Range(Mathf.Max(0f, pauseShootMinSeconds), Mathf.Max(pauseShootMinSeconds, pauseShootMaxSeconds));
+                    StopAgent();
+                    SetMovingAnim(false);
+                }
+
+                return;
+            }
+
+            // Continuous strafe (no pause): circle around the target at the preferred range.
+            _strafeRepathTimer -= Time.deltaTime;
+            _strafeChangeTimer -= Time.deltaTime;
+
+            if (_strafeChangeTimer <= 0f)
+            {
+                if (Random.value < 0.35f) _strafeSide *= -1;
+                _strafeAngleOffset = Random.Range(-strafeAngleJitter, strafeAngleJitter);
+                _strafeChangeTimer = Mathf.Max(0.1f, strafeChangeInterval);
+            }
+
+            if (agent != null && (!agent.hasPath || agent.remainingDistance <= agent.stoppingDistance + 0.05f))
+                _strafeRepathTimer = 0f;
+
+            if (_strafeRepathTimer <= 0f)
+            {
+                Vector3 fromTarget = (transform.position - aimPoint);
+                fromTarget.y = 0f;
+                if (fromTarget.sqrMagnitude < 0.001f)
+                    fromTarget = transform.forward;
+
+                Quaternion rot = Quaternion.AngleAxis((_strafeSide * 90f) + _strafeAngleOffset, Vector3.up);
+                Vector3 strafeDir = rot * fromTarget.normalized;
+
+                float strafeRingRadius = useBand ? Mathf.Clamp(range, bandMin, bandMax) : range;
+
+                Vector3 desired = aimPoint + strafeDir.normalized * strafeRingRadius;
+                if (NavMesh.SamplePosition(desired, out NavMeshHit hit, strafeSampleRadius, NavMesh.AllAreas))
+                    desired = hit.position;
+
+                if (useBand)
+                    desired = ClampToCombatRangeBandOnNavMesh(desired, aimPoint, bandMin, bandMax, strafeSampleRadius);
+
+                SetDestinationSafe(desired, range);
+                _strafeRepathTimer = Mathf.Max(0.05f, strafeRepathInterval);
+            }
+
+            SetMovingAnim(true);
+            HandleShooting(target);
+            return;
+        }
+
+        // No strafe: hold position and shoot.
+        StopAgent();
+        SetMovingAnim(false);
+        HandleShooting(target);
+    }
+
+    private bool TryGetCombatRangeBand(out float minRange, out float maxRange)
+    {
+        minRange = Mathf.Max(0.5f, desiredAttackRangeMin);
+        maxRange = Mathf.Max(minRange, desiredAttackRangeMax);
+
+        if (!enableDesiredAttackRangeBand) return false;
+        if (maxRange <= minRange + 0.01f) return false;
+
+        return true;
+    }
+
+    private Vector3 ClampToCombatRangeBandOnNavMesh(Vector3 desired, Vector3 targetPoint, float minRange, float maxRange, float sampleRadius)
+    {
+        // Adjust 'desired' so its horizontal distance to targetPoint stays within [minRange, maxRange],
+        // then sample onto the NavMesh to avoid unreachable points.
+        Vector3 flat = desired - targetPoint;
+        flat.y = 0f;
+
+        if (flat.sqrMagnitude < 0.0001f)
+        {
+            flat = (transform.position - targetPoint);
+            flat.y = 0f;
+            if (flat.sqrMagnitude < 0.0001f)
+                flat = transform.forward;
+        }
+
+        float mag = flat.magnitude;
+        float clamped = Mathf.Clamp(mag, minRange, maxRange);
+
+        Vector3 adjusted = targetPoint + flat.normalized * clamped;
+        adjusted.y = desired.y;
+
+        if (NavMesh.SamplePosition(adjusted, out NavMeshHit hit, Mathf.Max(0.25f, sampleRadius), NavMesh.AllAreas))
+            adjusted = hit.position;
+
+        return adjusted;
+    }
+
+    private void UpdateSpeedParam()
+    {
+        if (anim == null) return;
+        if (agent == null) return;
+
+        // If the animator has a Speed float (like AllyController), drive it from agent velocity.
+        float speed = agent.velocity.magnitude;
+
+        var ps = anim.parameters;
+        for (int i = 0; i < ps.Length; i++)
+        {
+            if (ps[i].type == AnimatorControllerParameterType.Float && ps[i].name == speedFloatParam)
+            {
+                anim.SetFloat(speedFloatParam, speed);
+                return;
+            }
+        }
+    }
     void HandleShooting(Transform target)
     {
         if (_isDead) return;
@@ -1102,9 +1302,10 @@ public class Enemy2Controller : MonoBehaviour
                 return;
         }
 
-        // Ensure stopping distance is not zero.
-        // NOTE: we still manage standoff ourselves; this is just for nicer braking.
-        agent.stoppingDistance = Mathf.Clamp(range * 0.05f, 0.1f, 1.5f);
+        // We manage standoff ourselves; keep stoppingDistance small so the agent can still travel to strafe points.
+        float combatStop = Mathf.Clamp(Mathf.Max(0.5f, range) * 0.25f, 0.1f, 1.25f);
+        if (!Mathf.Approximately(agent.stoppingDistance, combatStop))
+            agent.stoppingDistance = combatStop;
 
         agent.SetDestination(pos);
     }
@@ -1112,8 +1313,27 @@ public class Enemy2Controller : MonoBehaviour
     private void SetMovingAnim(bool moving)
     {
         if (anim == null) return;
-        // Your animator param is "isMoving" (per screenshot).
-        anim.SetBool("isMoving", moving);
+
+        // Prefer AllyController-style bool param if present.
+        var ps = anim.parameters;
+        for (int i = 0; i < ps.Length; i++)
+        {
+            if (ps[i].type == AnimatorControllerParameterType.Bool && ps[i].name == runBoolParam)
+            {
+                anim.SetBool(runBoolParam, moving);
+                return;
+            }
+        }
+
+        // Fallback: legacy enemy param.
+        for (int i = 0; i < ps.Length; i++)
+        {
+            if (ps[i].type == AnimatorControllerParameterType.Bool && ps[i].name == legacyMoveBoolParam)
+            {
+                anim.SetBool(legacyMoveBoolParam, moving);
+                return;
+            }
+        }
     }
 
 
