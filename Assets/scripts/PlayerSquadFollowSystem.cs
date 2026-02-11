@@ -994,7 +994,19 @@ public class PlayerSquadFollowSystem : MonoBehaviour
 
             var ally = f.GetComponent<AllyController>();
             if (ally != null)
+            {
+                // If the ally is currently executing a manual move/command (e.g., just told the team to move),
+                // do NOT overwrite their travel with a follow-slot target. This is what caused "new team move"
+                // to be ignored: the follower kept chasing the leader/slot instead of the newly commanded destination.
+                if (ally.HasManualHoldPoint)
+                {
+                    // If we were already targeting our slot, clear it so AllyController can follow the manual hold.
+                    if (ally.target == slot) ally.target = null;
+                    continue;
+                }
+
                 ally.target = slot;
+            }
         }
     }
 

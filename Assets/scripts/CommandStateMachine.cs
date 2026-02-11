@@ -180,6 +180,59 @@ public class CommandStateMachine : MonoBehaviour
         OnSelectionChanged?.Invoke(selection);
     }
 
+    /// <summary>
+    /// Used by UI code (CommandOverlayUI) to apply a selection while respecting the same blocking rules as SelectUnit().
+    /// Key behavior: multi-unit (team) selections are allowed even if members are "busy moving" or "join in-route",
+    /// so you can immediately redirect a newly-created team without needing to exit/re-enter command mode.
+    /// </summary>
+    public bool TrySetSelectionFromUI(List<GameObject> newSelection)
+    {
+        return TrySetSelectionFromUI(newSelection, allowBusyIfMulti: true);
+    }
+
+    /// <summary>
+    /// Apply selection coming from UI. If allowBusyIfMulti is true, team selections (count>1) bypass busy/join blockers.
+    /// </summary>
+    public bool TrySetSelectionFromUI(List<GameObject> newSelection, bool allowBusyIfMulti)
+    {
+        if (newSelection == null || newSelection.Count == 0) return false;
+
+        bool isMulti = newSelection.Count > 1;
+
+        // Validate each unit against the same selection blockers used elsewhere.
+        for (int i = 0; i < newSelection.Count; i++)
+        {
+            var unit = newSelection[i];
+            if (unit == null) continue;
+
+            // For team selections, allow immediate redirect even if the team is still forming / moving.
+            if (allowBusyIfMulti && isMulti)
+                continue;
+
+            // Block selecting ally if it's in-route to join
+            if (blockJoinLeaderWhileInRoute && unit.CompareTag("Ally"))
+            {
+                var marker = unit.GetComponent<JoinRouteMarker>();
+                if (marker != null && marker.inRoute)
+                {
+                    TryShowHint(joinInRouteMessage, joinInRouteDuration);
+                    return false;
+                }
+            }
+
+            // Block selecting ally if it's currently executing a MOVE order
+            if (blockMoveOrderedUnitsWhileBusy && IsUnitBusyMoving(unit))
+            {
+                TryShowHint(moveOrderBusyMessage, moveOrderBusyDuration);
+                return false;
+            }
+        }
+
+        SetSelection(newSelection);
+        return true;
+    }
+
+
     private void Update()
     {
         if (!IsCommandModeActive())
@@ -350,6 +403,13 @@ public class CommandStateMachine : MonoBehaviour
         if (unit == null) return false;
         if (!unit.CompareTag("Ally")) return false;
 
+
+        // ✅ Patrolling units should remain selectable even though they are moving.
+        var patrol = unit.GetComponent<AllyPatrolPingPong>();
+        if (patrol == null) patrol = unit.GetComponentInChildren<AllyPatrolPingPong>();
+        if (patrol != null && patrol.patrolEnabledOnStart)
+            return false;
+
         var agent = unit.GetComponent<NavMeshAgent>();
         if (agent == null) agent = unit.GetComponentInChildren<NavMeshAgent>();
         if (agent == null || !agent.isActiveAndEnabled) return false;
@@ -413,8 +473,10 @@ public class CommandStateMachine : MonoBehaviour
     {
         if (clickedUnit == null) return;
 
+        bool joinTargeting = (CurrentState == State.AddTargeting && JoinArmed);
+
         // ✅ Block selecting ally if it's in-route to join (ICON clicks too)
-        if (blockJoinLeaderWhileInRoute && clickedUnit.CompareTag("Ally"))
+        if (!joinTargeting && blockJoinLeaderWhileInRoute && clickedUnit.CompareTag("Ally"))
         {
             var marker = clickedUnit.GetComponent<JoinRouteMarker>();
             if (marker != null && marker.inRoute)
@@ -425,7 +487,7 @@ public class CommandStateMachine : MonoBehaviour
         }
 
         // ✅ Block selecting ally if it's currently executing a MOVE order (ICON clicks too)
-        if (blockMoveOrderedUnitsWhileBusy && IsUnitBusyMoving(clickedUnit))
+        if (!joinTargeting && blockMoveOrderedUnitsWhileBusy && IsUnitBusyMoving(clickedUnit))
         {
             TryShowHint(moveOrderBusyMessage, moveOrderBusyDuration);
             return;

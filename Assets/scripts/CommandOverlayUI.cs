@@ -1634,7 +1634,11 @@ public class CommandOverlayUI : MonoBehaviour
         }
 
         // Otherwise: select the whole team.
-        sm.SetSelection(BuildTeamSelection(team));
+        if (!sm.TrySetSelectionFromUI(BuildTeamSelection(team)))
+        {
+            // CommandStateMachine already showed the appropriate hint.
+            return;
+        }
 
         // IMPORTANT: Do NOT override the panel anchor to a member Transform.
         // The panel will anchor under the star UI in UpdateCommandButtonPanel.
@@ -1690,7 +1694,11 @@ public class CommandOverlayUI : MonoBehaviour
 
                 if (selectTeamWhenClickTeamedMember)
                 {
-                    sm.SetSelection(BuildTeamSelection(team));
+                    if (!sm.TrySetSelectionFromUI(BuildTeamSelection(team)))
+                    {
+                        // CommandStateMachine already showed the appropriate hint.
+                        return;
+                    }
 
                     // IMPORTANT: Do NOT override the panel anchor to a member Transform.
                     // The panel will anchor under the star UI in UpdateCommandButtonPanel.

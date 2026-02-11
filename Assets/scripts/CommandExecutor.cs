@@ -187,6 +187,8 @@ public class CommandExecutor : MonoBehaviour
         // ✅ Team expansion (team members move together)
         List<GameObject> expanded = ExpandSelectionForTeams(selection, true);
 
+        CancelJoinMoveIfLeaderInSelection(expanded, "move");
+
         // Any new command breaks TEAM hold-ground.
         // Cancel any ongoing team-follow formation routine (move order overrides follow).
         StopFollowFormationRoutine();
@@ -241,6 +243,10 @@ public class CommandExecutor : MonoBehaviour
                 var ally = a.GetComponent<AllyController>();
                 if (ally != null)
                     ally.SetManualHoldPoint(destination);
+
+                // Patrol must stop as soon as an explicit order is issued.
+                DisablePatrolIfPresent(a.gameObject);
+
             }
 
             StartPinClearRoutine(expanded, agents);
@@ -281,6 +287,11 @@ public class CommandExecutor : MonoBehaviour
         // Expand selection to whole team if requested
         List<GameObject> expanded = (expandFollowToWholeTeam ? ExpandSelectionForTeams(selection, true) : UniqueNonNull(selection));
 
+        // Patrol must stop as soon as an explicit order is issued.
+        for (int i = 0; i < expanded.Count; i++)
+            DisablePatrolIfPresent(expanded[i]);
+
+
         // Any new command breaks TEAM hold-ground.
         Transform targetT = targetUnit != null ? targetUnit.transform : null;
 
@@ -312,12 +323,7 @@ public class CommandExecutor : MonoBehaviour
             TryAggroEnemyToAttacker(targetT, attackerT);
         // If a follow starts, it should cancel any join-route coroutine (so arrows/state don't lie).
         // (Optional safety; doesn't change join team membership.)
-        if (joinMoveRoutine != null)
-        {
-            StopCoroutine(joinMoveRoutine);
-            joinMoveRoutine = null;
-            ClearJoinRouteState();
-        }
+        CancelJoinMove("follow");
 
         // -------------------- COMBAT FOLLOW / ATTACK --------------------
         // If the follow target is an enemy/boss, we want AllyController to run its own standoff + strafe combat.
@@ -595,6 +601,22 @@ public class CommandExecutor : MonoBehaviour
         return agents;
     }
 
+    private static void DisablePatrolIfPresent(GameObject go)
+    {
+        if (go == null) return;
+        var patrol = go.GetComponent<AllyPatrolPingPong>();
+        if (patrol != null)
+            patrol.SetPatrolEnabled(false);
+    }
+
+    private static void DisablePatrolIfPresent(Transform t)
+    {
+        if (t == null) return;
+        var patrol = t.GetComponent<AllyPatrolPingPong>();
+        if (patrol != null)
+            patrol.SetPatrolEnabled(false);
+    }
+
     private void HandleAddRequested(IReadOnlyList<GameObject> selection, GameObject clickedUnit)
     {
         if (clickedUnit == null) return;
@@ -640,6 +662,10 @@ public class CommandExecutor : MonoBehaviour
                 }
 
                 // Add to player followers (uses the follower-slot system).
+                // Patrol must stop as soon as an explicit order is issued.
+                DisablePatrolIfPresent(leaderGO);
+
+
                 var follow = PlayerSquadFollowSystem.EnsureExists();
                 bool added = follow.TryAddFollowerDirect(leaderGO.transform, showBlockedHint: true);
                 if (added)
@@ -681,6 +707,11 @@ public class CommandExecutor : MonoBehaviour
             }
 
             // ✅ Create/merge team immediately so overlay sees it
+
+            // Patrol must stop as soon as an explicit join/team action is taken.
+            DisablePatrolIfPresent(leaderGO);
+            DisablePatrolIfPresent(targetGO);
+
             Team team = TeamManager.Instance.JoinUnits(leaderGO.transform, targetGO.transform);
             Debug.Log($"[Join] JoinUnits called. Team={(team != null ? team.Id.ToString() : "null")}");
 
@@ -719,6 +750,57 @@ public class CommandExecutor : MonoBehaviour
         }
 
         // If not join-armed, ignore (other add behaviors can go here later)
+    }
+
+
+    // -------------------- JOIN ROUTE INTERRUPTION --------------------
+    // If a unit is currently in the "join move" coroutine and the player issues a new command
+    // (like MOVE the team), the coroutine can keep overwriting SetDestination() with the old join slot.
+    // This cancels the join-route cleanly so new commands take effect immediately.
+
+    private void CancelJoinMoveIfLeaderInSelection(List<GameObject> expandedSelection, string reason)
+    {
+        if (!IsJoinMoveInProgress && joinMoveRoutine == null) return;
+        if (expandedSelection == null || expandedSelection.Count == 0) return;
+        if (JoinMoveLeader == null) return;
+
+        for (int i = 0; i < expandedSelection.Count; i++)
+        {
+            var go = expandedSelection[i];
+            if (go == null) continue;
+            if (go.transform == JoinMoveLeader)
+            {
+                CancelJoinMove(reason);
+                return;
+            }
+        }
+    }
+
+    private void CancelJoinMove(string reason)
+    {
+        // Stop coroutine first so it no longer writes destinations.
+        if (joinMoveRoutine != null)
+        {
+            StopCoroutine(joinMoveRoutine);
+            joinMoveRoutine = null;
+        }
+
+        // Clear the join route marker component (DirectionArrowPreview uses it).
+        if (JoinMoveLeader != null)
+        {
+            var leaderGO = JoinMoveLeader.gameObject;
+            if (leaderGO != null)
+            {
+                var marker = leaderGO.GetComponent<JoinRouteMarker>();
+                if (marker != null)
+                {
+                    marker.End();
+                    Destroy(marker);
+                }
+            }
+        }
+
+        ClearJoinRouteState();
     }
 
     private IEnumerator MoveLeaderToJoinTargetRoutine(GameObject leaderGO, GameObject targetGO)
@@ -1305,6 +1387,10 @@ public class CommandExecutor : MonoBehaviour
             if (ally != null)
                 ally.SetManualHoldPoint(targetPos);
 
+
+
+            // Patrol must stop as soon as an explicit order is issued.
+            DisablePatrolIfPresent(agent.gameObject);
         }
     }
 
@@ -1344,6 +1430,10 @@ public class CommandExecutor : MonoBehaviour
             if (ally != null)
                 ally.SetManualHoldPoint(targetPos);
 
+
+
+            // Patrol must stop as soon as an explicit order is issued.
+            DisablePatrolIfPresent(agent.gameObject);
         }
     }
 
@@ -1394,6 +1484,10 @@ public class CommandExecutor : MonoBehaviour
             if (ally != null)
                 ally.SetManualHoldPoint(targetPos);
 
+
+
+            // Patrol must stop as soon as an explicit order is issued.
+            DisablePatrolIfPresent(agent.gameObject);
         }
     }
     // -------------------- SPLIT (placeholder) --------------------

@@ -29,6 +29,8 @@ public class EnemyHealthController : MonoBehaviour
     // UI can subscribe to this
     public event Action<float> OnHealth01Changed;
 
+    public bool IsDead => _isDead;
+
     private bool _isDead;
 
     private void Awake()

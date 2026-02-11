@@ -39,7 +39,6 @@ public class AllyController : MonoBehaviour
 
     public NavMeshAgent agent;
 
-
     [Header("Water Slow")]
     [Tooltip("If true, this unit's NavMeshAgent speed is multiplied while inside a WaterSlowZone trigger.")]
     public bool enableWaterSlow = true;
@@ -70,7 +69,6 @@ public class AllyController : MonoBehaviour
     public float fireRate = 0.5f;
     private float fireCount;
 
-
     [Header("Aim")]
     [Tooltip("If the target has a child transform with this name, the ally will aim at it (recommended).")]
     public string aimPointChildName = "AimPoint";
@@ -94,11 +92,8 @@ public class AllyController : MonoBehaviour
     [Tooltip("If enableDesiredAttackRangeBand is true: the ally will move in if farther than this distance.")]
     public float desiredAttackRangeMax = 60f;
 
-
     [Tooltip("Small buffer around desiredAttackRange to prevent jitter (hysteresis).")]
     public float attackRangeBuffer = 0.75f;
-
-
 
     [Header("Dynamic Desired Range")]
     [Tooltip("If true, this ally will periodically pick a new preferred attack distance (desiredAttackRange) so fights feel less robotic and squads don't clump at the exact same radius.")]
@@ -160,8 +155,6 @@ public class AllyController : MonoBehaviour
     [Tooltip("Extra meters added to tether when scaling with team size. Effective tether = base + extra * sqrt(teamSize-1).")]
     public float tetherExtraPerSqrtMember = 0.35f;
 
-
-
     [Header("Manual Move Hold (Player Move Orders)")]
     [Tooltip("If true, a player-issued Move order creates a 'hold zone'. While holding, the ally will not chase enemies outside manualChaseLeashRadius from the hold point.")]
     public bool enableManualHoldZone = true;
@@ -217,7 +210,6 @@ public class AllyController : MonoBehaviour
     private bool _animHasSpeed;
     private int _animSpeedHash;
 
-
     [Header("Move Marker Auto-Clear")]
     [Tooltip("When close enough to the pinned destination, auto-clear the move marker for this ally.")]
     public bool autoClearMoveMarkerOnArrival = true;
@@ -254,9 +246,6 @@ public class AllyController : MonoBehaviour
     private float _combatPauseTimer;
     private float _combatMoveBurstTimer;
     private float _forceStrafeUntilTime;
-
-
-
 
     // Dynamic desired range runtime
     private float _currentDesiredAttackRangeRuntime;
@@ -301,7 +290,6 @@ public class AllyController : MonoBehaviour
         _strafeChangeTimer = Random.Range(0f, Mathf.Max(0.1f, strafeChangeInterval));
         _strafeSide = (Random.value < 0.5f) ? -1 : 1;
         _strafeAngleOffset = Random.Range(-strafeAngleJitter, strafeAngleJitter);
-
 
         // Ensure muzzle flash starts hidden.
         if (muzzleFlashObject != null)
@@ -358,7 +346,6 @@ public class AllyController : MonoBehaviour
         InitializeDesiredAttackRangeRuntime();
     }
 
-
     /// <summary>
     /// Called by WaterSlowZone triggers. Multiplier is clamped and applied on top of team-size speed scaling.
     /// </summary>
@@ -376,7 +363,6 @@ public class AllyController : MonoBehaviour
     {
         return enableWaterSlow ? _waterSpeedMultiplier : 1f;
     }
-
 
     // -------------------- MANUAL HOLD API --------------------
     public void SetManualHoldPoint(Vector3 point)
@@ -404,6 +390,7 @@ public class AllyController : MonoBehaviour
     public void ForceCombatTarget(Transform enemy)
     {
         if (enemy == null) return;
+        if (TargetIsDeadOrInvalid(enemy)) return;
 
         // Clear any formation slot / follow target; combat should not be tethered.
         target = null;
@@ -414,7 +401,6 @@ public class AllyController : MonoBehaviour
 
         chasing = true;
         currentEnemy = enemy;
-
 
         // Mark this as a player-commanded attack so we don't drop chase due to distanceToLose.
         _hasCommandedAttack = true;
@@ -463,7 +449,6 @@ public class AllyController : MonoBehaviour
 
         return true;
     }
-
 
     private void Update()
     {
@@ -554,11 +539,33 @@ public class AllyController : MonoBehaviour
         // Follow travel target when not chasing (e.g., join in-route following a moving team)
         if (!chasing && target != null && agent != null)
         {
-            travelFollowTimer -= Time.deltaTime;
-            if (travelFollowTimer <= 0f)
+            // If we're on a team AND the player has set a team pin/rally point, do NOT keep chasing a teammate Transform.
+            // This prevents "second ally follows the leader instead of the updated team location."
+            if (TeamManager.Instance != null)
             {
-                agent.SetDestination(target.position);
-                travelFollowTimer = Mathf.Max(0.05f, travelFollowUpdateInterval);
+                Team t = TeamManager.Instance.GetTeamOf(this.transform);
+                if (t != null && TryGetLatestPinnedDestinationForTeam(t, out Vector3 teamPinned))
+                {
+                    // Only override if our current target is a teammate (anchor/member).
+                    if (t.Contains(target))
+                    {
+                        target = null;
+                        agent.isStopped = false;
+                        agent.SetDestination(teamPinned);
+                        travelFollowTimer = Mathf.Max(0.05f, travelFollowUpdateInterval);
+                    }
+                }
+            }
+
+            // Normal dynamic-follow behavior.
+            if (target != null)
+            {
+                travelFollowTimer -= Time.deltaTime;
+                if (travelFollowTimer <= 0f)
+                {
+                    agent.SetDestination(target.position);
+                    travelFollowTimer = Mathf.Max(0.05f, travelFollowUpdateInterval);
+                }
             }
         }
 
@@ -600,13 +607,12 @@ public class AllyController : MonoBehaviour
                 soldierAnimator.SetFloat(_animSpeedHash, speed);
         }
 
-
         // Auto-clear the pinned move marker when we arrive at our pinned destination (fixed-point moves).
         // This avoids leaving move pins behind after the ally finishes moving.
         if (autoClearMoveMarkerOnArrival && !chasing && target == null && agent != null && !agent.pathPending)
         {
             // Only clear when we actually have a pinned destination for this unit.
-            if (TryGetLatestPinnedDestination(out Vector3 pinnedDest))
+            if (TryGetLatestPinnedDestinationForTeamOrUnit(out Vector3 pinnedDest))
             {
                 float buffer = Mathf.Max(0f, markerArrivalBuffer);
                 if (useTeamArrivalBufferMultiplier && TeamManager.Instance != null && TeamManager.Instance.GetTeamOf(this.transform) != null)
@@ -624,7 +630,6 @@ public class AllyController : MonoBehaviour
                 }
             }
         }
-
 
         // Update pinned state (v1: pinned while chasing).
         if (pinnedStatus != null)
@@ -658,6 +663,7 @@ public class AllyController : MonoBehaviour
 
                     Transform enemy = other.CurrentEnemy;
                     if (enemy == null) continue;
+                    if (TargetIsDeadOrInvalid(enemy)) continue;
 
                     float d = Vector3.Distance(transform.position, enemy.position);
                     if (d > distanceToChase) continue;
@@ -692,6 +698,7 @@ public class AllyController : MonoBehaviour
                 if (go == null) continue;
 
                 Transform t = go.transform;
+                if (TargetIsDeadOrInvalid(t)) continue;
                 float d = Vector3.Distance(transform.position, t.position);
                 if (d >= distanceToChase) continue;
                 if (d >= bestDist) continue;
@@ -730,7 +737,6 @@ public class AllyController : MonoBehaviour
         }
     }
 
-
     private void StopChasingAndResume()
     {
         _hasCommandedAttack = false;
@@ -748,22 +754,106 @@ public class AllyController : MonoBehaviour
 
         if (agent == null) { hasResumeDestination = false; return; }
 
-
-        // ✅ TEAM RESUME FIX:
-        // If we're a member of a team (and not the Anchor), after combat we should catch up to the team's
-        // current Anchor location. This prevents 'stale' return points when teams move/merge while we were fighting.
+        // ✅ TEAM RESUME FIX (updated):
+        // If the team has an active pinned destination (player moved the team star / rally point),
+        // prefer that over following the Anchor Transform. This fixes: "joiner keeps following leader
+        // instead of the updated team location set in command mode."
         if (TeamManager.Instance != null)
         {
             Team team = TeamManager.Instance.GetTeamOf(this.transform);
-            if (team != null && team.Anchor != null && team.Anchor != this.transform)
+            if (team != null)
             {
-                // Follow the anchor dynamically so we keep catching up as it moves.
-                target = team.Anchor;
-                agent.isStopped = false;
-                agent.SetDestination(team.Anchor.position);
-                hasResumeDestination = false;
-                resumeWasFollowing = true;
-                return;
+                // 1) Prefer the TEAM pin (rally point) if present.
+                if (TryGetLatestPinnedDestinationForTeam(team, out Vector3 teamPinned))
+                {
+                    // Clear any stale dynamic-follow target (otherwise we keep chasing a teammate).
+                    target = null;
+
+                    if (agent != null && agent.isActiveAndEnabled)
+                    {
+                        agent.isStopped = false;
+                        agent.SetDestination(teamPinned);
+                    }
+
+                    hasResumeDestination = false;
+                    resumeWasFollowing = false;
+                    return;
+                }
+
+                // 2) Otherwise, do NOT blindly override an active path (formation/merge may have already assigned a slot).
+                // If we have no path and we're meaningfully separated from the Anchor, regroup toward an offset near the Anchor
+                // (not the exact center) to reduce pile-ups when teams merge.
+                if (team.Anchor != null && team.Anchor != this.transform)
+                {
+                    // If TeamManager formation is enabled, never override destinations here.
+                    // During merges, TeamManager.ApplyFormationAroundAnchor() assigns per-member slots;
+                    // forcing a regroup destination causes everyone to converge and collide.
+                    if (TeamManager.Instance != null && TeamManager.Instance.applyFormationOnTeamChange)
+                    {
+                        hasResumeDestination = false;
+                        resumeWasFollowing = false;
+                        return;
+                    }
+
+                    // If something else already issued a destination (eg. TeamManager formation), don't stomp it.
+                    if (agent.hasPath || agent.pathPending)
+                    {
+                        hasResumeDestination = false;
+                        resumeWasFollowing = false;
+                        return;
+                    }
+
+                    Vector3 anchorPos = team.Anchor.position; anchorPos.y = 0f;
+                    Vector3 myPos = this.transform.position; myPos.y = 0f;
+
+                    float dist = Vector3.Distance(myPos, anchorPos);
+
+                    // Only regroup if we're not already basically there.
+                    if (dist > 0.75f)
+                    {
+                        // Deterministic offset per member so they don't all converge on the same point.
+                        // Make this fairly large during merge/regroup so two allies don't "fight for the center".
+                        int h = Mathf.Abs((team.Id * 73856093) ^ this.GetInstanceID());
+
+                        // Base radius: prefer the team's formation radius, but never too small.
+                        float r = Mathf.Max(2.25f, team.FormationRadius * 1.15f);
+
+                        // Deterministic jitter (0..1m) so even two members get different offsets.
+                        r += ((h % 100) / 100f) * 1.0f;
+
+                        Vector3 dir = (myPos - anchorPos);
+                        dir.y = 0f;
+
+                        // Prefer pushing outward along the current radial direction (avoids crossing through the anchor),
+                        // fall back to a deterministic angle if we're exactly on top of the anchor.
+                        if (dir.sqrMagnitude < 0.01f)
+                        {
+                            float angle = (h % 360) * Mathf.Deg2Rad;
+                            dir = new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle));
+                        }
+                        else
+                        {
+                            dir.Normalize();
+                        }
+
+                        Vector3 tangent = new Vector3(-dir.z, 0f, dir.x);
+                        float side = (((h / 360) % 200) - 100) / 100f; // -1..1
+
+                        Vector3 desired = anchorPos + (dir * r) + (tangent * (side * 0.75f));
+
+                        // Snap to navmesh (use existing sample radii fields; avoid introducing a new undefined variable)
+                        float regroupSampleRadius = Mathf.Max(0.25f, Mathf.Max(backoffSampleRadius, strafeSampleRadius));
+                        if (NavMesh.SamplePosition(desired, out NavMeshHit regroupHit, regroupSampleRadius, NavMesh.AllAreas))
+                            desired = regroupHit.position;
+
+                        agent.isStopped = false;
+                        agent.SetDestination(desired);
+                    }
+
+                    hasResumeDestination = false;
+                    resumeWasFollowing = false;
+                    return;
+                }
             }
         }
 
@@ -779,7 +869,7 @@ public class AllyController : MonoBehaviour
         // ✅ KEY FIX:
         // If this unit has a pinned move destination (team/ally move pins), resume to the LATEST pinned destination.
         // This solves: "ally resumes to original team spot after combat even if team destination was updated".
-        if (TryGetLatestPinnedDestination(out Vector3 pinnedDest))
+        if (TryGetLatestPinnedDestinationForTeamOrUnit(out Vector3 pinnedDest))
         {
             agent.isStopped = false;
             agent.SetDestination(pinnedDest);
@@ -795,6 +885,29 @@ public class AllyController : MonoBehaviour
             hasResumeDestination = false;
         }
     }
+
+    private bool TargetIsDeadOrInvalid(Transform t)
+    {
+        if (t == null) return true;
+
+        // If the target object is disabled, treat as invalid.
+        if (!t.gameObject.activeInHierarchy) return true;
+
+        // If the target has a DeathController and is dead, invalid.
+        var dc = t.GetComponentInParent<MnR.DeathController>();
+        if (dc != null && dc.IsDead) return true;
+
+        // If the target has Enemy2Controller and it's dead, invalid.
+        var e2 = t.GetComponentInParent<Enemy2Controller>();
+        if (e2 != null && e2.IsDead) return true;
+
+        // If the target has EnemyHealthController and it's dead, invalid.
+        var eh = t.GetComponentInParent<EnemyHealthController>();
+        if (eh != null && eh.IsDead) return true;
+
+        return false;
+    }
+
 
     private bool TryGetLatestPinnedDestination(out Vector3 dest)
     {
@@ -881,6 +994,129 @@ public class AllyController : MonoBehaviour
         return false;
     }
 
+    private bool TryGetLatestPinnedDestinationForTeam(Team team, out Vector3 dest)
+    {
+        dest = default;
+        if (team == null) return false;
+
+        if (MoveDestinationMarkerSystem.Instance == null) return false;
+
+        var inst = MoveDestinationMarkerSystem.Instance;
+        var type = inst.GetType();
+
+        // 1) If a method exists, prefer it.
+        // Common patterns we try:
+        // bool TryGetPinnedDestinationForTeam(Team team, out Vector3 destination)
+        // bool TryGetPinnedDestinationForTeam(int teamId, out Vector3 destination)
+        // bool TryGetDestinationForTeam(Team team, out Vector3 destination)
+        try
+        {
+            MethodInfo mi =
+                type.GetMethod("TryGetPinnedDestinationForTeam", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                ?? type.GetMethod("TryGetDestinationForTeam", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                ?? type.GetMethod("TryGetTeamPinnedDestination", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                ?? type.GetMethod("TryGetPinnedForTeam", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+            if (mi != null)
+            {
+                var ps = mi.GetParameters();
+                if (ps != null && ps.Length == 2 && ps[1].IsOut && ps[1].ParameterType == typeof(Vector3).MakeByRefType())
+                {
+                    // Param 0 could be Team or int teamId.
+                    object[] args;
+                    if (ps[0].ParameterType == typeof(Team))
+                        args = new object[] { team, dest };
+                    else if (ps[0].ParameterType == typeof(int))
+                        args = new object[] { team.Id, dest };
+                    else
+                        args = null;
+
+                    if (args != null)
+                    {
+                        object okObj = mi.Invoke(inst, args);
+                        if (okObj is bool ok && ok)
+                        {
+                            if (args[1] is Vector3 v)
+                            {
+                                dest = v;
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // ignore and fall back
+        }
+
+        // 2) Fallback: reflect private dictionaries.
+        // Possible field names: pinnedByTeam, pinnedByTeamId, pinnedByTeamIndex, pinnedByTeamKey
+        try
+        {
+            FieldInfo field =
+                type.GetField("pinnedByTeam", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? type.GetField("pinnedByTeamId", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? type.GetField("pinnedByTeamIndex", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?? type.GetField("pinnedByTeamKey", BindingFlags.Instance | BindingFlags.NonPublic);
+
+            if (field == null) return false;
+
+            object dictObj = field.GetValue(inst);
+            if (dictObj == null) return false;
+
+            var dict = dictObj as IDictionary;
+            if (dict == null) return false;
+
+            object key = null;
+            if (dict.Contains(team)) key = team;
+            else if (dict.Contains(team.Id)) key = team.Id;
+
+            if (key == null) return false;
+
+            var pinned = dict[key];
+            if (pinned == null) return false;
+
+            var pType = pinned.GetType();
+
+            var destField = pType.GetField("destination", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (destField != null && destField.FieldType == typeof(Vector3))
+            {
+                dest = (Vector3)destField.GetValue(pinned);
+                return true;
+            }
+
+            var destProp = pType.GetProperty("destination", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (destProp != null && destProp.PropertyType == typeof(Vector3))
+            {
+                dest = (Vector3)destProp.GetValue(pinned);
+                return true;
+            }
+        }
+        catch
+        {
+            // ignore
+        }
+
+        return false;
+    }
+
+    private bool TryGetLatestPinnedDestinationForTeamOrUnit(out Vector3 dest)
+    {
+        dest = default;
+
+        // Prefer team pin if we are on a team.
+        if (TeamManager.Instance != null)
+        {
+            Team team = TeamManager.Instance.GetTeamOf(this.transform);
+            if (team != null && TryGetLatestPinnedDestinationForTeam(team, out dest))
+                return true;
+        }
+
+        // Fallback to per-unit pin.
+        return TryGetLatestPinnedDestination(out dest);
+    }
 
     private void TryClearPinnedMoveMarker()
     {
@@ -960,10 +1196,6 @@ public class AllyController : MonoBehaviour
             // If reflection fails, do nothing. Marker will remain until cleared elsewhere.
         }
     }
-
-
-
-
 
     private float GetEffectiveFormationTether()
     {
@@ -1060,7 +1292,6 @@ public class AllyController : MonoBehaviour
         clamped.y = desired.y;
         return clamped;
     }
-
 
     // -------------------- DYNAMIC DESIRED RANGE --------------------
     private void InitializeDesiredAttackRangeRuntime()
@@ -1163,7 +1394,6 @@ public class AllyController : MonoBehaviour
         return adjusted;
     }
 
-
     private Vector3 GetAimPosition(Transform target)
     {
         if (target == null) return transform.position + (Vector3.up * aimHeightOffset);
@@ -1189,6 +1419,7 @@ public class AllyController : MonoBehaviour
     private void ChaseAndShoot(Transform enemy)
     {
         if (enemy == null) return;
+        if (TargetIsDeadOrInvalid(enemy)) { StopChasingAndResume(); return; }
 
         Vector3 targetPoint = GetAimPosition(enemy);
 
@@ -1248,7 +1479,6 @@ public class AllyController : MonoBehaviour
                 float approachRange = (useBand && !useDynamicRange) ? maxRange : range;
 
                 Vector3 ringPoint = targetPoint - toward.normalized * approachRange;
-
 
                 // Spread approach points a bit per-ally so teams don't all stack on the same ring point.
                 Vector3 right = Vector3.Cross(Vector3.up, toward.normalized);
