@@ -503,6 +503,22 @@ public class EncounterDirectorPOC : MonoBehaviour
             bridge = iconGO.gameObject.AddComponent<EnemyTeamIconTargetingBridge>();
         bridge.Bind(teamRoot);
 
+        // --- Direction arrow (UI-only) ---
+        // This does NOT drive enemy movement. It only reads the team's anchor position and/or movement.
+        // IMPORTANT: The arrow must live on a child (eg. ArrowImage), NOT on the root icon image,
+        // otherwise it will overwrite the star sprite and you'll "lose" the team icon.
+        var anchor = teamRoot != null ? teamRoot.GetComponent<EncounterTeamAnchor>() : null;
+        if (anchor != null)
+        {
+            var arrow = GetOrCreateEnemyTeamArrow(iconGO);
+            if (arrow != null)
+            {
+                // Use commandCamera if available; otherwise fall back to the Canvas camera or Main.
+                var cam = commandCamera != null ? commandCamera : (Camera.main != null ? Camera.main : null);
+                arrow.Bind(anchor, cam);
+            }
+        }
+
         var runtime = new EnemyTeamIconRuntime
         {
             teamRootName = teamRootName,
@@ -514,6 +530,52 @@ public class EncounterDirectorPOC : MonoBehaviour
         _enemyTeamIcons[teamRootName] = runtime;
     }
 
+
+
+    private EnemyTeamDirectionArrowUI GetOrCreateEnemyTeamArrow(RectTransform iconRoot)
+    {
+        if (iconRoot == null) return null;
+
+        // Prefer an existing arrow component in children (your prefab likely already has one on ArrowImage).
+        var existing = iconRoot.GetComponentInChildren<EnemyTeamDirectionArrowUI>(true);
+        if (existing != null)
+            return existing;
+
+        // Otherwise, try to find a child that should host the arrow graphic.
+        Transform arrowHost = iconRoot.Find("ArrowImage");
+        if (arrowHost == null) arrowHost = iconRoot.Find("Arrow");
+        if (arrowHost == null) arrowHost = iconRoot.Find("ArrowGraphic");
+
+        if (arrowHost == null)
+        {
+            // Create a dedicated child so we NEVER steal the root icon's Image component.
+            var go = new GameObject("ArrowImage", typeof(RectTransform), typeof(Image));
+            go.transform.SetParent(iconRoot, false);
+            arrowHost = go.transform;
+
+            var rt = (RectTransform)arrowHost;
+            rt.anchorMin = new Vector2(0.5f, 0.5f);
+            rt.anchorMax = new Vector2(0.5f, 0.5f);
+            rt.anchoredPosition = Vector2.zero;
+            rt.localRotation = Quaternion.identity;
+            rt.localScale = Vector3.one;
+            rt.sizeDelta = new Vector2(32f, 32f);
+        }
+        else
+        {
+            // Make sure the host has an Image so the arrow can render.
+            if (arrowHost.GetComponent<Image>() == null)
+                arrowHost.gameObject.AddComponent<Image>();
+        }
+
+        var arrow = arrowHost.GetComponent<EnemyTeamDirectionArrowUI>();
+        if (arrow == null)
+            arrow = arrowHost.gameObject.AddComponent<EnemyTeamDirectionArrowUI>();
+
+        // Auto-wire refs (should now bind to ArrowImage instead of the star icon).
+        arrow.TryAutoWire();
+        return arrow;
+    }
     private void UpdateEnemyTeamIcons()
     {
         if (!spawnEnemyTeamIcons) return;

@@ -187,6 +187,9 @@ public class CommandExecutor : MonoBehaviour
         // ✅ Team expansion (team members move together)
         List<GameObject> expanded = ExpandSelectionForTeams(selection, true);
 
+        // Option B: record the exact commanded destination for any affected teams (used by Team Star arrows).
+        SetPlannedDestinationForTeams(expanded, destination);
+
         CancelJoinMoveIfLeaderInSelection(expanded, "move");
 
         // Any new command breaks TEAM hold-ground.
@@ -269,7 +272,53 @@ public class CommandExecutor : MonoBehaviour
         StartPinClearRoutine(expanded, agents);
     }
 
-    /// <summary>
+    
+
+// -------------------- TEAM PLANNED DESTINATION (Option B) --------------------
+
+private void SetPlannedDestinationForTeams(List<GameObject> expandedSelection, Vector3 destination)
+{
+    if (TeamManager.Instance == null) return;
+    if (expandedSelection == null || expandedSelection.Count == 0) return;
+
+    HashSet<Team> teams = new HashSet<Team>();
+    for (int i = 0; i < expandedSelection.Count; i++)
+    {
+        var go = expandedSelection[i];
+        if (go == null) continue;
+        var t = TeamManager.Instance.GetTeamOf(go.transform);
+        if (t != null) teams.Add(t);
+    }
+
+    foreach (var team in teams)
+    {
+        if (team == null) continue;
+        team.SetPlannedDestination(destination);
+    }
+}
+
+private void ClearPlannedDestinationForTeams(List<GameObject> expandedSelection)
+{
+    if (TeamManager.Instance == null) return;
+    if (expandedSelection == null || expandedSelection.Count == 0) return;
+
+    HashSet<Team> teams = new HashSet<Team>();
+    for (int i = 0; i < expandedSelection.Count; i++)
+    {
+        var go = expandedSelection[i];
+        if (go == null) continue;
+        var t = TeamManager.Instance.GetTeamOf(go.transform);
+        if (t != null) teams.Add(t);
+    }
+
+    foreach (var team in teams)
+    {
+        if (team == null) continue;
+        team.ClearPlannedDestination();
+    }
+}
+
+/// <summary>
     /// Follow a moving target (enemy) by setting each selected ally's AllyController.target.
     /// The AllyController will update the NavMesh destination toward the target's current position.
     /// </summary>
@@ -286,6 +335,9 @@ public class CommandExecutor : MonoBehaviour
 
         // Expand selection to whole team if requested
         List<GameObject> expanded = (expandFollowToWholeTeam ? ExpandSelectionForTeams(selection, true) : UniqueNonNull(selection));
+
+        // Follow overrides any prior point-move intent for teams.
+        ClearPlannedDestinationForTeams(expanded);
 
         // Patrol must stop as soon as an explicit order is issued.
         for (int i = 0; i < expanded.Count; i++)
@@ -591,6 +643,11 @@ public class CommandExecutor : MonoBehaviour
             var go = selection[i];
             if (go == null) continue;
 
+            // Inactive allies do not accept commands
+            var gate = go.GetComponent<AllyActivationGate>();
+            if (gate != null && !gate.IsActive)
+                continue;
+
             var agent = go.GetComponent<NavMeshAgent>();
             if (agent == null) agent = go.GetComponentInChildren<NavMeshAgent>();
 
@@ -629,6 +686,13 @@ public class CommandExecutor : MonoBehaviour
             GameObject targetGO = clickedUnit;
 
             if (leaderGO == null || targetGO == null) return;
+
+            // Inactive allies cannot initiate or receive JOIN (must be activated first)
+            var gateLeader = leaderGO.GetComponent<AllyActivationGate>();
+            if (gateLeader != null && !gateLeader.IsActive) return;
+            var gateTarget = targetGO.GetComponent<AllyActivationGate>();
+            if (gateTarget != null && !gateTarget.IsActive) return;
+
 
             // Join is a new command: break TEAM hold-ground for both sides.
             if (leaderGO == targetGO) return;
@@ -1097,6 +1161,9 @@ public class CommandExecutor : MonoBehaviour
 
             yield return new WaitForSeconds(interval);
         }
+
+        // Clear the team's planned destination (Option B) so Team Star arrows hide.
+        team.ClearPlannedDestination();
 
         // Clear the team's destination pin(s).
         if (MoveDestinationMarkerSystem.Instance != null)

@@ -43,4 +43,55 @@ public class Team
         int count = Members != null ? Members.Count : 0;
         return $"Team {Id} ({count})";
     }
+
+
+    // --- Option B: Team planned destination (a.k.a move target) ---
+    // MoveDestinationMarkerSystem already tries to call SetMoveTarget/ClearMoveTarget via reflection.
+    // Some scripts may call SetPlannedDestination/ClearPlannedDestination.
+    private bool _hasMoveTarget;
+    private Vector3 _moveTarget;
+
+    public bool HasMoveTarget => _hasMoveTarget;
+    public Vector3 MoveTarget => _moveTarget;
+
+    // Back-compat aliases
+    public bool HasPlannedDestination => _hasMoveTarget;
+    public Vector3 PlannedDestination => _moveTarget;
+
+    public void SetMoveTarget(Vector3 worldPos)
+    {
+        _hasMoveTarget = true;
+        _moveTarget = worldPos;
+    }
+
+    public void ClearMoveTarget()
+    {
+        _hasMoveTarget = false;
+        _moveTarget = Vector3.zero;
+    }
+
+    public void SetPlannedDestination(Vector3 worldPos) => SetMoveTarget(worldPos);
+    public void ClearPlannedDestination() => ClearMoveTarget();
+
+    /// <summary>Average (centroid) world position of all non-null members.</summary>
+    public Vector3 GetCentroid()
+    {
+        if (Members == null || Members.Count == 0)
+            return (Anchor != null) ? Anchor.position : Vector3.zero;
+
+        Vector3 sum = Vector3.zero;
+        int n = 0;
+        for (int i = 0; i < Members.Count; i++)
+        {
+            var t = Members[i];
+            if (t == null) continue;
+            sum += t.position;
+            n++;
+        }
+
+        if (n == 0)
+            return (Anchor != null) ? Anchor.position : Vector3.zero;
+
+        return sum / n;
+    }
 }

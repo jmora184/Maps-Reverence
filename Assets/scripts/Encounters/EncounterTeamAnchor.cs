@@ -34,6 +34,41 @@ public class EncounterTeamAnchor : MonoBehaviour
     /// <summary>Latest computed anchor position in WORLD space.</summary>
     public Vector3 AnchorWorldPosition { get; private set; }
 
+    // --- Optional: planned destination storage for UI helpers (eg. direction arrows) ---
+    // This does NOT drive movement. Your AI scripts can set/clear this purely for UI.
+    private bool _hasMoveTarget;
+    private Vector3 _moveTarget;
+
+    /// <summary>True when an AI script has set a UI-only move target.</summary>
+    public bool HasMoveTarget => _hasMoveTarget;
+
+    /// <summary>UI-only move target in WORLD space (does not drive AI).</summary>
+    public Vector3 MoveTarget => _moveTarget;
+
+    // Back-compat aliases (mirrors Team.cs naming)
+    public bool HasPlannedDestination => _hasMoveTarget;
+    public Vector3 PlannedDestination => _moveTarget;
+
+    /// <summary>
+    /// Set a planned destination for UI purposes (direction arrow, etc.).
+    /// Your AI scripts can call this whenever they pick a new destination.
+    /// </summary>
+    public void SetMoveTarget(Vector3 worldPos)
+    {
+        _hasMoveTarget = true;
+        _moveTarget = worldPos;
+    }
+
+    /// <summary>Clear the UI-only planned destination.</summary>
+    public void ClearMoveTarget()
+    {
+        _hasMoveTarget = false;
+        _moveTarget = Vector3.zero;
+    }
+
+    public void SetPlannedDestination(Vector3 worldPos) => SetMoveTarget(worldPos);
+    public void ClearPlannedDestination() => ClearMoveTarget();
+
     private void Awake()
     {
         AnchorWorldPosition = transform.position;

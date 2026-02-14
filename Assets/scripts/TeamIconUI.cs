@@ -39,6 +39,8 @@ public class TeamIconUI : MonoBehaviour
     public GrowthMode growthMode = GrowthMode.SqrtClamped;
 
     private Team _team;
+
+    public Team Team => _team;
     private Action<Team> _onClick;
 
     private void Reset()

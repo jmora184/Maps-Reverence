@@ -52,6 +52,13 @@ public class CommandStateMachine : MonoBehaviour
     [Tooltip("Extra distance beyond NavMeshAgent.stoppingDistance that still counts as busy.")]
     public float moveOrderBusyStopBuffer = 0.6f;
 
+    [Header("Inactive Ally Hint")]
+    [Tooltip("If true, inactive allies (AllyActivationGate.IsActive == false) cannot be selected/commanded in command mode.")]
+    public bool blockInactiveAllies = true;
+    [TextArea] public string inactiveAllyMessage = "Ally is inactive (approach and press J)";
+    public float inactiveAllyDuration = 2.0f;
+
+
     public State CurrentState { get; private set; } = State.Inactive;
 
     private readonly List<GameObject> selection = new();
@@ -208,6 +215,14 @@ public class CommandStateMachine : MonoBehaviour
             // For team selections, allow immediate redirect even if the team is still forming / moving.
             if (allowBusyIfMulti && isMulti)
                 continue;
+
+
+            // Block selecting inactive allies (must be activated in-world first)
+            if (blockInactiveAllies && IsInactiveAlly(unit))
+            {
+                TryShowHint(inactiveAllyMessage, inactiveAllyDuration);
+                return false;
+            }
 
             // Block selecting ally if it's in-route to join
             if (blockJoinLeaderWhileInRoute && unit.CompareTag("Ally"))
@@ -430,10 +445,27 @@ public class CommandStateMachine : MonoBehaviour
         return remain > threshold;
     }
 
+    private bool IsInactiveAlly(GameObject unit)
+    {
+        if (unit == null) return false;
+        if (!unit.CompareTag("Ally")) return false;
+        var gate = unit.GetComponent<AllyActivationGate>();
+        return (gate != null && !gate.IsActive);
+    }
+
+
     // ---------- selection ----------
     public void SelectUnit(GameObject unit, bool additive = false)
     {
         if (unit == null) return;
+
+        // ✅ Block selecting inactive allies (must be activated in-world first)
+        if (blockInactiveAllies && IsInactiveAlly(unit))
+        {
+            TryShowHint(inactiveAllyMessage, inactiveAllyDuration);
+            return;
+        }
+
 
         // ✅ Block selecting ally if it's in-route to join
         if (blockJoinLeaderWhileInRoute && unit.CompareTag("Ally"))
@@ -472,6 +504,14 @@ public class CommandStateMachine : MonoBehaviour
     public void ClickUnitFromUI(GameObject clickedUnit)
     {
         if (clickedUnit == null) return;
+
+        // ✅ Block selecting inactive allies from UI (icon clicks)
+        if (blockInactiveAllies && IsInactiveAlly(clickedUnit))
+        {
+            TryShowHint(inactiveAllyMessage, inactiveAllyDuration);
+            return;
+        }
+
 
         bool joinTargeting = (CurrentState == State.AddTargeting && JoinArmed);
 
@@ -553,9 +593,20 @@ public class CommandStateMachine : MonoBehaviour
             OnMoveRequested?.Invoke(selection, worldPoint);
 
         if (MoveDestinationMarkerSystem.Instance != null)
-            MoveDestinationMarkerSystem.Instance.PlaceFor(selection.ToArray(), worldPoint);
+        {
+            // If the current selection represents an entire Team, store a Team move target (Option B)
+            // so the Team Star can show a single direction arrow.
+            Team selectedTeam = null;
+            if (TeamManager.Instance != null && selection.Count > 0 && selection[0] != null)
+                selectedTeam = TeamManager.Instance.GetTeamOf(selection[0].transform);
 
-        if (!keepSelectionAfterMove)
+            if (selectedTeam != null && SelectionMatchesEntireTeam(selectedTeam, selection))
+                MoveDestinationMarkerSystem.Instance.PlaceForTeam(selectedTeam, worldPoint);
+
+            // Keep existing per-unit pins (older behavior)
+            MoveDestinationMarkerSystem.Instance.PlaceFor(selection.ToArray(), worldPoint);
+        }
+if (!keepSelectionAfterMove)
             ClearSelectionInternal();
 
         // Always leave targeting mode after confirming the move.
@@ -697,4 +748,32 @@ public class CommandStateMachine : MonoBehaviour
     }
 
     private void SetState(State s) => CurrentState = s;
+
+
+    private static bool SelectionMatchesEntireTeam(Team team, IReadOnlyList<GameObject> selection)
+    {
+        if (team == null || team.Members == null) return false;
+        if (selection == null) return false;
+
+        // Fast lookup
+        var set = new System.Collections.Generic.HashSet<Transform>();
+        for (int i = 0; i < selection.Count; i++)
+        {
+            var go = selection[i];
+            if (go == null) continue;
+            set.Add(go.transform);
+        }
+
+        int count = 0;
+        for (int i = 0; i < team.Members.Count; i++)
+        {
+            var m = team.Members[i];
+            if (m == null) continue;
+            if (set.Contains(m)) count++;
+        }
+
+        // Only treat as "team move" when the whole team is selected
+        return count > 0 && count == team.Members.Count;
+    }
+
 }

@@ -1,4 +1,5 @@
-﻿using System.Collections;
+﻿
+using System.Collections;
 using UnityEngine;
 using UnityEngine.AI;
 
@@ -313,6 +314,18 @@ public class Enemy2Controller : MonoBehaviour
     private float _burstShotTimer;
     // Targeting
     private Transform _combatTarget;
+
+    [Header("Idle Patrol (optional)")]
+    [Tooltip("If enabled, this enemy will patrol waypoints when NOT chasing and NOT fighting.")]
+    [SerializeField] private bool enableIdlePatrol = false;
+
+    [Tooltip("Waypoint patrol component on this enemy (recommended). Leave null to disable.")]
+    [SerializeField] private EnemyWaypointPatrol idlePatrol;
+
+    [Tooltip("Seconds to wait after losing combat/chase before resuming patrol.")]
+    [SerializeField] private float patrolResumeDelay = 0.75f;
+
+    private float _patrolResumeAt = -1f;
     private AllyHealth _subscribedAllyHealth;
     // ally (or player) we are currently fighting
     private Transform _playerFallback;   // resolved player transform if available
@@ -638,6 +651,42 @@ public class Enemy2Controller : MonoBehaviour
             }
         }
 
+
+        // Optional: idle waypoint patrol (keeps enemies moving when not engaged).
+        // IMPORTANT: Without this, Enemy2Controller stops/resets the agent every frame while !chasing,
+        // which will cancel any external patrol script that sets destinations.
+        if (enableIdlePatrol && idlePatrol != null)
+        {
+            bool hasCombat = (_combatTarget != null);
+            bool engagedOrReturning = hasCombat || chasing || _returningToTeam;
+
+            if (engagedOrReturning)
+            {
+                // Stop patrol immediately when combat/chase begins.
+                if (idlePatrol.PatrolEnabled) idlePatrol.SetPatrolEnabled(false);
+                _patrolResumeAt = Time.time + patrolResumeDelay;
+            }
+            else
+            {
+                // Resume patrol after a short delay once fully idle.
+                if (_patrolResumeAt < 0f) _patrolResumeAt = Time.time;
+
+                if (Time.time >= _patrolResumeAt)
+                {
+                    if (!idlePatrol.PatrolEnabled) idlePatrol.SetPatrolEnabled(true);
+
+                    // Let patrol drive movement; do NOT StopAgent() here.
+                    bool moving = (agent != null && agent.velocity.sqrMagnitude > 0.01f);
+                    SetMovingAnim(moving);
+                    UpdateSpeedParam();
+                    return;
+                }
+                else
+                {
+                    if (idlePatrol.PatrolEnabled) idlePatrol.SetPatrolEnabled(false);
+                }
+            }
+        }
         if (!chasing)
         {
             StopAgent();

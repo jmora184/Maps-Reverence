@@ -34,6 +34,12 @@ public class CommandOverlayUI : MonoBehaviour
     public bool enableHoverHints = true;
     [Tooltip("Default tooltip messages (used if the prefab doesn't already have UIHoverHintTarget).")]
     public string allyHoverHint = "Select Ally";
+    [Tooltip("Tooltip shown when an ally is inactive (won't accept commands until activated in-world).")]
+    public string inactiveAllyHoverHint = "<color=#ffcc00>Inactive:</color> Approach and press J";
+
+    [Header("Inactive Ally Icons")]
+    [Range(0f, 1f)] public float inactiveAllyIconAlpha = 0.35f;
+
     public string enemyHoverHint = "Select Enemy";
     public string teamHoverHint = "Select Team";
     public string playerHoverHint = "Player";
@@ -1436,6 +1442,13 @@ public class CommandOverlayUI : MonoBehaviour
             if (teamUI != null)
                 teamUI.Bind(team, OnTeamStarClicked);
 
+            
+
+            // Bind optional orbiting direction arrow (Option B).
+            var teamArrow = star.GetComponent<TeamStarDirectionArrowUI>();
+            if (teamArrow != null)
+                teamArrow.Bind(team, uiCam);
+
             // Pinned teams (Option 1 - main cluster rule):
             // The team is pinned only if a pinned member is near the team's MAIN CLUSTER center.
             // This prevents a far-away joiner getting into combat from locking the whole team.
@@ -1519,6 +1532,13 @@ public class CommandOverlayUI : MonoBehaviour
 
             if (unit == null || icon == null) continue;
 
+            // Inactive allies do not accept commands until activated in-world (e.g., press J nearby)
+            bool isInactiveAlly = false;
+            var activationGate = unit.GetComponent<AllyActivationGate>();
+            if (activationGate != null && !activationGate.IsActive)
+                isInactiveAlly = true;
+
+
             var btn = icon.GetComponent<Button>();
             if (btn == null) continue; var team = TeamManager.Instance.GetTeamOf(unit);
             bool isTeamed = team != null;
@@ -1553,9 +1573,20 @@ public class CommandOverlayUI : MonoBehaviour
             if (inMoveTargeting)
                 allowClick = false;
             // Update tooltip message for pinned/non-pinned.
+
+            // Inactive allies: always disable clicking (but keep icon visible)
+            if (isInactiveAlly)
+                allowClick = false;
+
             var hint = icon.GetComponent<UIHoverHintTarget>();
             if (hint != null)
-                hint.message = isPinned ? pinnedHoverHint : allyHoverHint;
+                hint.message = isPinned ? pinnedHoverHint : (isInactiveAlly ? inactiveAllyHoverHint : allyHoverHint);
+
+            // Dim inactive ally icons
+            var cg = icon.GetComponent<CanvasGroup>();
+            if (cg == null) cg = icon.gameObject.AddComponent<CanvasGroup>();
+            cg.alpha = isInactiveAlly ? inactiveAllyIconAlpha : 1f;
+
 
             // If the ally icon is not supposed to be clickable (e.g., it belongs to a team),
             // also disable its raycast target so it won't "block" clicks intended for the Team Star icon above it.

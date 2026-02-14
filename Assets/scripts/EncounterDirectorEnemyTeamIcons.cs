@@ -155,6 +155,21 @@ public class EncounterDirectorEnemyTeamIcons : MonoBehaviour
             icon.name = $"EnemyTeamIcon_{teamRoot.name}";
             icon.gameObject.SetActive(true);
             _iconByTeamRoot[teamRoot] = icon;
+
+            // --- Direction arrow (optional) ---
+            var anchor = teamRoot.GetComponent<EncounterTeamAnchor>();
+            if (anchor != null)
+            {
+                var arrow = icon.GetComponent<EnemyTeamDirectionArrowUI>();
+                if (arrow == null) arrow = icon.gameObject.AddComponent<EnemyTeamDirectionArrowUI>();
+                arrow.TryAutoWire();
+                arrow.Bind(anchor, commandCamera);
+
+                var provider = anchor.GetComponent<EnemyTeamMoveTargetProvider>();
+                if (provider == null) provider = anchor.gameObject.AddComponent<EnemyTeamMoveTargetProvider>();
+                arrow.moveTargetProvider = provider;
+            }
+
         }
 
         // Cleanup dead teams

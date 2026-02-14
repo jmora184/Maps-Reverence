@@ -117,7 +117,7 @@ public class DirectionArrowFollower : MonoBehaviour
             return;
         }
 
-        // Optional: if we’re in MoveTargeting, let Preview arrow own the selected unit
+        // Optional: if were in MoveTargeting, let Preview arrow own the selected unit
         if (hideForSelectedWhileMoveTargeting && sm != null &&
             sm.CurrentState == CommandStateMachine.State.MoveTargeting)
         {
@@ -146,16 +146,50 @@ public class DirectionArrowFollower : MonoBehaviour
             }
         }
 
-        // Determine "moving" from agent path
-        bool hasPath = agent.hasPath && !agent.pathPending;
-        float remaining = (hasPath && !float.IsInfinity(agent.remainingDistance)) ? agent.remainingDistance : 0f;
 
-        bool moving = hasPath && remaining > showWhenRemainingDistanceAbove;
+        // Extra support: show arrow during follow/attack even if the agent path gets reset (ex: pause-while-shooting).
+        // If the AllyController is chasing a target, point at that target position as a fallback destination.
+        bool hasChaseTarget = false;
+        if (!hasPlanned && unit != null)
+        {
+            var allyCtrl = unit.GetComponent<AllyController>();
+            if (allyCtrl == null) allyCtrl = unit.GetComponentInParent<AllyController>();
+            if (allyCtrl != null)
+            {
+                // Travel-follow (join/follow) target
+                if (allyCtrl.target != null)
+                {
+                    dest = allyCtrl.target.position;
+                    hasChaseTarget = true;
+                }
+                // Combat target (Attack order)
+                else if (allyCtrl.IsChasing && allyCtrl.CurrentEnemyTarget != null)
+                {
+                    dest = allyCtrl.CurrentEnemyTarget.position;
+                    hasChaseTarget = true;
+                }
+            }
+        }
 
-        // Key: if paused, we may still want arrows for units that *have a path*
-        bool pausedPath = treatHasPathAsMovingWhenPaused && Time.timeScale == 0f && hasPath;
+        // Determine "moving" from agent state.
+// IMPORTANT: right after SetDestination, NavMeshAgent may be pathPending for a moment.
+// If we require !pathPending, the arrow can flicker off (or appear late) even though the unit is moving.
+        bool hasPathOrPending = agent.hasPath || agent.pathPending;
 
-        bool shouldShow = moving || hasPlanned || pausedPath;
+        // Remaining distance can be 0/Infinity while pending; fall back to straight-line distance to destination.
+        float remaining =
+            (!float.IsInfinity(agent.remainingDistance) && agent.remainingDistance > 0f) ? agent.remainingDistance :
+            Vector3.Distance(unit.position, dest);
+
+        // Velocity is a good indicator even when path info is momentarily unavailable.
+        bool hasVelocity = agent.velocity.sqrMagnitude > 0.01f;
+
+        bool moving = hasPathOrPending && (agent.pathPending || remaining > showWhenRemainingDistanceAbove || hasVelocity);
+
+        // Key: if paused, we may still want arrows for units that *have a path/pending*
+        bool pausedPath = treatHasPathAsMovingWhenPaused && Time.timeScale == 0f && hasPathOrPending;
+
+        bool shouldShow = moving || hasPlanned || hasChaseTarget || pausedPath;
 
         if (hideWhenNotMoving)
             sr.enabled = shouldShow;
