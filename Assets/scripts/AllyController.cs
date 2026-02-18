@@ -94,6 +94,13 @@ public class AllyController : MonoBehaviour
 
     [Tooltip("Small buffer around desiredAttackRange to prevent jitter (hysteresis).")]
     public float attackRangeBuffer = 0.75f;
+    [Header("Shooting Range Gate")]
+    [Tooltip("If true, the ally will ONLY fire when within its desired attack range (or the min/max band) plus buffers.")]
+    public bool onlyShootWhenInDesiredAttackRange = true;
+
+    [Tooltip("Extra buffer (meters) added on top of attackRangeBuffer when deciding if we are close enough to shoot.")]
+    public float shootRangeExtraBuffer = 0.5f;
+
 
     [Header("Dynamic Desired Range")]
     [Tooltip("If true, this ally will periodically pick a new preferred attack distance (desiredAttackRange) so fights feel less robotic and squads don't clump at the exact same radius.")]
@@ -1423,6 +1430,18 @@ public class AllyController : MonoBehaviour
 
         Vector3 targetPoint = GetAimPosition(enemy);
 
+        // Range gate variables (used to decide when we're allowed to actually fire).
+        bool useBand = false;
+        float minRange = 0f;
+        float maxRange = 0f;
+        bool useDynamicRange = enableDynamicDesiredAttackRange;
+
+        // Desired range (single value or derived from band)
+        float range = desiredAttackRange;
+
+        // Distance is re-evaluated later too, but we initialize it here for movement logic.
+        float dist = Vector3.Distance(transform.position, targetPoint);
+
         // If we're following a formation slot (PlayerSquadFollowSystem sets AllyController.target to a slot transform),
         // keep combat movement tethered to that slot so we don't break formation.
         Transform formationSlot = (target != null) ? target : null;
@@ -1434,12 +1453,12 @@ public class AllyController : MonoBehaviour
         if (agent != null)
         {
             // Optional min/max band (ex: keep between 20 and 60).
-            bool useBand = TryGetCombatRangeBand(out float minRange, out float maxRange);
+            useBand = TryGetCombatRangeBand(out minRange, out maxRange);
 
             // Optionally re-pick the preferred distance every couple seconds.
             UpdateDesiredAttackRangeRuntime(useBand, minRange, maxRange);
 
-            float range = GetCurrentDesiredAttackRange(useBand, minRange, maxRange);
+            range = GetCurrentDesiredAttackRange(useBand, minRange, maxRange);
 
             // Let the agent actually travel to strafe points.
             // We still maintain standoff ourselves via range/buffer logic.
@@ -1460,10 +1479,10 @@ public class AllyController : MonoBehaviour
                 transform.rotation = Quaternion.Slerp(transform.rotation, look, Time.deltaTime * faceTargetTurnSpeed);
             }
 
-            float dist = Vector3.Distance(transform.position, targetPoint);
+            dist = Vector3.Distance(transform.position, targetPoint);
 
             // Too far: move in toward a ring around the enemy (not the exact center).
-            bool useDynamicRange = enableDynamicDesiredAttackRange;
+            useDynamicRange = enableDynamicDesiredAttackRange;
 
             if ((useBand && !useDynamicRange) ? (dist > maxRange + attackRangeBuffer) : (dist > range + attackRangeBuffer))
             {
@@ -1664,6 +1683,13 @@ public class AllyController : MonoBehaviour
             }
         }
 
+        // Recompute distance (agent/transform may have moved since last frame).
+        dist = Vector3.Distance(transform.position, targetPoint);
+
+        // ✅ IMPORTANT: Don't shoot unless we're close enough.
+        if (onlyShootWhenInDesiredAttackRange && !IsWithinShootRange(dist, useBand, minRange, maxRange, range, useDynamicRange))
+            return;
+
         // Fire
         fireCount -= Time.deltaTime;
         if (fireCount > 0) return;
@@ -1684,17 +1710,36 @@ public class AllyController : MonoBehaviour
                 TriggerMuzzleFlashSimple();
 
                 // Set bullet damage from AllyCombatStats (team size scaling).
-                if (combatStats != null)
+                BulletController bc = spawned.GetComponent<BulletController>();
+                if (bc != null)
                 {
-                    BulletController bc = spawned.GetComponent<BulletController>();
-                    if (bc != null)
+                    if (combatStats != null)
                         bc.Damage = combatStats.GetDamageInt();
+
+                    bc.owner = transform;
+                    // Ally bullets should damage enemies, not allies.
+                    bc.damageEnemy = true;
+                    bc.damageAlly = false;
                 }
             }
 
             if (soldierAnimator != null)
                 soldierAnimator.SetTrigger("Shoot");
         }
+    }
+
+
+    private bool IsWithinShootRange(float dist, bool useBand, float minRange, float maxRange, float range, bool useDynamicRange)
+    {
+        float shootBuf = Mathf.Max(0f, attackRangeBuffer + shootRangeExtraBuffer);
+
+        // If we're using a min/max band AND we're not dynamically moving the desired range,
+        // then we only shoot while inside the band (with buffers).
+        if (useBand && !useDynamicRange)
+            return dist <= (maxRange + shootBuf) && dist >= (minRange - shootBuf);
+
+        // Otherwise, shoot when within the current desired range (plus buffers).
+        return dist <= (range + shootBuf);
     }
 
     private void TriggerMuzzleFlashSimple()

@@ -24,9 +24,6 @@ public class Enemy2Controller : MonoBehaviour
     [Tooltip("Max distance to accept a new combat target from damage (GetShot(attacker)). If 0, uses distanceToChase.")]
     public float aggroFromDamageMaxDistance = 0f;
 
-    [Tooltip("Max distance to accept a new combat target from external orders/calls (SetCombatTarget). If 0, uses distanceToChase.")]
-    public float aggroFromOrdersMaxDistance = 0f;
-
     [Tooltip("Legacy stop distance (kept for Inspector compatibility).")]
     public float distanceToStop = 2f;
 
@@ -37,7 +34,14 @@ public class Enemy2Controller : MonoBehaviour
     [Tooltip("If an ally passes within this distance, the enemy will aggro even if the ally never shot.")]
     public float allyAggroRadius = 8f;
 
-    [Tooltip("If the current combat ally gets farther than this for keepChasingTime, we drop them and fall back.")]
+    
+    [Tooltip("If true, enemies will NOT aggro just because an ally selected/targeted them from far away. They only aggro from allies when that ally is close enough to actually shoot.")]
+    public bool onlyAggroFromAlliesIfTheyCanShootMe = true;
+
+    [Tooltip("Extra forgiveness added when checking if an ally is close enough to shoot this enemy.")]
+    public float allyCanShootExtraBuffer = 0.5f;
+
+[Tooltip("If the current combat ally gets farther than this for keepChasingTime, we drop them and fall back.")]
     public float allyLoseRadius = 15f;
 
     [Tooltip("How often we scan for nearby allies (seconds).")]
@@ -97,6 +101,20 @@ public class Enemy2Controller : MonoBehaviour
 
     [Tooltip("Extra distance beyond the outer ring where we still allow shooting while moving.")]
     public float shootWhileMovingExtraDistance = 3f;
+
+
+    [Header("Return Fire When Hit From Far")]
+    [Tooltip("If true, when this enemy takes damage it will keep aggro for a short time and is allowed to fire while closing distance (even if outside desiredAttackRange).")]
+    public bool returnFireWhenHitFromFar = true;
+
+    [Tooltip("How many seconds after taking damage we keep aggro even if the attacker is far beyond distanceToLose.")]
+    public float damageAggroHoldSeconds = 8f;
+
+    [Tooltip("While within the damage aggro window, we won't drop chase until the target is at least this far. If 0, uses distanceToLose.")]
+    public float damageAggroLoseOverrideDistance = 80f;
+
+    [Tooltip("Maximum distance at which we will still fire while closing distance during the damage aggro window. If 0, unlimited.")]
+    public float returnFireMaxRange = 60f;
 
     [Tooltip("NavMesh sample radius used when backing away.")]
     public float backoffSampleRadius = 2.5f;
@@ -309,6 +327,8 @@ public class Enemy2Controller : MonoBehaviour
     private float shootTimeCounter;
 
 
+    private float _damageAggroUntil = -1f;
+
     // Burst runtime
     private int _burstRemaining;
     private float _burstShotTimer;
@@ -390,7 +410,7 @@ public class Enemy2Controller : MonoBehaviour
 
         // Defaults: if not set in Inspector, use distanceToChase as the "awareness" radius.
         if (aggroFromDamageMaxDistance <= 0f) aggroFromDamageMaxDistance = distanceToChase;
-        if (aggroFromOrdersMaxDistance <= 0f) aggroFromOrdersMaxDistance = distanceToChase;
+        if (distanceToChase <= 0f) distanceToChase = distanceToChase;
 
 
         // Initialize desired range & pause cycle so combat doesn't start with invalid timers.
@@ -414,6 +434,22 @@ public class Enemy2Controller : MonoBehaviour
         if (t == null) return false;
         return Vector3.Distance(transform.position, t.position) <= Mathf.Max(0.1f, maxDistance);
     }
+
+    bool AllyCanShootMe(AllyController ally)
+    {
+        if (ally == null) return false;
+
+        // Ally won't actually shoot unless within its own desired range.
+        float range = ally.enableDesiredAttackRangeBand
+            ? Mathf.Max(ally.desiredAttackRangeMin, ally.desiredAttackRangeMax)
+            : ally.desiredAttackRange;
+
+        float buffer = Mathf.Max(0f, ally.attackRangeBuffer) + Mathf.Max(0f, allyCanShootExtraBuffer);
+
+        float dist = Vector3.Distance(transform.position, ally.transform.position);
+        return dist <= (range + buffer);
+    }
+
 
     private void SetCombatTargetInternal(Transform t)
     {
@@ -474,10 +510,31 @@ public class Enemy2Controller : MonoBehaviour
     {
         if (t == null) return;
 
-        // IMPORTANT: Prevent global "telepathy" aggro when some other system tries to set the target
-        // (e.g., selecting an enemy from across the map).
-        if (!IsWithinAggroRange(t, aggroFromOrdersMaxDistance))
-            return;
+        // Some targeting/order systems call SetCombatTarget when an ally "targets" an enemy,
+        // even from very far away. That creates unwanted "telepathy aggro".
+        // We keep LONG-RANGE aggro ONLY for actual damage (GetShot) via _damageAggroUntil window.
+
+        // If the caller is an ally, only accept this aggro when that ally is actually close enough to shoot.
+        AllyController ally = t.GetComponentInParent<AllyController>();
+        if (ally != null && onlyAggroFromAlliesIfTheyCanShootMe)
+        {
+            if (!AllyCanShootMe(ally))
+                return;
+        }
+
+        // If we are NOT in the "recently damaged" aggro window, distance-limit order/target-based aggro.
+        // (This does NOT affect damage-based aggro; GetShot sets _damageAggroUntil.)
+        if (Time.time > _damageAggroUntil)
+        {
+            float maxOrderAggroDist = Mathf.Max(0.1f, distanceToChase);
+            float dist = Vector3.Distance(transform.position, t.position);
+            if (dist > maxOrderAggroDist)
+                return;
+        }
+
+        // Treat explicit combat target assignment as engagement; temporarily keep aggro (optional).
+        if (returnFireWhenHitFromFar)
+            _damageAggroUntil = Time.time + Mathf.Max(0f, damageAggroHoldSeconds);
 
         SetCombatTargetInternal(t);
     }
@@ -492,6 +549,10 @@ public class Enemy2Controller : MonoBehaviour
         // Without an attacker, at least start chasing (fallback to player if available).
         chasing = true;
         chaseCounter = 0f;
+
+        // Being hit should force a short aggro window even if the shooter is far away.
+        if (returnFireWhenHitFromFar)
+            _damageAggroUntil = Time.time + Mathf.Max(0f, damageAggroHoldSeconds);
 
         fireCount = 0f;
         shootTimeCounter = timeToShoot;
@@ -508,8 +569,15 @@ public class Enemy2Controller : MonoBehaviour
         {
             // Damage aggro can have its own radius, separate from SetCombatTarget orders.
             // This prevents an enemy from "snapping" to an attacker anywhere on the map.
-            if (!IsWithinAggroRange(attacker, aggroFromDamageMaxDistance))
+            float maxAggroDist = (aggroFromDamageMaxDistance > 0f) ? aggroFromDamageMaxDistance : distanceToChase;
+            if (!IsWithinAggroRange(attacker, maxAggroDist))
                 return;
+
+            // Hold aggro for a bit even if the attacker is far; helps "return fire" behavior.
+            if (returnFireWhenHitFromFar)
+                _damageAggroUntil = Time.time + Mathf.Max(0f, damageAggroHoldSeconds);
+
+      _damageAggroUntil = Time.time + Mathf.Max(0f, damageAggroHoldSeconds);
 
             SetCombatTargetInternal(attacker);
             return;
@@ -617,7 +685,14 @@ public class Enemy2Controller : MonoBehaviour
         }
 
         // Lose chase only when we're chasing the fallback player and far away.
-        if (_combatTarget == null && chasing && dist >= distanceToLose)
+        float loseDistance = distanceToLose;
+        if (returnFireWhenHitFromFar && Time.time < _damageAggroUntil)
+        {
+            float overrideLose = (damageAggroLoseOverrideDistance > 0f) ? damageAggroLoseOverrideDistance : distanceToLose;
+            loseDistance = Mathf.Max(distanceToLose, overrideLose);
+        }
+
+        if (_combatTarget == null && chasing && dist >= loseDistance)
         {
             chaseCounter += Time.deltaTime;
             if (chaseCounter >= keepChasingTime)
@@ -1018,7 +1093,7 @@ public class Enemy2Controller : MonoBehaviour
             SetMovingAnim(true);
 
             // Optionally keep shooting while repositioning.
-            if (allowShootingWhileMoving && dist <= (outer + Mathf.Max(0f, shootWhileMovingExtraDistance)))
+            if (allowShootingWhileMoving && ShouldShootWhileRepositioning(dist, outer))
                 HandleShooting(target);
 
             return;
@@ -1055,7 +1130,7 @@ public class Enemy2Controller : MonoBehaviour
             SetMovingAnim(true);
 
             // Optionally keep shooting while repositioning.
-            if (allowShootingWhileMoving && dist <= (outer + Mathf.Max(0f, shootWhileMovingExtraDistance)))
+            if (allowShootingWhileMoving && ShouldShootWhileRepositioning(dist, outer))
                 HandleShooting(target);
 
             return;
@@ -1287,7 +1362,23 @@ public class Enemy2Controller : MonoBehaviour
             }
         }
     }
-    void HandleShooting(Transform target)
+    
+    private bool ShouldShootWhileRepositioning(float distToTarget, float outerThreshold)
+    {
+        // Default behavior: only allow shooting while moving near the desired range ring.
+        float allowed = outerThreshold + Mathf.Max(0f, shootWhileMovingExtraDistance);
+
+        // When recently damaged, allow "return fire" from farther away (up to returnFireMaxRange).
+        if (returnFireWhenHitFromFar && Time.time < _damageAggroUntil)
+        {
+            float max = (returnFireMaxRange > 0f) ? returnFireMaxRange : float.PositiveInfinity;
+            allowed = Mathf.Max(allowed, max);
+        }
+
+        return distToTarget <= allowed;
+    }
+
+void HandleShooting(Transform target)
     {
         if (_isDead) return;
         if (bullet == null || firePoint == null || target == null) return;
@@ -1375,7 +1466,17 @@ public class Enemy2Controller : MonoBehaviour
 
         if (!canFire) return;
 
-        Instantiate(bullet, firePoint.position, firePoint.rotation);
+        GameObject spawned = Instantiate(bullet, firePoint.position, firePoint.rotation);
+
+        // Tag ownership so whoever we hit can aggro the correct attacker.
+        BulletController bc = spawned != null ? spawned.GetComponent<BulletController>() : null;
+        if (bc != null)
+        {
+            bc.owner = transform;
+            // Enemy bullets should damage allies/players, not enemies.
+            bc.damageEnemy = false;
+            bc.damageAlly = true;
+        }
         if (debugMuzzleFlash) Debug.Log($"[Enemy2Controller] Shot fired -> triggering muzzle flash on {name}", this);
         TriggerMuzzleFlashSimple();
         if (anim != null) anim.SetTrigger("fireShot");

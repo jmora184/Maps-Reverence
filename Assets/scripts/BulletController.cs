@@ -1,7 +1,7 @@
 using UnityEngine;
 
 /// <summary>
-/// BulletController (works for BOTH your old cube bullets and Unity-Store �laser� bullets)
+/// BulletController (works for BOTH your old cube bullets and Unity-Store “laser” bullets)
 ///
 /// Key upgrades for laser prefabs:
 /// - Auto-adds a small trigger collider + kinematic Rigidbody if the prefab has none (common for visual-only lasers).
@@ -58,6 +58,9 @@ public class BulletController : MonoBehaviour
     public bool alignToCollisionNormal = true;
 
     [Header("Damage")]
+    [Tooltip("Who fired this projectile. Used so enemies can aggro/return-fire at the correct attacker (ally vs player).")]
+    public Transform owner;
+
     [Tooltip("Base damage before headshot multiplier. (Legacy field name also exists: Damage)")]
     public float baseDamage = 2f;
 
@@ -295,6 +298,10 @@ public class BulletController : MonoBehaviour
         bool isEnemy = enemyHealth != null || HasTagInParents(hit, enemyTag);
         bool isAlly = allyHealth != null || HasTagInParents(hit, allyTag) || HasTagInParents(hit, playerTag);
 
+        // Let enemies know WHO hit them so they aggro the attacker (prevents them from snapping to the player when an ally shoots).
+        if (isEnemy)
+            NotifyEnemyAggroFromHit(hit);
+
         if (isEnemy && damageEnemy)
         {
             if (enemyHealth != null)
@@ -378,7 +385,32 @@ public class BulletController : MonoBehaviour
         return false;
     }
 
-    private void SpawnImpact(Vector3 point, Vector3 normal)
+    
+    private void NotifyEnemyAggroFromHit(Collider hit)
+    {
+        if (hit == null) return;
+
+        // Prefer Enemy2Controller if present (your current AI)
+        var enemy2 = hit.GetComponentInParent<Enemy2Controller>();
+        if (enemy2 != null)
+        {
+            // If owner is known, pass it so Enemy2 targets the real attacker (ally/player).
+            if (owner != null)
+                enemy2.GetShot(owner);
+            else
+                enemy2.GetShot();
+            return;
+        }
+
+        // Fallback: legacy enemy controller
+        var enemyLegacy = hit.GetComponentInParent<EnemyController>();
+        if (enemyLegacy != null)
+        {
+            enemyLegacy.GetShot();
+        }
+    }
+
+private void SpawnImpact(Vector3 point, Vector3 normal)
     {
         Vector3 n = normal.sqrMagnitude > 0.0001f ? normal.normalized : -transform.forward;
         float offset = Mathf.Max(0.001f, impactSurfaceOffset);

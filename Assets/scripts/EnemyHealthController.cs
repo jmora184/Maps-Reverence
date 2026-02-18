@@ -6,6 +6,10 @@ using UnityEngine;
 /// IMPORTANT: Do NOT Destroy immediately on 0 HP.
 /// Instead: trigger death animation (via MnR.DeathController / Enemy2Controller / Animator trigger),
 /// then cleanup after a delay (disable or destroy).
+///
+/// UPDATE (return-fire fix):
+/// - On taking damage, this now NOTIFIES Enemy2Controller (preferred) so enemies can aggro/return-fire,
+///   even if older "EnemyController" references are not assigned.
 /// </summary>
 public class EnemyHealthController : MonoBehaviour
 {
@@ -13,7 +17,12 @@ public class EnemyHealthController : MonoBehaviour
     public int maxHealth = 5;
     public int currentHealth = 5;
 
-    [Header("Optional hit reaction")]
+    [Header("Optional hit reaction (preferred)")]
+    [Tooltip("If assigned, will be notified when this enemy takes damage so it can aggro/return-fire.")]
+    public Enemy2Controller enemy2Controller;
+
+    [Header("Legacy hit reaction (older setups)")]
+    [Tooltip("Legacy controller type used in older versions of the project.")]
     public EnemyController theEC;
 
     [Header("Death")]
@@ -37,23 +46,57 @@ public class EnemyHealthController : MonoBehaviour
     {
         if (maxHealth <= 0) maxHealth = 5;
         currentHealth = Mathf.Clamp(currentHealth, 0, maxHealth);
+
+        // Auto-wire controllers if not set in inspector (safe + helps prevent "standing there" bugs)
+        if (enemy2Controller == null)
+            enemy2Controller = GetComponent<Enemy2Controller>();
+
+        if (theEC == null)
+            theEC = GetComponent<EnemyController>();
+
         RaiseHealthChanged();
     }
 
+    /// <summary>
+    /// Apply damage to the enemy.
+    /// NOTE: This method does NOT take an attacker. Enemy2Controller.GetShot() should still aggro/return-fire
+    /// using its internal fallback (typically Player) when attacker is unknown.
+    /// </summary>
     public void DamageEnemy(int damageAmount)
     {
         if (lockAfterDeath && _isDead) return;
 
         currentHealth -= damageAmount;
 
-        if (theEC != null)
-            theEC.GetShot();
+        NotifyHitReaction();
 
         currentHealth = Mathf.Clamp(currentHealth, 0, maxHealth);
         RaiseHealthChanged();
 
         if (currentHealth <= 0)
             Die();
+    }
+
+    private void NotifyHitReaction()
+    {
+        // Prefer Enemy2Controller (your current AI controller)
+        if (enemy2Controller == null)
+            enemy2Controller = GetComponent<Enemy2Controller>();
+
+        if (enemy2Controller != null)
+        {
+            enemy2Controller.GetShot();
+            return;
+        }
+
+        // Fallback to legacy controller if present
+        if (theEC == null)
+            theEC = GetComponent<EnemyController>();
+
+        if (theEC != null)
+        {
+            theEC.GetShot();
+        }
     }
 
     /// <summary>
@@ -75,7 +118,7 @@ public class EnemyHealthController : MonoBehaviour
             return;
         }
 
-        // 2) Next: Enemy2Controller (if you wired death there)
+        // 2) Next: Enemy2Controller (if you've wired death there)
         var enemy2 = GetComponent<Enemy2Controller>();
         if (enemy2 != null)
         {
@@ -125,11 +168,12 @@ public class EnemyHealthController : MonoBehaviour
 
     private static bool HasAnimatorParameter(Animator animator, string paramName, AnimatorControllerParameterType type)
     {
-        if (animator == null || string.IsNullOrWhiteSpace(paramName)) return false;
-        var ps = animator.parameters;
-        for (int i = 0; i < ps.Length; i++)
+        if (animator == null) return false;
+        var parms = animator.parameters;
+        for (int i = 0; i < parms.Length; i++)
         {
-            if (ps[i].name == paramName && ps[i].type == type) return true;
+            if (parms[i].name == paramName && parms[i].type == type)
+                return true;
         }
         return false;
     }
