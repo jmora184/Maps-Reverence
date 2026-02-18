@@ -1,19 +1,20 @@
 using UnityEngine;
 
 /// <summary>
-/// BulletController (collision/trigger based)
+/// BulletController (works for BOTH your old cube bullets and Unity-Store �laser� bullets)
 ///
-/// Robust damage routing for MnR + BACKWARD COMPATIBILITY:
-/// - Some of your scripts (e.g., AllyController) set bullet.Damage.
-///   This file includes a public float Damage field + property wrapper so old code still compiles.
+/// Key upgrades for laser prefabs:
+/// - Auto-adds a small trigger collider + kinematic Rigidbody if the prefab has none (common for visual-only lasers).
+/// - Optional SphereCast/Raycast hit detection each FixedUpdate (recommended for fast projectiles like lasers).
 ///
-/// Damage routing:
-/// - ENEMY damage: if EnemyHealthController exists in parents -> DamageEnemy(int)
-/// - ALLY damage: if AllyHealth exists in parents -> DamageAlly(int)
-/// - Fallback: optional tag + SendMessage for custom setups
+/// Damage routing (same as before):
+/// - ENEMY damage: EnemyHealthController in parents -> DamageEnemy(int)
+/// - ALLY damage: AllyHealth in parents -> DamageAlly(int)
+/// - Fallback: tag checks + SendMessage (optional)
 ///
 /// Notes:
-/// - Targets (enemy/ally) MUST have colliders to receive hits.
+/// - Targets MUST have colliders (enemy/ally/player) to be hittable.
+/// - If your store laser prefab has its own movement script (e.g., ShotBehavior), DISABLE/REMOVE it and let this script move it.
 /// </summary>
 [DisallowMultipleComponent]
 public class BulletController : MonoBehaviour
@@ -24,6 +25,32 @@ public class BulletController : MonoBehaviour
 
     [Tooltip("Optional; if left empty we'll auto-grab the Rigidbody on this object.")]
     public Rigidbody theRB;
+
+    [Header("Laser / Fast Projectile Hit Detection")]
+    [Tooltip("Recommended ON for lasers / very fast bullets. Uses a cast from current->next position each FixedUpdate.")]
+    public bool useCastsForHits = true;
+
+    [Tooltip("Radius for SphereCast. Set to 0 to use a Raycast instead.")]
+    public float castRadius = 0.03f;
+
+    [Tooltip("Which layers can be hit by this projectile.")]
+    public LayerMask hitMask = ~0;
+
+    [Tooltip("Whether the cast should consider trigger colliders.")]
+    public QueryTriggerInteraction castTriggers = QueryTriggerInteraction.Ignore;
+
+    [Header("Auto Physics Setup (for store laser prefabs)")]
+    [Tooltip("If the prefab has no Collider, we add a small trigger CapsuleCollider so OnTriggerEnter can fire.")]
+    public bool autoAddTriggerColliderIfMissing = true;
+
+    [Tooltip("If the prefab has no Rigidbody, we add a kinematic Rigidbody so trigger messages can fire reliably.")]
+    public bool autoAddKinematicRigidbodyIfMissing = true;
+
+    [Tooltip("Radius for the auto-added CapsuleCollider.")]
+    public float autoColliderRadius = 0.03f;
+
+    [Tooltip("Length/height for the auto-added CapsuleCollider (aligned forward/Z).")]
+    public float autoColliderLength = 0.25f;
 
     [Header("Impact")]
     public GameObject impactEffect;
@@ -79,6 +106,8 @@ public class BulletController : MonoBehaviour
     {
         if (theRB == null)
             theRB = GetComponent<Rigidbody>();
+
+        EnsureLaserPrefabHasPhysics();
     }
 
     private void OnEnable()
@@ -91,32 +120,62 @@ public class BulletController : MonoBehaviour
 
         if (theRB != null)
         {
-            theRB.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
-            theRB.interpolation = RigidbodyInterpolation.Interpolate;
-            theRB.isKinematic = false;
             theRB.useGravity = false;
+
+            // If it's a dynamic rigidbody, prefer continuous dynamic
+            if (!theRB.isKinematic)
+                theRB.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+            else
+                theRB.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
+
+            theRB.interpolation = RigidbodyInterpolation.Interpolate;
         }
     }
 
     private void FixedUpdate()
     {
-        if (theRB != null)
+        // Lifetime
+        if (Time.time - _spawnTime >= lifeTime)
         {
-            // Unity 6: linearVelocity exists; velocity works too.
+            Destroy(gameObject);
+            return;
+        }
+
+        // Predict next position (for casts)
+        Vector3 from = (theRB != null) ? theRB.position : transform.position;
+        Vector3 to = from + transform.forward * moveSpeed * Time.fixedDeltaTime;
+
+        // Cast-based hit detection (best for lasers)
+        if (useCastsForHits && TryGetCastHit(from, to, out RaycastHit hit))
+        {
+            // Move to contact point (helps impact FX placement)
+            transform.position = hit.point;
+
+            HandleHit(hit.collider, hit.point, hit.normal);
+            Destroy(gameObject);
+            return;
+        }
+
+        // Movement
+        if (theRB != null && !theRB.isKinematic)
+        {
+            // Dynamic RB movement
             theRB.linearVelocity = transform.forward * moveSpeed;
         }
         else
         {
-            transform.position += transform.forward * moveSpeed * Time.fixedDeltaTime;
+            // Manual movement (covers kinematic RBs / no RB)
+            transform.position = to;
         }
-
-        if (Time.time - _spawnTime >= lifeTime)
-            Destroy(gameObject);
     }
 
     private void OnTriggerEnter(Collider other)
     {
         if (other == null) return;
+
+        // Prevent self-hits
+        if (other.transform.IsChildOf(transform)) return;
+
         HandleHit(other, transform.position, -transform.forward);
         Destroy(gameObject);
     }
@@ -126,6 +185,7 @@ public class BulletController : MonoBehaviour
         if (collision == null) return;
 
         Collider hit = collision.collider;
+        if (hit != null && hit.transform.IsChildOf(transform)) return;
 
         Vector3 point = transform.position;
         Vector3 normal = -transform.forward;
@@ -139,6 +199,81 @@ public class BulletController : MonoBehaviour
 
         HandleHit(hit, point, normal);
         Destroy(gameObject);
+    }
+
+    private void EnsureLaserPrefabHasPhysics()
+    {
+        // Many store laser prefabs are visuals only (mesh/line) and have no collider/rigidbody.
+        // To make trigger hits work, at least one side must have a Rigidbody; we add one if missing.
+
+        if (autoAddTriggerColliderIfMissing)
+        {
+            Collider anyCol = GetComponent<Collider>();
+            if (anyCol == null)
+            {
+                CapsuleCollider cc = gameObject.AddComponent<CapsuleCollider>();
+                cc.direction = 2; // Z axis
+                cc.radius = Mathf.Max(0.0001f, autoColliderRadius);
+                cc.height = Mathf.Max(autoColliderLength, cc.radius * 2f);
+                cc.isTrigger = true;
+            }
+        }
+
+        if (theRB == null && autoAddKinematicRigidbodyIfMissing)
+        {
+            theRB = gameObject.AddComponent<Rigidbody>();
+            theRB.useGravity = false;
+            theRB.isKinematic = true; // we move via transform by default
+            theRB.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
+            theRB.interpolation = RigidbodyInterpolation.Interpolate;
+        }
+    }
+
+    private bool TryGetCastHit(Vector3 from, Vector3 to, out RaycastHit bestHit)
+    {
+        bestHit = default;
+
+        Vector3 delta = to - from;
+        float dist = delta.magnitude;
+        if (dist <= 0.0001f) return false;
+
+        Vector3 dir = delta / dist;
+
+        if (castRadius > 0f)
+        {
+            RaycastHit[] hits = Physics.SphereCastAll(from, castRadius, dir, dist, hitMask, castTriggers);
+            return ChooseBestNonSelfHit(hits, out bestHit);
+        }
+        else
+        {
+            RaycastHit[] hits = Physics.RaycastAll(from, dir, dist, hitMask, castTriggers);
+            return ChooseBestNonSelfHit(hits, out bestHit);
+        }
+    }
+
+    private bool ChooseBestNonSelfHit(RaycastHit[] hits, out RaycastHit bestHit)
+    {
+        bestHit = default;
+        bool found = false;
+        float bestDist = float.PositiveInfinity;
+
+        for (int i = 0; i < hits.Length; i++)
+        {
+            RaycastHit h = hits[i];
+            if (h.collider == null) continue;
+
+            // Ignore this projectile's own colliders/children
+            if (h.collider.transform.IsChildOf(transform)) continue;
+
+            if (h.distance < bestDist)
+            {
+                bestDist = h.distance;
+                bestHit = h;
+                found = true;
+            }
+        }
+
+        return found;
     }
 
     private void HandleHit(Collider hit, Vector3 point, Vector3 normal)
@@ -190,7 +325,7 @@ public class BulletController : MonoBehaviour
         // FX (optional): spawn only when hitting a character
         if (impactEffect != null && (isEnemy || isAlly))
         {
-            Vector3 p = hit.ClosestPoint(transform.position);
+            Vector3 p = hit.ClosestPoint(point);
             SpawnImpact(p, normal);
         }
     }
