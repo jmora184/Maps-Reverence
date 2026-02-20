@@ -883,6 +883,16 @@ public class Enemy2Controller : MonoBehaviour
             if (ally == null) continue;
             if (!ally.gameObject.activeInHierarchy) continue;
 
+            // Prisoners / inactive allies should NOT trigger enemy ally-aggro scans.
+            // We gate on AllyActivationGate and optional AllyPrisonerState so enemies ignore prisoners until recruited.
+            var gate = ally.GetComponent<AllyActivationGate>();
+            if (gate != null && !gate.IsActive)
+                continue;
+
+            var prisoner = ally.GetComponent<AllyPrisonerState>();
+            if (prisoner != null && prisoner.IsPrisoner)
+                continue;
+
             Transform t = ally.transform;
 
             // Optional line of sight
@@ -1737,6 +1747,13 @@ void HandleShooting(Transform target)
 
         // If the target object is disabled, treat as invalid.
         if (!t.gameObject.activeInHierarchy) return true;
+
+        // Inactive prisoners should not be valid combat targets.
+        var gate = t.GetComponentInParent<AllyActivationGate>();
+        if (gate != null && !gate.IsActive) return true;
+
+        var prisoner = t.GetComponentInParent<AllyPrisonerState>();
+        if (prisoner != null && prisoner.IsPrisoner) return true;
 
         // If the target has a DeathController and is dead, invalid.
         var dc = t.GetComponentInParent<MnR.DeathController>();

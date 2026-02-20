@@ -29,6 +29,23 @@ public class Gun : MonoBehaviour
     [Header("Zoom / ADS")]
     public float zoomAmount;
 
+    [Header("Accuracy / Spread (degrees)")]
+    [Tooltip("Base spread in degrees when hip-firing (not aiming). Bigger = less accurate.")]
+    public float hipSpreadDeg = 1.5f;
+
+    [Tooltip("Base spread in degrees when aiming down sights (ADS). Usually much smaller than hipSpreadDeg.")]
+    public float adsSpreadDeg = 0.35f;
+
+    [Tooltip("How much extra spread is added per shot while holding fire (bloom).")]
+    public float spreadPerShotDeg = 0.10f;
+
+    [Tooltip("Maximum extra spread that can build up from sustained fire (bloom cap).")]
+    public float maxExtraSpreadDeg = 2.0f;
+
+    [Tooltip("How quickly extra spread recovers back to 0 when you stop firing (degrees per second).")]
+    public float spreadRecoveryPerSec = 2.5f;
+
+
     [Header("Info")]
     public string gunName;
 

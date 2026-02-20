@@ -24,6 +24,11 @@ public class Player2Controller : MonoBehaviour
     [Header("Look")]
     public float mouseSensitivity;
     public bool invertX;
+
+    [Header("Weapon Spread Runtime")]
+    [Tooltip("Runtime bloom (extra spread) built up while firing. Reset when switching guns.")]
+    public float extraSpreadDeg = 0f;
+
     public bool invertY;
 
     private bool canJump, canDoubleJump;
@@ -82,6 +87,9 @@ public class Player2Controller : MonoBehaviour
     public float shotsPerSecond = 10f;   // hold mouse to fire (overridden by active gun FireRate if available)
     private float nextFireTime = 0f;
 
+
+    [Tooltip("When true, the player cannot fire (used by reload/melee animation scripts).")]
+    public bool blockShooting = false;
     [Header("Crosshair Recoil (UI)")]
     [Tooltip("How strong the crosshair recoil is while hip-firing.")]
     public float crosshairRecoilHip = 1f;
@@ -201,68 +209,120 @@ public class Player2Controller : MonoBehaviour
             // ---------------------------
             // SHOOTING
             // ---------------------------
-            bool holdingFire = false;
-
-            // If the gun does NOT auto fire, shoot on mouse down only.
-            if (activeGun != null && activeGun.canAutoFire == false)
-                holdingFire = Input.GetMouseButtonDown(0);
-            else
-                holdingFire = Input.GetMouseButton(0);
-
-            // Use gun fire rate if available (and non-zero), otherwise use player-level shotsPerSecond.
-            float sps = shotsPerSecond;
-            if (activeGun != null && activeGun.fireRate > 0)
-                sps = activeGun.fireRate;
-
-            if (holdingFire && Time.time >= nextFireTime)
+            if (!blockShooting)
             {
-                nextFireTime = Time.time + (1f / Mathf.Max(0.01f, sps));
+                bool holdingFire = false;
 
-                // Keep the flash visible for a short duration so it doesn't flicker inconsistently
-                muzzleFlashUntil = Time.time + muzzleFlashDuration;
+                // If the gun does NOT auto fire, shoot on mouse down only.
+                if (activeGun != null && activeGun.canAutoFire == false)
+                    holdingFire = Input.GetMouseButtonDown(0);
+                else
+                    holdingFire = Input.GetMouseButton(0);
 
-                if (firePoint != null)
+                // Use gun fire rate if available (and non-zero), otherwise use player-level shotsPerSecond.
+                float sps = shotsPerSecond;
+                if (activeGun != null && activeGun.fireRate > 0)
+                    sps = activeGun.fireRate;
+
+                if (holdingFire && Time.time >= nextFireTime)
                 {
-                    RaycastHit hit;
-                    if (Physics.Raycast(camTrans.position, camTrans.forward, out hit, 50f))
+                    nextFireTime = Time.time + (1f / Mathf.Max(0.01f, sps));
+
+                    // Keep the flash visible for a short duration so it doesn't flicker inconsistently
+                    muzzleFlashUntil = Time.time + muzzleFlashDuration;
+
+                    if (firePoint != null)
                     {
-                        if (Vector3.Distance(camTrans.position, hit.point) > 2f)
-                            firePoint.LookAt(hit.point);
+                        RaycastHit hit;
+                        if (Physics.Raycast(camTrans.position, camTrans.forward, out hit, 50f))
+                        {
+                            if (Vector3.Distance(camTrans.position, hit.point) > 2f)
+                                firePoint.LookAt(hit.point);
+                        }
+                        else
+                        {
+                            firePoint.LookAt(camTrans.position + (camTrans.forward * 30f));
+                        }
                     }
+
+                    if (bullet != null && firePoint != null)
+                    {
+                        // ---- Weapon-specific spread (degrees) ----
+                        bool isADS = Input.GetMouseButton(1);
+
+                        float baseSpread = 0f;
+                        float perShot = 0.0f;
+                        float maxExtra = 0.0f;
+
+                        if (activeGun != null)
+                        {
+                            baseSpread = isADS ? activeGun.adsSpreadDeg : activeGun.hipSpreadDeg;
+                            perShot = activeGun.spreadPerShotDeg;
+                            maxExtra = activeGun.maxExtraSpreadDeg;
+                        }
+
+                        // Build bloom while holding fire (adds on top of base spread).
+                        extraSpreadDeg = Mathf.Min(extraSpreadDeg + perShot, maxExtra);
+
+                        float finalSpread = Mathf.Max(0f, baseSpread + extraSpreadDeg);
+
+                        // Random yaw/pitch inside a circle to form a cone.
+                        Vector2 r = Random.insideUnitCircle * finalSpread;
+                        Quaternion spreadRot = Quaternion.Euler(-r.y, r.x, 0f);
+
+                        Quaternion shootRot = firePoint.rotation * spreadRot;
+
+                        // Spawn slightly forward so ADS doesn't spawn inside our own colliders
+                        Vector3 spawnPos = firePoint.position + (shootRot * Vector3.forward) * bulletSpawnForwardOffset;
+                        GameObject b = Instantiate(bullet, spawnPos, shootRot);
+                        IgnoreShooterCollisions(b);
+                    }
+
+                    ApplyRecoil();
+
+                    // Crosshair recoil (UI) - small kick/bloom per shot
+                    if (CrosshairRecoilUI.Instance != null)
+                    {
+                        float intensity = Input.GetMouseButton(1) ? crosshairRecoilADS : crosshairRecoilHip;
+                        CrosshairRecoilUI.Instance.Kick(intensity);
+                    }
+
+                    // Ensure muzzle flash triggers every single shot (even on semi-auto).
+                    TriggerMuzzleFlash();
+
+                    // (Recovery happens below when not holding fire.)
+                }
+
+                // Recover bloom when the player isn't holding fire.
+                if (activeGun != null)
+                {
+                    bool isHoldingFire = false;
+                    if (activeGun.canAutoFire == false)
+                        isHoldingFire = Input.GetMouseButtonDown(0);
                     else
+                        isHoldingFire = Input.GetMouseButton(0);
+
+                    if (!isHoldingFire)
                     {
-                        firePoint.LookAt(camTrans.position + (camTrans.forward * 30f));
+                        extraSpreadDeg = Mathf.MoveTowards(extraSpreadDeg, 0f, activeGun.spreadRecoveryPerSec * Time.deltaTime);
                     }
                 }
 
-                if (bullet != null && firePoint != null)
+                // If we're using a ParticleSystem muzzle flash, we trigger it per-shot in TriggerMuzzleFlash().
+                // Only use GameObject toggle mode when no ParticleSystem is present.
+                if (muzzleFlash != null && muzzleFlashPS == null)
                 {
-                    // Spawn slightly forward so ADS doesn't spawn inside our own colliders
-                    Vector3 spawnPos = firePoint.position + firePoint.forward * bulletSpawnForwardOffset;
-                    GameObject b = Instantiate(bullet, spawnPos, firePoint.rotation);
-                    IgnoreShooterCollisions(b);
+                    bool showFlash = Time.time < muzzleFlashUntil;
+                    if (muzzleFlash.activeSelf != showFlash)
+                        muzzleFlash.SetActive(showFlash);
                 }
-
-                ApplyRecoil();
-
-                // Crosshair recoil (UI) - small kick/bloom per shot
-                if (CrosshairRecoilUI.Instance != null)
-                {
-                    float intensity = Input.GetMouseButton(1) ? crosshairRecoilADS : crosshairRecoilHip;
-                    CrosshairRecoilUI.Instance.Kick(intensity);
-                }
-
-                // Ensure muzzle flash triggers every single shot (even on semi-auto).
-                TriggerMuzzleFlash();
             }
-
-            // If we're using a ParticleSystem muzzle flash, we trigger it per-shot in TriggerMuzzleFlash().
-            // Only use GameObject toggle mode when no ParticleSystem is present.
-            if (muzzleFlash != null && muzzleFlashPS == null)
+            else
             {
-                bool showFlash = Time.time < muzzleFlashUntil;
-                if (muzzleFlash.activeSelf != showFlash)
-                    muzzleFlash.SetActive(showFlash);
+                // Reload / melee / etc can set blockShooting to stop the player from firing.
+                muzzleFlashUntil = 0f;
+                extraSpreadDeg = 0f;
+                if (muzzleFlash != null) muzzleFlash.SetActive(false);
             }
         }
         else
@@ -370,6 +430,7 @@ public class Player2Controller : MonoBehaviour
         }
 
         activeGun = guns[gunIndex];
+        extraSpreadDeg = 0f;
 
         // Pull core references from Gun component (these fields exist on your Gun script)
         if (activeGun != null)
@@ -435,6 +496,7 @@ public class Player2Controller : MonoBehaviour
 
         // Clear muzzle flash state so it doesn't "stick" across switches
         muzzleFlashUntil = 0f;
+                extraSpreadDeg = 0f;
         if (muzzleFlash != null) muzzleFlash.SetActive(false);
         if (muzzleFlashPS != null) muzzleFlashPS.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
 

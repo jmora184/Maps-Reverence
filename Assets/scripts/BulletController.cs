@@ -73,6 +73,9 @@ public class BulletController : MonoBehaviour
     [Tooltip("If true, bullets can damage allies/players.")]
     public bool damageAlly = true;
 
+    [Tooltip("If true, bullets can damage NPCs (non-recruitable civilians).")]
+    public bool damageNPC = true;
+
     [Header("Legacy Compatibility")]
     [Tooltip("Legacy field used by older scripts (e.g., AllyController). Keep this in sync with baseDamage.")]
     public float Damage = 2f;
@@ -93,6 +96,7 @@ public class BulletController : MonoBehaviour
     [Header("Optional Tag Filtering (fallback)")]
     public string enemyTag = "Enemy";
     public string allyTag = "Ally";
+    public string npcTag = "NPC";
     public string playerTag = "Player";
 
     [Header("Fallback Ally Damage Message")]
@@ -295,8 +299,11 @@ public class BulletController : MonoBehaviour
         EnemyHealthController enemyHealth = hit.GetComponentInParent<EnemyHealthController>();
         AllyHealth allyHealth = hit.GetComponentInParent<AllyHealth>();
 
+        NPCHealth npcHealth = hit.GetComponentInParent<NPCHealth>();
+
         bool isEnemy = enemyHealth != null || HasTagInParents(hit, enemyTag);
         bool isAlly = allyHealth != null || HasTagInParents(hit, allyTag) || HasTagInParents(hit, playerTag);
+        bool isNPC = npcHealth != null || HasTagInParents(hit, npcTag);
 
         // Let enemies know WHO hit them so they aggro the attacker (prevents them from snapping to the player when an ally shoots).
         if (isEnemy)
@@ -329,8 +336,22 @@ public class BulletController : MonoBehaviour
             }
         }
 
+        else if (isNPC && damageNPC)
+        {
+            if (npcHealth != null)
+            {
+                npcHealth.TakeDamage(dmgInt, owner);
+            }
+            else
+            {
+                // fallback for custom NPC health scripts
+                hit.SendMessageUpwards("DamageNPC", dmgInt, SendMessageOptions.DontRequireReceiver);
+                hit.SendMessageUpwards("TakeDamage", dmgFloat, SendMessageOptions.DontRequireReceiver);
+            }
+        }
+
         // FX (optional): spawn only when hitting a character
-        if (impactEffect != null && (isEnemy || isAlly))
+        if (impactEffect != null && (isEnemy || isAlly || isNPC))
         {
             Vector3 p = hit.ClosestPoint(point);
             SpawnImpact(p, normal);
