@@ -39,6 +39,12 @@ public class Player2Controller : MonoBehaviour
 
     [Header("Gun Runtime (Active)")]
     public Gun activeGun;
+
+    [Header("Ammo UI")]
+    public AmmoHUD ammoHUD;
+
+    [Header("Runtime Ammo")]
+    public WeaponAmmo activeWeaponAmmo;
     public GameObject bullet;
     public Transform firePoint;
 
@@ -226,6 +232,12 @@ public class Player2Controller : MonoBehaviour
 
                 if (holdingFire && Time.time >= nextFireTime)
                 {
+                    // --- Ammo gate ---
+                    // If the active weapon has ammo logic, consume a round BEFORE firing.
+                    // If it returns false, we don't fire (and it may auto-start reload if reserve > 0).
+                    if (activeWeaponAmmo != null && !activeWeaponAmmo.TryConsumeRound())
+                        return;
+
                     nextFireTime = Time.time + (1f / Mathf.Max(0.01f, sps));
 
                     // Keep the flash visible for a short duration so it doesn't flicker inconsistently
@@ -275,6 +287,12 @@ public class Player2Controller : MonoBehaviour
                         // Spawn slightly forward so ADS doesn't spawn inside our own colliders
                         Vector3 spawnPos = firePoint.position + (shootRot * Vector3.forward) * bulletSpawnForwardOffset;
                         GameObject b = Instantiate(bullet, spawnPos, shootRot);
+
+                        // ✅ IMPORTANT: tell the bullet who fired it (needed for impact FX switching + aggro)
+                        BulletController bc = b.GetComponent<BulletController>();
+                        if (bc != null)
+                            bc.owner = transform;
+
                         IgnoreShooterCollisions(b);
                     }
 
@@ -437,6 +455,22 @@ public class Player2Controller : MonoBehaviour
         {
             bullet = activeGun.bullet;
             firePoint = activeGun.firePoint;
+
+            // Ammo source lives on the same weapon GameObject as the Gun component
+            // WeaponAmmo might be on the same object OR nested under the weapon visuals
+            activeWeaponAmmo = activeGun.GetComponent<WeaponAmmo>();
+            if (activeWeaponAmmo == null)
+                activeWeaponAmmo = activeGun.GetComponentInChildren<WeaponAmmo>(true);
+
+            // Hook the HUD so it updates when you switch weapons
+            if (ammoHUD != null)
+                ammoHUD.Hook(activeWeaponAmmo);
+        }
+        else
+        {
+            activeWeaponAmmo = null;
+            if (ammoHUD != null)
+                ammoHUD.Hook(null);
         }
 
         // If those aren't assigned on the Gun component, try to find common children

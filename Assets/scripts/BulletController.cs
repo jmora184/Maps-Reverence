@@ -54,6 +54,15 @@ public class BulletController : MonoBehaviour
 
     [Header("Impact")]
     public GameObject impactEffect;
+    [Tooltip("Impact effect used when hitting ENEMIES (eg: GreenBloodSpray). Leave empty to use Impact Effect (legacy).")]
+    public GameObject impactEffectEnemy;
+
+    [Tooltip("Impact effect used when the PLAYER shoots an ALLY/PLAYER (eg: RedBloodSpray).")]
+    public GameObject impactEffectAlly;
+
+    [Tooltip("Optional impact effect for NPCs.")]
+    public GameObject impactEffectNPC;
+
     public float impactSurfaceOffset = 0.03f;
     public bool alignToCollisionNormal = true;
 
@@ -124,6 +133,10 @@ public class BulletController : MonoBehaviour
         // Ensure legacy Damage stays synced when prefab overrides are present
         if (Mathf.Abs(Damage - baseDamage) > 0.0001f)
             baseDamage = Damage;
+
+        // Back-compat: if Impact Effect Enemy not set, fall back to legacy Impact Effect
+        if (impactEffectEnemy == null)
+            impactEffectEnemy = impactEffect;
 
         if (theRB != null)
         {
@@ -298,11 +311,12 @@ public class BulletController : MonoBehaviour
         // Prefer component-based detection (most reliable)
         EnemyHealthController enemyHealth = hit.GetComponentInParent<EnemyHealthController>();
         AllyHealth allyHealth = hit.GetComponentInParent<AllyHealth>();
+        PlayerVitals playerVitals = hit.GetComponentInParent<PlayerVitals>();
 
         NPCHealth npcHealth = hit.GetComponentInParent<NPCHealth>();
 
         bool isEnemy = enemyHealth != null || HasTagInParents(hit, enemyTag);
-        bool isAlly = allyHealth != null || HasTagInParents(hit, allyTag) || HasTagInParents(hit, playerTag);
+        bool isAlly = allyHealth != null || playerVitals != null || HasTagInParents(hit, allyTag) || HasTagInParents(hit, playerTag);
         bool isNPC = npcHealth != null || HasTagInParents(hit, npcTag);
 
         // Let enemies know WHO hit them so they aggro the attacker (prevents them from snapping to the player when an ally shoots).
@@ -324,7 +338,12 @@ public class BulletController : MonoBehaviour
         }
         else if (isAlly && damageAlly)
         {
-            if (allyHealth != null)
+            // Player first (new health system)
+            if (playerVitals != null)
+            {
+                playerVitals.Damage(dmgInt);
+            }
+            else if (allyHealth != null)
             {
                 allyHealth.DamageAlly(dmgInt);
             }
@@ -351,10 +370,23 @@ public class BulletController : MonoBehaviour
         }
 
         // FX (optional): spawn only when hitting a character
-        if (impactEffect != null && (isEnemy || isAlly || isNPC))
+        // Special rule you asked for:
+        // - Player bullet uses GreenBloodSpray for enemies
+        // - BUT when the PLAYER shoots an ally/player, use RedBloodSpray instead
+        GameObject fx = impactEffectEnemy != null ? impactEffectEnemy : impactEffect;
+
+        // NPC override (optional)
+        if (isNPC && impactEffectNPC != null)
+            fx = impactEffectNPC;
+
+        // Ally override ONLY when the shooter is the player
+        if (isAlly && impactEffectAlly != null && IsOwnerPlayer())
+            fx = impactEffectAlly;
+
+        if (fx != null && (isEnemy || isAlly || isNPC))
         {
             Vector3 p = hit.ClosestPoint(point);
-            SpawnImpact(p, normal);
+            SpawnImpact(fx, p, normal);
         }
     }
 
@@ -407,7 +439,22 @@ public class BulletController : MonoBehaviour
     }
 
     
-    private void NotifyEnemyAggroFromHit(Collider hit)
+        private bool IsOwnerPlayer()
+    {
+        if (owner == null) return false;
+
+        // Tag-based check (recommended)
+        if (!string.IsNullOrEmpty(playerTag) && owner.CompareTag(playerTag))
+            return true;
+
+        // Component-based fallback
+        if (owner.GetComponentInParent<Player2Controller>() != null)
+            return true;
+
+        return false;
+    }
+
+private void NotifyEnemyAggroFromHit(Collider hit)
     {
         if (hit == null) return;
 
@@ -431,7 +478,7 @@ public class BulletController : MonoBehaviour
         }
     }
 
-private void SpawnImpact(Vector3 point, Vector3 normal)
+private void SpawnImpact(GameObject fxPrefab, Vector3 point, Vector3 normal)
     {
         Vector3 n = normal.sqrMagnitude > 0.0001f ? normal.normalized : -transform.forward;
         float offset = Mathf.Max(0.001f, impactSurfaceOffset);
@@ -441,6 +488,6 @@ private void SpawnImpact(Vector3 point, Vector3 normal)
         if (forward.sqrMagnitude < 0.0001f) forward = n;
 
         Quaternion rot = Quaternion.LookRotation(forward);
-        Instantiate(impactEffect, spawnPos, rot);
+        Instantiate(fxPrefab, spawnPos, rot);
     }
 }

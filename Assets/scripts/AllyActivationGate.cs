@@ -37,6 +37,8 @@ public class AllyActivationGate : MonoBehaviour
     private int _originalLayer;
     private NavMeshAgent _agent;
     private Transform _player;
+    private bool _promptShowing;
+
 
     public bool IsActive { get; private set; }
 
@@ -54,6 +56,15 @@ public class AllyActivationGate : MonoBehaviour
     private void OnEnable()
     {
         ResolvePlayer();
+    }
+
+    private void OnDisable()
+    {
+        if (_promptShowing)
+        {
+            RecruitPromptUI.Hide();
+            _promptShowing = false;
+        }
     }
 
     private void Update()
@@ -77,10 +88,16 @@ public class AllyActivationGate : MonoBehaviour
             string msg = string.IsNullOrEmpty(recruitPromptText) ? "Press {KEY} to recruit" : recruitPromptText;
             msg = msg.Replace("{KEY}", activationKey.ToString());
             RecruitPromptUI.Show(msg);
+            _promptShowing = true;
         }
         else
         {
-            RecruitPromptUI.Hide();
+            // Only hide if THIS ally was the one showing the prompt.
+            if (_promptShowing)
+            {
+                if (_promptShowing) { RecruitPromptUI.Hide(); _promptShowing = false; }
+                _promptShowing = false;
+            }
         }
 
         if (_player != null && IsPlayerInRange(activationRange) && Input.GetKeyDown(activationKey))
@@ -98,7 +115,7 @@ public class AllyActivationGate : MonoBehaviour
         if (_agent != null && _agent.isActiveAndEnabled)
             _agent.isStopped = false;
 
-        RecruitPromptUI.Hide();
+        if (_promptShowing) { RecruitPromptUI.Hide(); _promptShowing = false; }
     }
 
     public void Deactivate()
@@ -107,7 +124,7 @@ public class AllyActivationGate : MonoBehaviour
         IsActive = false;
 
         ApplyInactiveState();
-        RecruitPromptUI.Hide();
+        if (_promptShowing) { RecruitPromptUI.Hide(); _promptShowing = false; }
     }
 
     private void ApplyInactiveState()

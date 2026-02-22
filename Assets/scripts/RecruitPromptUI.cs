@@ -1,8 +1,8 @@
 using UnityEngine;
-using UnityEngine.UI;
+using TMPro;
 
 /// <summary>
-/// Attach this to your existing Canvas -> Recruit GameObject that has a Text (Legacy).
+/// Attach this to your existing Canvas -> Recruit GameObject that has a TMP text (TextMeshProUGUI).
 /// This version is "explicit show/hide" (no auto-hide). If something calls Show(), it's visible until Hide() is called.
 /// </summary>
 public class RecruitPromptUI : MonoBehaviour
@@ -10,7 +10,7 @@ public class RecruitPromptUI : MonoBehaviour
     private static RecruitPromptUI _instance;
 
     [Header("References")]
-    [SerializeField] private Text promptText;
+    [SerializeField] private TMP_Text promptText;
 
     [Header("Debug")]
     [SerializeField] private bool testShowOnStart = false;
@@ -27,7 +27,7 @@ public class RecruitPromptUI : MonoBehaviour
         _instance = this;
 
         if (promptText == null)
-            promptText = GetComponentInChildren<Text>(true);
+            promptText = GetComponentInChildren<TMP_Text>(true);
 
         SetVisible(false);
     }

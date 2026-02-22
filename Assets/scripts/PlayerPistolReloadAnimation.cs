@@ -2,49 +2,68 @@ using System.Collections;
 using UnityEngine;
 
 /// <summary>
-/// Simple "reload animation" that:
-/// 1) Plays a weapon swing using THIS script's motion values (no melee dependency)
-/// 2) Temporarily hides the magazine GameObject (AR_A_Mag) and shows it again
-/// 3) (Optional) blocks firing while the animation runs
+/// Pistol reload animation (separate from PlayerWeaponReloadAnimation).
 ///
-/// This is ONLY the visual animation + mag toggle (no ammo logic yet).
+/// Behaves the same as your rifle reload animation:
+/// - Animates weapon local position/rotation to a "reload pose" then back.
+/// - Optionally blocks firing while running.
+/// - Instead of disabling/enabling the magazine object, it SLIDES the magazine along LOCAL X:
+///     insertedX (-0.0057) -> removedX (-0.04) -> insertedX
+///
+/// Attach to your Pistol (or the same place you attached the rifle version).
+/// Assign:
+///   - Weapon Visual Root Override (optional)
+///   - Magazine Transform (the pistol magazine transform)
+/// Then tune the motion/ timings as needed.
 /// </summary>
-public class PlayerWeaponReloadAnimation : MonoBehaviour
+public class PlayerPistolReloadAnimation : MonoBehaviour
 {
-    
     // Called by WeaponAmmo via UnityEvent (OnReloadRequested)
     public void RequestReload()
     {
         TryReload();
     }
 
-[Header("Input")]
+    [Header("Input")]
     public KeyCode reloadKey = KeyCode.N;
 
     [Header("References")]
     [Tooltip("Optional: weapon parent/holder to animate instead of the gun root. If null, we auto-use the active Gun transform.")]
     public Transform weaponVisualRootOverride;
 
-    [Tooltip("Magazine GameObject to hide/show (ex: AR_A_Mag). If left null, we will try to auto-find a child named 'AR_A_Mag' under the weapon visual.")]
-    public GameObject magazineObject;
+    [Tooltip("Magazine Transform to slide in/out (pistol mag). If null, we try to auto-find a child named 'Magazine' under the weapon visual.")]
+    public Transform magazineTransform;
 
     [Header("Motion (per-weapon values)")]
     public Vector3 reloadLocalOffset = new Vector3(0.05f, -0.08f, 0.22f);
     public Vector3 reloadLocalEuler = new Vector3(-18f, 6f, 0f);
     public float reloadMoveDuration = 0.10f;
 
-    [Tooltip("How long to hold at the peak (seconds). This is where the mag swap looks best.")]
+    [Tooltip("How long to hold at the peak (seconds). This is where the mag slide looks best.")]
     public float peakHoldTime = 0.15f;
 
+    [Header("Magazine Slide (local X)")]
+    [Tooltip("Local X when the magazine is inserted (your normal value).")]
+    public float insertedLocalX = -0.0057f;
+
+    [Tooltip("Local X when the magazine is pulled out.")]
+    public float removedLocalX = -0.04f;
+
+    [Tooltip("If true, we capture the magazine's starting local X on first resolve and use that as Inserted X.")]
+    public bool autoCaptureInsertedX = true;
+
+    [Tooltip("Seconds to smooth the magazine slide when switching positions (0 = instant).")]
+    public float magSlideDuration = 0.05f;
+
     [Header("Magazine Timing (normalized over the full animation time)")]
-    [Range(0f, 1f)] public float hideMagAt = 0.35f;
-    [Range(0f, 1f)] public float showMagAt = 0.75f;
+    [Range(0f, 1f)] public float pullMagAt = 0.35f;   // was "hideMagAt"
+    [Range(0f, 1f)] public float insertMagAt = 0.75f; // was "showMagAt"
 
     [Header("Fire Blocking (optional)")]
     [Tooltip("Extends Gun.fireCounter while reloading (only works if your firing respects Gun.fireCounter).")]
     public bool blockFiringDuringReload = true;
 
-    [Tooltip("Blocks the Player2Controller shooting loop (recommended if your firing uses nextFireTime).")]
+    [Tooltip("Blocks the Player2Controller shooting loop (recommended if your firing uses blockShooting).")]
     public bool blockPlayerControllerShooting = true;
 
     [Tooltip("Extra time to add on top of animation when blocking (seconds).")]
@@ -55,8 +74,13 @@ public class PlayerWeaponReloadAnimation : MonoBehaviour
     private Quaternion _weaponStartRot;
     private bool _weaponCached;
 
+    private Vector3 _magStartLocalPos;
+    private bool _magCached;
+
     private Coroutine _reloadCo;
     private bool _isReloading;
+
+    private Coroutine _magSlideCo;
 
     void Update()
     {
@@ -71,7 +95,7 @@ public class PlayerWeaponReloadAnimation : MonoBehaviour
         ResolveWeaponVisual();
         if (_weaponVisual == null) return;
 
-        ResolveMagazineObject();
+        ResolveMagazineTransform();
 
         if (_reloadCo != null) StopCoroutine(_reloadCo);
         _reloadCo = StartCoroutine(ReloadRoutine());
@@ -99,13 +123,25 @@ public class PlayerWeaponReloadAnimation : MonoBehaviour
         }
     }
 
-    void ResolveMagazineObject()
+    void ResolveMagazineTransform()
     {
-        if (magazineObject != null) return;
-        if (_weaponVisual == null) return;
+        if (magazineTransform == null && _weaponVisual != null)
+        {
+            // Best-effort auto-find (you can rename this to match your pistol mag object if needed).
+            Transform t = FindDeepChild(_weaponVisual, "Magazine");
+            if (t == null) t = FindDeepChild(_weaponVisual, "Mag");
+            if (t == null) t = FindDeepChild(_weaponVisual, "AR_A_Mag"); // fallback if you keep same name
+            if (t != null) magazineTransform = t;
+        }
 
-        Transform t = FindDeepChild(_weaponVisual, "AR_A_Mag");
-        if (t != null) magazineObject = t.gameObject;
+        if (magazineTransform != null && !_magCached)
+        {
+            _magStartLocalPos = magazineTransform.localPosition;
+            _magCached = true;
+
+            if (autoCaptureInsertedX)
+                insertedLocalX = _magStartLocalPos.x;
+        }
     }
 
     void CacheWeaponStart()
@@ -162,8 +198,8 @@ public class PlayerWeaponReloadAnimation : MonoBehaviour
         Quaternion fromRot = _weaponStartRot;
         Quaternion toRot = _weaponStartRot * Quaternion.Euler(localEuler);
 
-        bool magHidden = false;
-        bool magShownAgain = false;
+        bool magPulled = false;
+        bool magInsertedAgain = false;
 
         float elapsed = 0f;
 
@@ -177,7 +213,7 @@ public class PlayerWeaponReloadAnimation : MonoBehaviour
             _weaponVisual.localRotation = Quaternion.Slerp(fromRot, toRot, s);
 
             elapsed += Time.deltaTime;
-            HandleMagTiming(elapsed, totalTime, ref magHidden, ref magShownAgain);
+            HandleMagTiming(elapsed, totalTime, ref magPulled, ref magInsertedAgain);
             yield return null;
         }
 
@@ -190,7 +226,7 @@ public class PlayerWeaponReloadAnimation : MonoBehaviour
                 holdT += Time.deltaTime;
 
                 elapsed += Time.deltaTime;
-                HandleMagTiming(elapsed, totalTime, ref magHidden, ref magShownAgain);
+                HandleMagTiming(elapsed, totalTime, ref magPulled, ref magInsertedAgain);
                 yield return null;
             }
         }
@@ -205,7 +241,7 @@ public class PlayerWeaponReloadAnimation : MonoBehaviour
             _weaponVisual.localRotation = Quaternion.Slerp(toRot, fromRot, s);
 
             elapsed += Time.deltaTime;
-            HandleMagTiming(elapsed, totalTime, ref magHidden, ref magShownAgain);
+            HandleMagTiming(elapsed, totalTime, ref magPulled, ref magInsertedAgain);
             yield return null;
         }
 
@@ -213,9 +249,8 @@ public class PlayerWeaponReloadAnimation : MonoBehaviour
         _weaponVisual.localPosition = fromPos;
         _weaponVisual.localRotation = fromRot;
 
-        // Make sure mag ends visible.
-        if (magazineObject != null)
-            magazineObject.SetActive(true);
+        // Ensure mag ends "inserted"
+        SetMagazineLocalX(insertedLocalX, instant: true);
 
         // Restore previous shooting block state if we changed it.
         if (capturedPrevBlock)
@@ -228,23 +263,65 @@ public class PlayerWeaponReloadAnimation : MonoBehaviour
         _reloadCo = null;
     }
 
-    void HandleMagTiming(float elapsed, float totalTime, ref bool magHidden, ref bool magShownAgain)
+    void HandleMagTiming(float elapsed, float totalTime, ref bool magPulled, ref bool magInsertedAgain)
     {
-        if (magazineObject == null) return;
+        if (magazineTransform == null) return;
 
         float n = totalTime <= 0f ? 1f : Mathf.Clamp01(elapsed / totalTime);
 
-        if (!magHidden && n >= hideMagAt)
+        if (!magPulled && n >= pullMagAt)
         {
-            magazineObject.SetActive(false);
-            magHidden = true;
+            SetMagazineLocalX(removedLocalX, instant: magSlideDuration <= 0f);
+            magPulled = true;
         }
 
-        if (!magShownAgain && n >= showMagAt)
+        if (!magInsertedAgain && n >= insertMagAt)
         {
-            magazineObject.SetActive(true);
-            magShownAgain = true;
+            SetMagazineLocalX(insertedLocalX, instant: magSlideDuration <= 0f);
+            magInsertedAgain = true;
         }
+    }
+
+    void SetMagazineLocalX(float targetX, bool instant)
+    {
+        if (magazineTransform == null) return;
+
+        if (_magSlideCo != null)
+        {
+            StopCoroutine(_magSlideCo);
+            _magSlideCo = null;
+        }
+
+        if (instant)
+        {
+            Vector3 p = magazineTransform.localPosition;
+            p.x = targetX;
+            magazineTransform.localPosition = p;
+            return;
+        }
+
+        _magSlideCo = StartCoroutine(SlideMagXRoutine(targetX, magSlideDuration));
+    }
+
+    IEnumerator SlideMagXRoutine(float targetX, float dur)
+    {
+        if (magazineTransform == null) yield break;
+
+        dur = Mathf.Max(0.001f, dur);
+        Vector3 start = magazineTransform.localPosition;
+        Vector3 end = start; end.x = targetX;
+
+        float t = 0f;
+        while (t < 1f)
+        {
+            t += Time.deltaTime / dur;
+            float s = Smooth01(t);
+            magazineTransform.localPosition = Vector3.Lerp(start, end, s);
+            yield return null;
+        }
+
+        magazineTransform.localPosition = end;
+        _magSlideCo = null;
     }
 
     static float Smooth01(float t)

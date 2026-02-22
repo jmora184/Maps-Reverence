@@ -126,7 +126,7 @@ public class PlayerSquadFollowSystem : MonoBehaviour
     [Tooltip("If true, ArcBehind formation will NOT change its heading just because you rotate your aim while standing still. The heading updates again once you move.")]
     public bool lockArcBehindHeadingWhileIdle = true;
 
-    [Tooltip("If true, when the player is idle we keep using the last 'stable' heading even if followers are far away and need catch-up. Prevents followers from rushing around you when you only look around.")]
+    [Tooltip("Unused: ArcBehind now always locks heading while idle (even during catch-up). Kept for backwards compatibility / inspector settings.")]
     public bool useLockedHeadingDuringCatchUp = true;
 
     [Header("Arc Shape")]
@@ -821,7 +821,8 @@ public class PlayerSquadFollowSystem : MonoBehaviour
 
         // --- Idle heading lock (ArcBehind) ---
         // Prevent followers from "rushing behind you" just because you rotate your aim while standing still.
-        if (isIdle && lockArcBehindHeadingWhileIdle && formation == FollowFormation.ArcBehind && (!isCatchUpUpdate || useLockedHeadingDuringCatchUp))
+        // This lock also applies during catch-up so stragglers run to the same stable behind direction.
+        if (isIdle && lockArcBehindHeadingWhileIdle && formation == FollowFormation.ArcBehind)
         {
             if (hasLockedIdleForward && lockedIdleForward.sqrMagnitude > 0.0001f)
                 return lockedIdleForward.normalized;
