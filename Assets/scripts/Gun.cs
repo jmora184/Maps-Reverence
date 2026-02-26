@@ -62,6 +62,23 @@ public class Gun : MonoBehaviour
     [Min(1)]
     public int emitCount = 1;
 
+    [Header("Fire Animation (Optional)")]
+    [Tooltip("Assign an Animator on the weapon model if you want a per-shot recoil animation (great for pistols/revolvers).")]
+    public Animator fireAnimator;
+
+    [Tooltip("Animator Trigger parameter to fire per shot.")]
+    public string fireTrigger = "Fire";
+
+    [Tooltip("Enable this ONLY on weapons that should play a fire animation (e.g., pistol/revolver). Keep false for rifle.")]
+    public bool playFireAnimationOnShot = false;
+
+    private void Awake()
+    {
+        // If enabled and not assigned, try to find an animator on this weapon prefab.
+        if (playFireAnimationOnShot && fireAnimator == null)
+            fireAnimator = GetComponentInChildren<Animator>();
+    }
+
     private void Update()
     {
         if (fireCounter > 0f)
@@ -90,6 +107,21 @@ public class Gun : MonoBehaviour
             muzzleFlashPS.Stop(true, ParticleSystemStopBehavior.StopEmitting);
 
         muzzleFlashPS.Play(true);
+    }
+
+    /// <summary>
+    /// Call this after a successful shot to play a per-shot weapon animation (pistol kick).
+    /// Safe to call even if not configured.
+    /// </summary>
+    public void TriggerFireAnimation()
+    {
+        if (!playFireAnimationOnShot) return;
+
+        if (fireAnimator == null)
+            fireAnimator = GetComponentInChildren<Animator>();
+
+        if (fireAnimator != null && !string.IsNullOrEmpty(fireTrigger))
+            fireAnimator.SetTrigger(fireTrigger);
     }
 
     public void GetAmmo()

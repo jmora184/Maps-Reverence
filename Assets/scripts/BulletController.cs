@@ -1,4 +1,5 @@
 using UnityEngine;
+using System.Collections;
 
 /// <summary>
 /// BulletController (works for BOTH your old cube bullets and Unity-Store “laser” bullets)
@@ -116,7 +117,7 @@ public class BulletController : MonoBehaviour
     public string headshotTag = "HeadShot";
     public string headshotName = "HeadShot";
 
-    float _spawnTime;
+float _spawnTime;
 
     private void Awake()
     {
@@ -325,7 +326,7 @@ public class BulletController : MonoBehaviour
 
         if (isEnemy && damageEnemy)
         {
-            if (enemyHealth != null)
+if (enemyHealth != null)
             {
                 enemyHealth.DamageEnemy(dmgInt);
             }
@@ -490,4 +491,5 @@ private void SpawnImpact(GameObject fxPrefab, Vector3 point, Vector3 normal)
         Quaternion rot = Quaternion.LookRotation(forward);
         Instantiate(fxPrefab, spawnPos, rot);
     }
+
 }

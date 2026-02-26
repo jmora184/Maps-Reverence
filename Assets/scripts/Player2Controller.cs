@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using UnityEngine;
 
 public class Player2Controller : MonoBehaviour
@@ -31,7 +31,16 @@ public class Player2Controller : MonoBehaviour
 
     public bool invertY;
 
-    private bool canJump, canDoubleJump;
+    
+
+    [Header("Look Clamp (Prevents Flips)")]
+    [Tooltip("Minimum camera pitch in degrees (looking down).")]
+    public float minLookPitch = -60f;
+    [Tooltip("Maximum camera pitch in degrees (looking up).")]
+    public float maxLookPitch = 70f;
+
+    private float _pitch; // runtime pitch accumulator (degrees)
+private bool canJump, canDoubleJump;
     public Transform groundCheckPoint;
     public LayerMask whatIsGround;
 
@@ -40,7 +49,43 @@ public class Player2Controller : MonoBehaviour
     [Header("Gun Runtime (Active)")]
     public Gun activeGun;
 
-    [Header("Ammo UI")]
+    [Header("Optional: Per-Weapon Fire Kickback (no Animator)")]
+    [Tooltip("If the equipped weapon (or its children) has a WeaponFireKickback component, it will play on every shot. Great for strong pistol/revolver kick without changing rifle recoil.")]
+    public bool enablePerWeaponFireKickback = true;
+
+    // Cached per-weapon kickback component from the currently equipped weapon (if any)
+    private WeaponFireKickback _activeKickback;
+
+    
+    [Header("Crosshair (Per Weapon)")]
+    [Tooltip("Optional crosshair manager in your UI. If left null, uses CrosshairImageManager.Instance.")]
+    public CrosshairImageManager crosshairManager;
+
+
+    [Header("Optional: Explicit Weapon Mapping (recommended)")]
+    [Tooltip("If assigned, crosshair selection will use these exact gun references instead of name matching.")]
+    public Gun pistolGun;
+    [Tooltip("If assigned, crosshair selection will use these exact gun references instead of name matching.")]
+    public Gun rifleGun;
+
+    [Tooltip("If true and explicit gun refs are set, uses gun references first. If false, uses name matching.")]
+    public bool preferExplicitGunRefs = true;
+
+    [Tooltip("If true, swaps pistol/rifle crosshair assignments (quick fix if you wired sprites backwards).")]
+    public bool swapPistolAndRifleCrosshairs = false;
+
+    [Tooltip("Crosshair sprite used when pistol is equipped.")]
+    public Sprite pistolCrosshairSprite;
+    [Range(0.1f, 4f)] public float pistolCrosshairScale = 0.6f;
+
+    [Tooltip("Crosshair sprite used when rifle is equipped.")]
+    public Sprite rifleCrosshairSprite;
+    [Range(0.1f, 4f)] public float rifleCrosshairScale = 1.0f;
+
+    [Tooltip("If true, uses gun name to detect pistol vs rifle (contains 'pistol' or 'rifle/ar/assault').")]
+    public bool detectWeaponByName = true;
+
+[Header("Ammo UI")]
     public AmmoHUD ammoHUD;
 
     [Header("Runtime Ammo")]
@@ -114,7 +159,16 @@ public class Player2Controller : MonoBehaviour
     public float muzzleFlashDuration = 0.05f;
     private float muzzleFlashUntil = 0f;
 
-    private void Awake()
+    
+    private static float NormalizeAngle(float angleDegrees)
+    {
+        angleDegrees %= 360f;
+        if (angleDegrees > 180f) angleDegrees -= 360f;
+        if (angleDegrees < -180f) angleDegrees += 360f;
+        return angleDegrees;
+    }
+
+private void Awake()
     {
         instance = this;
     }
@@ -135,7 +189,11 @@ public class Player2Controller : MonoBehaviour
     }
     void Start()
     {
-        if (gunHolder != null)
+        
+        // Initialize pitch from current camera local rotation (prevents sudden snap on play)
+        if (camTrans != null)
+            _pitch = NormalizeAngle(camTrans.localEulerAngles.x);
+if (gunHolder != null)
             gunStartPos = gunHolder.localPosition;
 
         AutoPopulateGunsIfEmpty();
@@ -204,13 +262,14 @@ public class Player2Controller : MonoBehaviour
             if (invertX) mouseInput.x = -mouseInput.x;
             if (invertY) mouseInput.y = -mouseInput.y;
 
-            transform.rotation = Quaternion.Euler(
-                transform.rotation.eulerAngles.x,
-                transform.rotation.eulerAngles.y + mouseInput.x,
-                transform.rotation.eulerAngles.z
-            );
+            // Yaw rotates the player (world Y). Pitch rotates the camera locally (prevents flips).
+            transform.Rotate(0f, mouseInput.x, 0f, Space.World);
 
-            camTrans.rotation = Quaternion.Euler(camTrans.rotation.eulerAngles + new Vector3(-mouseInput.y, 0f, 0f));
+            _pitch += -mouseInput.y;
+            _pitch = Mathf.Clamp(_pitch, minLookPitch, maxLookPitch);
+
+            if (camTrans != null)
+                camTrans.localRotation = Quaternion.Euler(_pitch, 0f, 0f);
 
             // ---------------------------
             // SHOOTING
@@ -297,6 +356,9 @@ public class Player2Controller : MonoBehaviour
                     }
 
                     ApplyRecoil();
+                    // Optional per-weapon kickback (script-driven) for pistol/revolver
+                    if (enablePerWeaponFireKickback && _activeKickback != null)
+                        _activeKickback.Play();
 
                     // Crosshair recoil (UI) - small kick/bloom per shot
                     if (CrosshairRecoilUI.Instance != null)
@@ -445,9 +507,17 @@ public class Player2Controller : MonoBehaviour
             bool active = (i == gunIndex);
             if (guns[i].gameObject.activeSelf != active)
                 guns[i].gameObject.SetActive(active);
+
+        // Update crosshair look/size for this weapon
+        ApplyCrosshairForActiveGun();
+
         }
 
         activeGun = guns[gunIndex];
+        // Cache optional per-weapon kickback component (pistol/revolver can have it; rifle can omit)
+        _activeKickback = null;
+        if (enablePerWeaponFireKickback && activeGun != null)
+            _activeKickback = activeGun.GetComponentInChildren<WeaponFireKickback>(true);
         extraSpreadDeg = 0f;
 
         // Pull core references from Gun component (these fields exist on your Gun script)
@@ -675,5 +745,58 @@ public class Player2Controller : MonoBehaviour
         float baseScale = isPistol ? crosshairScalePistol : crosshairScaleDefault;
         CrosshairRecoilUI.Instance.SetBaseScale(baseScale);
     }
+
+    private void ApplyCrosshairForActiveGun()
+    {
+        var mgr = (crosshairManager != null) ? crosshairManager : CrosshairImageManager.Instance;
+        if (mgr == null) return;
+
+        if (activeGun == null)
+        {
+            mgr.ResetToDefault();
+            return;
+        }
+
+        // Decide which crosshair to use
+        bool isPistol = false;
+        bool isRifle = false;
+
+        // 1) Prefer explicit gun refs (most reliable)
+        if (preferExplicitGunRefs && (pistolGun != null || rifleGun != null))
+        {
+            isPistol = (pistolGun != null && activeGun == pistolGun);
+            isRifle  = (rifleGun  != null && activeGun == rifleGun);
+        }
+
+        // 2) Fallback to name matching
+        if (!isPistol && !isRifle && detectWeaponByName)
+        {
+            string n = activeGun.gameObject.name.ToLowerInvariant();
+            isPistol = n.Contains("pistol");
+            isRifle = n.Contains("rifle") || n.Contains("ar") || n.Contains("assault");
+        }
+
+        // Optional: swap assignments if you wired sprites backwards
+        Sprite pistolSprite = swapPistolAndRifleCrosshairs ? rifleCrosshairSprite : pistolCrosshairSprite;
+        float  pistolScale  = swapPistolAndRifleCrosshairs ? rifleCrosshairScale  : pistolCrosshairScale;
+
+        Sprite rifleSprite = swapPistolAndRifleCrosshairs ? pistolCrosshairSprite : rifleCrosshairSprite;
+        float  rifleScale  = swapPistolAndRifleCrosshairs ? pistolCrosshairScale  : rifleCrosshairScale;
+
+        if (isPistol && pistolSprite != null)
+        {
+            mgr.SetCrosshair(pistolSprite, pistolScale);
+        }
+        else if (isRifle && rifleSprite != null)
+        {
+            mgr.SetCrosshair(rifleSprite, rifleScale);
+        }
+        else
+        {
+            // Fallback: if no match or sprites not assigned, just reset
+            mgr.ResetToDefault();
+        }
+    }
+
 
 }

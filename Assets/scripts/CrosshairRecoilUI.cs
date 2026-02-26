@@ -4,6 +4,20 @@ public class CrosshairRecoilUI : MonoBehaviour
 {
     public static CrosshairRecoilUI Instance { get; private set; }
 
+    [Header("Global Multiplier")]
+    [Tooltip("Multiplier applied to ALL Kick() calls. Useful for per-weapon recoil without changing fire code.")]
+    [Range(0.1f, 5f)]
+    public float globalIntensityMultiplier = 1f;
+
+    /// <summary>
+    /// Set a multiplier applied to all Kick() calls.
+    /// Example: pistol could set 1.6, rifle could set 1.0.
+    /// </summary>
+    public void SetGlobalIntensity(float multiplier)
+    {
+        globalIntensityMultiplier = Mathf.Clamp(multiplier, 0.1f, 10f);
+    }
+
     [Header("Kick")]
     public Vector2 kickPixels = new Vector2(0f, 6f);     // up a little
     public float kickRandomX = 2.5f;                    // small sideways jitter
@@ -79,6 +93,8 @@ public class CrosshairRecoilUI : MonoBehaviour
 
     public void Kick(float intensity = 1f)
     {
+        
+        intensity *= globalIntensityMultiplier;
         // kick a bit (pixels) + some randomness
         float rx = Random.Range(-kickRandomX, kickRandomX) * intensity;
         float ry = Random.Range(-kickRandomY, kickRandomY) * intensity;

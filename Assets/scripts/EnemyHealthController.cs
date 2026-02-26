@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using UnityEngine;
 
 /// <summary>
@@ -21,6 +22,10 @@ public class EnemyHealthController : MonoBehaviour
     [Tooltip("If assigned, will be notified when this enemy takes damage so it can aggro/return-fire.")]
     public Enemy2Controller enemy2Controller;
 
+    [Header("Stagger / hit-react threshold (optional)")]
+    [Tooltip("If assigned, accumulates damage within a short window and triggers take_damage only when the threshold is reached (e.g., two 5-dmg hits -> 10).")]
+    public StaggerOnDamage staggerOnDamage;
+
     [Header("Legacy hit reaction (older setups)")]
     [Tooltip("Legacy controller type used in older versions of the project.")]
     public EnemyController theEC;
@@ -28,6 +33,16 @@ public class EnemyHealthController : MonoBehaviour
     [Header("Death")]
     [Tooltip("If true, this script will stop accepting damage once dead.")]
     public bool lockAfterDeath = true;
+
+[Tooltip("Animator Bool parameter to set true when this enemy dies. Helps prevent hit-reactions/locomotion from overriding death.")]
+public string animatorIsDeadBool = "isDead";
+
+[Tooltip("Optional: clear common locomotion params when dying to avoid popping back to idle/run.")]
+public bool clearLocomotionParamsOnDeath = true;
+
+    [Tooltip("Log when death flags/params are applied (helps debug isDead not being set).")]
+    public bool debugDeathLogging = false;
+
 
     [Tooltip("If no MnR.DeathController is found, use this fallback cleanup delay.")]
     public float fallbackCleanupDelay = 6f;
@@ -54,7 +69,10 @@ public class EnemyHealthController : MonoBehaviour
         if (theEC == null)
             theEC = GetComponent<EnemyController>();
 
-        RaiseHealthChanged();
+        
+        if (staggerOnDamage == null)
+            staggerOnDamage = GetComponent<StaggerOnDamage>();
+RaiseHealthChanged();
     }
 
     /// <summary>
@@ -67,6 +85,10 @@ public class EnemyHealthController : MonoBehaviour
         if (lockAfterDeath && _isDead) return;
 
         currentHealth -= damageAmount;
+
+        // Accumulate damage for stagger/hit-react (e.g., two quick 5-dmg hits => 10 triggers take_damage once)
+        if (staggerOnDamage == null) staggerOnDamage = GetComponent<StaggerOnDamage>();
+        if (staggerOnDamage != null) staggerOnDamage.NotifyDamage(damageAmount);
 
         NotifyHitReaction();
 
@@ -106,6 +128,7 @@ public class EnemyHealthController : MonoBehaviour
     {
         if (_isDead) return;
         _isDead = true;
+        ApplyAnimatorDeathState();
 
         currentHealth = 0;
         RaiseHealthChanged();
@@ -125,14 +148,33 @@ public class EnemyHealthController : MonoBehaviour
             enemy2.Die();
         }
 
-        // 3) Fallback: trigger Animator parameter "Die" if it exists
-        var anim = GetComponentInChildren<Animator>(true);
-        if (anim != null && HasAnimatorParameter(anim, "Die", AnimatorControllerParameterType.Trigger))
-        {
-            anim.SetTrigger("Die");
-        }
+        // 3) Fallback: set Animator bool "isDead" and trigger Animator parameter "Die" if it exists
+var anim = GetComponentInChildren<Animator>(true);
+if (anim != null)
+{
+    if (!string.IsNullOrEmpty(animatorIsDeadBool) &&
+        HasAnimatorParameter(anim, animatorIsDeadBool, AnimatorControllerParameterType.Bool))
+    {
+        anim.SetBool(animatorIsDeadBool, true);
+    }
 
-        // Disable common colliders so corpse isn't interactable (fallback behavior)
+    if (clearLocomotionParamsOnDeath)
+    {
+        // These are common in your controllers; safe to call even if they don't exist.
+        if (HasAnimatorParameter(anim, "Speed", AnimatorControllerParameterType.Float)) anim.SetFloat("Speed", 0f);
+        if (HasAnimatorParameter(anim, "isRunning", AnimatorControllerParameterType.Bool)) anim.SetBool("isRunning", false);
+        if (HasAnimatorParameter(anim, "isWalking", AnimatorControllerParameterType.Bool)) anim.SetBool("isWalking", false);
+        if (HasAnimatorParameter(anim, "isMoving", AnimatorControllerParameterType.Bool)) anim.SetBool("isMoving", false);
+        if (HasAnimatorParameter(anim, "fireShot", AnimatorControllerParameterType.Bool)) anim.SetBool("fireShot", false);
+    }
+
+    if (HasAnimatorParameter(anim, "Die", AnimatorControllerParameterType.Trigger))
+    {
+        anim.ResetTrigger("Die");
+        anim.SetTrigger("Die");
+    }
+}
+// Disable common colliders so corpse isn't interactable (fallback behavior)
         var cols = GetComponentsInChildren<Collider>(true);
         for (int i = 0; i < cols.Length; i++)
         {
@@ -177,4 +219,50 @@ public class EnemyHealthController : MonoBehaviour
         }
         return false;
     }
+
+// --- Animator Death Helpers ---
+
+private void ApplyAnimatorDeathState()
+{
+    // Apply to ALL animators in this hierarchy (covers cases where the animator is not on the expected child).
+    Animator[] anims = GetComponentsInChildren<Animator>(true);
+    if (anims == null || anims.Length == 0)
+    {
+        // As an extra fallback, try parent chain (in case the health is on a child under the animated root)
+        var parentAnim = GetComponentInParent<Animator>();
+        if (parentAnim != null) anims = new[] { parentAnim };
+    }
+
+    if (anims == null || anims.Length == 0)
+    {
+        if (debugDeathLogging) Debug.LogWarning($"{name}: No Animator found to set '{animatorIsDeadBool}'.", this);
+        return;
+    }
+
+    foreach (var anim in anims)
+    {
+        if (anim == null) continue;
+
+        if (!string.IsNullOrEmpty(animatorIsDeadBool) &&
+            HasAnimatorParameter(anim, animatorIsDeadBool, AnimatorControllerParameterType.Bool))
+        {
+            anim.SetBool(animatorIsDeadBool, true);
+            if (debugDeathLogging) Debug.Log($"{name}: Set Animator bool '{animatorIsDeadBool}' = true on {anim.gameObject.name}", this);
+        }
+        else
+        {
+            if (debugDeathLogging) Debug.LogWarning($"{name}: Animator on {anim.gameObject.name} has no bool '{animatorIsDeadBool}'.", anim);
+        }
+
+        if (clearLocomotionParamsOnDeath)
+        {
+            if (HasAnimatorParameter(anim, "Speed", AnimatorControllerParameterType.Float)) anim.SetFloat("Speed", 0f);
+            if (HasAnimatorParameter(anim, "isRunning", AnimatorControllerParameterType.Bool)) anim.SetBool("isRunning", false);
+            if (HasAnimatorParameter(anim, "isWalking", AnimatorControllerParameterType.Bool)) anim.SetBool("isWalking", false);
+            if (HasAnimatorParameter(anim, "isMoving", AnimatorControllerParameterType.Bool)) anim.SetBool("isMoving", false);
+            if (HasAnimatorParameter(anim, "fireShot", AnimatorControllerParameterType.Bool)) anim.SetBool("fireShot", false);
+        }
+    }
+}
+
 }

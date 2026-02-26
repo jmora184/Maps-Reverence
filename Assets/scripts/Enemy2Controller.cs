@@ -604,12 +604,28 @@ public class Enemy2Controller : MonoBehaviour
         return enableWaterSlow ? _waterSpeedMultiplier : 1f;
     }
 
+    
+    // Chooses the "base" (unslowed) speed for this frame.
+    // - If we're currently patrolling and the patrol has an override speed, use that (so patrol can walk).
+    // - Otherwise use the enemy's normal base agent speed (usually your chase/combat speed).
+    private float GetDesiredBaseSpeed()
+    {
+        float baseSpeed = _baseAgentSpeed;
+
+        if (baseSpeed <= 0f && agent != null)
+            baseSpeed = agent.speed;
+
+        if (enableIdlePatrol && idlePatrol != null && idlePatrol.PatrolEnabled && idlePatrol.patrolSpeedOverride > 0f)
+            baseSpeed = idlePatrol.patrolSpeedOverride;
+
+        return baseSpeed;
+    }
+
     private void ApplyWaterSlowToAgent()
     {
         if (agent == null) return;
-        if (_baseAgentSpeed <= 0f) _baseAgentSpeed = agent.speed;
-
-        float desired = _baseAgentSpeed * GetWaterMult();
+        float desiredBase = GetDesiredBaseSpeed();
+        float desired = desiredBase * GetWaterMult();
         if (!Mathf.Approximately(agent.speed, desired))
             agent.speed = desired;
     }
