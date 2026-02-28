@@ -12,6 +12,13 @@ public class AllyController : MonoBehaviour
 {
     [Header("Movement")]
     public float moveSpeed;
+
+    [Header("Follower Speed Boost")]
+    [Tooltip("If true, when this ally is following a PlayerSquadFollowSystem slot (target != null) and not in combat, the NavMeshAgent speed is forced to followerSpeedWhileFollowing.")]
+    public bool enableFollowerSpeedBoost = true;
+    [Tooltip("NavMeshAgent speed while following the player (not chasing).")]
+    public float followerSpeedWhileFollowing = 25f;
+
     [Tooltip("How quickly the ally turns to face its movement direction when not in combat.")]
     public float moveTurnSpeed = 12f;
     [Tooltip("If target is set (e.g., joining a team), we will keep updating destination to follow it.")]
@@ -479,19 +486,37 @@ public class AllyController : MonoBehaviour
             }
         }
 
-        // Keep agent speed in sync with team size (only when it changes).
-        // (Prevents unexpected slowdowns if you tune speed in the Inspector.)
-        if (agent != null && combatStats != null)
+        // Keep agent speed in sync with team size / water slow (only when it changes).
+        // IMPORTANT: AllyController also drives agent.speed, so if you want followers to move faster,
+        // we handle it here to prevent other systems from being immediately overwritten.
+        if (agent != null)
         {
-            float desired = combatStats.GetMoveSpeed() * GetWaterMult();
-            if (!Mathf.Approximately(agent.speed, desired))
-                agent.speed = desired;
-        }
-        else if (agent != null && combatStats == null && enableWaterSlow)
-        {
-            // If no combat stats system is present, at least apply water slow using the agent's baseline speed.
-            if (_baseAgentSpeedFallback <= 0f) _baseAgentSpeedFallback = agent.speed;
-            float desired = _baseAgentSpeedFallback * GetWaterMult();
+            float baseSpeed;
+
+            if (combatStats != null)
+            {
+                baseSpeed = combatStats.GetMoveSpeed();
+            }
+            else
+            {
+                // If no combat stats system is present, treat the current agent.speed as baseline.
+                if (_baseAgentSpeedFallback <= 0f) _baseAgentSpeedFallback = agent.speed;
+                baseSpeed = _baseAgentSpeedFallback;
+            }
+
+            // If we're following a formation slot (PlayerSquadFollowSystem sets AllyController.target to a slot transform),
+            // force follower speed while NOT in combat/chasing.
+            if (enableFollowerSpeedBoost && !chasing && target != null)
+            {
+                baseSpeed = followerSpeedWhileFollowing;
+            }
+            else if (combatStats == null && moveSpeed > 0f)
+            {
+                // If you set moveSpeed in the Inspector, prefer it when not following.
+                baseSpeed = moveSpeed;
+            }
+
+            float desired = baseSpeed * GetWaterMult();
             if (!Mathf.Approximately(agent.speed, desired))
                 agent.speed = desired;
         }
