@@ -93,6 +93,11 @@ private bool canJump, canDoubleJump;
     public GameObject bullet;
     public Transform firePoint;
 
+    [Header("Bullet Ownership (Aggro)")]
+    [Tooltip("Optional override for bullet owner/attacker. Set this to your Player root (tagged Player). If left empty, transform.root is used.")]
+    public Transform bulletOwnerOverride;
+
+
     public GameObject muzzleFlash;
     private ParticleSystem muzzleFlashPS;
     public Transform adsPoint, gunHolder;
@@ -350,7 +355,7 @@ if (gunHolder != null)
                         // ✅ IMPORTANT: tell the bullet who fired it (needed for impact FX switching + aggro)
                         BulletController bc = b.GetComponent<BulletController>();
                         if (bc != null)
-                            bc.owner = transform;
+                            bc.owner = bulletOwnerOverride != null ? bulletOwnerOverride : transform.root;
 
                         IgnoreShooterCollisions(b);
                     }

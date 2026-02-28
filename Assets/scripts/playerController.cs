@@ -244,7 +244,11 @@ public class playerController : MonoBehaviour
         if(activeGun.currentAmmo > 0)
         {
         activeGun.currentAmmo--;
-        Instantiate(activeGun.bullet, firePoint.position, firePoint.rotation);
+        GameObject spawned = Instantiate(activeGun.bullet, firePoint.position, firePoint.rotation);
+            BulletController bc = spawned != null ? spawned.GetComponent<BulletController>() : null;
+            if (bc != null)
+                bc.owner = transform;
+
 
         activeGun.fireCounter = activeGun.fireRate;
 

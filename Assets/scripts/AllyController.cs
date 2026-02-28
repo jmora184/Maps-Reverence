@@ -1713,7 +1713,8 @@ public class AllyController : MonoBehaviour
                 BulletController bc = spawned.GetComponent<BulletController>();
                 if (bc != null)
                 {
-                    if (combatStats != null)
+                                        bc.owner = transform;
+if (combatStats != null)
                         bc.Damage = combatStats.GetDamageInt();
 
                     bc.owner = transform;

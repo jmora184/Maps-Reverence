@@ -173,6 +173,11 @@ public class PlayerSquadFollowSystem : MonoBehaviour
     [Tooltip("NavMeshAgent stopping distance to use while following slots (prevents face-hugging the player).")]
     public float followStoppingDistance = 2.4f;
 
+    [Header("Follower Speed Boost")]
+    [Tooltip("When an ally is a follower, their NavMeshAgent speed will be raised to at least this value.")]
+    public float followerSpeedWhileFollowing = 25f;
+
+
     [Tooltip("Extra personal space added on top of stopping distance when building slot radii (prevents slots too close to the player).")]
     public float playerPersonalSpace = 1.2f;
 
@@ -258,6 +263,10 @@ public class PlayerSquadFollowSystem : MonoBehaviour
 
     // Restore agent stopping distance after follow
     private readonly Dictionary<Transform, float> originalStoppingDistanceByFollower = new();
+
+    // Restore agent speed after follow
+    private readonly Dictionary<Transform, float> originalSpeedByFollower = new();
+
 
     // Track last player position to estimate speed
     private Vector3 lastPlayerPos;
@@ -546,6 +555,7 @@ public class PlayerSquadFollowSystem : MonoBehaviour
         ReplaceFollowers(followerTransforms);
         AssignTargetsToSlots();
         ApplyFollowStoppingDistance();
+        ApplyFollowerSpeedBoost();
         UpdateFollowerTags();
 
         // Force a few frames of updates so followers immediately start moving even if player is idle.
@@ -630,6 +640,7 @@ public class PlayerSquadFollowSystem : MonoBehaviour
         }
 
         RestoreStoppingDistance();
+        RestoreFollowerSpeed();
 
         followers.Clear();
         slotByFollower.Clear();
@@ -941,8 +952,10 @@ public class PlayerSquadFollowSystem : MonoBehaviour
             }
         }
 
-        // We'll re-apply stopping distances after replacing followers
+        // We'll re-apply stopping distances / speeds after replacing followers
         RestoreStoppingDistance();
+        RestoreFollowerSpeed();
+        RestoreFollowerSpeed();
 
         followers.Clear();
         slotByFollower.Clear();
@@ -1439,6 +1452,42 @@ public class PlayerSquadFollowSystem : MonoBehaviour
 
         originalStoppingDistanceByFollower.Clear();
     }
+
+private void ApplyFollowerSpeedBoost()
+{
+    if (followerSpeedWhileFollowing <= 0f) return;
+
+    for (int i = 0; i < followers.Count; i++)
+    {
+        var f = followers[i];
+        if (f == null) continue;
+
+        var agent = GetAgent(f);
+        if (agent == null) continue;
+
+        if (!originalSpeedByFollower.ContainsKey(f))
+            originalSpeedByFollower[f] = agent.speed;
+
+        if (agent.speed < followerSpeedWhileFollowing)
+            agent.speed = followerSpeedWhileFollowing;
+    }
+}
+
+private void RestoreFollowerSpeed()
+{
+    foreach (var kvp in originalSpeedByFollower)
+    {
+        var f = kvp.Key;
+        if (f == null) continue;
+
+        var agent = GetAgent(f);
+        if (agent == null) continue;
+
+        agent.speed = kvp.Value;
+    }
+
+    originalSpeedByFollower.Clear();
+}
 
     // -------------------- HINT TOAST --------------------
 

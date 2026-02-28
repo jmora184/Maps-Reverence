@@ -19,6 +19,14 @@ using UnityEngine.AI;
 /// </summary>
 public class EncounterDirectorPOC : MonoBehaviour
 {
+
+    [Header("Drone Spawn Height")]
+    [Tooltip("If true, any spawned prefab that contains a DroneEnemyController will be raised by droneSpawnYOffset on Y.")]
+    public bool raiseDroneSpawns = true;
+
+    [Tooltip("How many units to add to Y when spawning drones (e.g., 25).")]
+    public float droneSpawnYOffset = 25f;
+
     [Header("Encounter")]
     public string encounterName = "CurrentLevel_POC";
     public bool spawnOnStart = true;
@@ -209,6 +217,102 @@ public class EncounterDirectorPOC : MonoBehaviour
         UpdateEnemyTeamIcons();
     }
 
+    private GameObject PickPrefabForSpawn(SpawnGroup group, int spawnIndex)
+    {
+        if (group.prefabOptions == null || group.prefabOptions.Length == 0)
+            return group.prefab;
+
+        // Clean nulls (optional)
+        // If mode is Single, always use first entry.
+        if (group.prefabMode == SpawnPrefabMode.Single)
+            return group.prefabOptions[0];
+
+        if (group.prefabMode == SpawnPrefabMode.Cycle)
+        {
+            int i = Mathf.Abs(spawnIndex) % group.prefabOptions.Length;
+            return group.prefabOptions[i];
+        }
+
+        int r = UnityEngine.Random.Range(0, group.prefabOptions.Length);
+        return group.prefabOptions[r];
+    }
+
+    private GameObject[] BuildPrefabSequenceForGroup(SpawnGroup group)
+    {
+        // Priority 1: exact quantities
+        if (group.prefabQuantities != null && group.prefabQuantities.Length > 0)
+        {
+            var list = new List<GameObject>(64);
+
+            for (int i = 0; i < group.prefabQuantities.Length; i++)
+            {
+                var pq = group.prefabQuantities[i];
+                if (pq.prefab == null) continue;
+
+                int c = Mathf.Max(0, pq.count);
+                for (int k = 0; k < c; k++)
+                    list.Add(pq.prefab);
+            }
+
+            if (list.Count == 0) return null;
+
+            if (group.shuffleQuantities)
+            {
+                // Fisher–Yates shuffle
+                for (int i = 0; i < list.Count - 1; i++)
+                {
+                    int j = UnityEngine.Random.Range(i, list.Count);
+                    var tmp = list[i];
+                    list[i] = list[j];
+                    list[j] = tmp;
+                }
+            }
+
+            return list.ToArray();
+        }
+
+        // Priority 2: prefabOptions + mode
+        if (group.prefabOptions != null && group.prefabOptions.Length > 0)
+        {
+            int total = Mathf.Max(0, group.count);
+            if (total == 0) return null;
+
+            var list = new GameObject[total];
+            for (int i = 0; i < total; i++)
+                list[i] = PickPrefabForSpawn(group, i);
+            return list;
+        }
+
+        // Priority 3: legacy single prefab
+        if (group.prefab != null)
+        {
+            int total = Mathf.Max(0, group.count);
+            if (total == 0) return null;
+
+            var list = new GameObject[total];
+            for (int i = 0; i < total; i++)
+                list[i] = group.prefab;
+            return list;
+        }
+
+        return null;
+    }
+
+    private Vector3[] ResolvePatrolPointsWorld(SpawnGroup group)
+    {
+        if (group.patrolPoints == null || group.patrolPoints.Length == 0) return null;
+
+        var pts = new Vector3[group.patrolPoints.Length];
+        for (int i = 0; i < group.patrolPoints.Length; i++)
+        {
+            var t = group.patrolPoints[i];
+            pts[i] = (t != null) ? t.position : transform.position;
+        }
+        return pts;
+    }
+
+
+
     private void SpawnGroups(SpawnGroup[] groups, string teamPrefix, Faction faction)
     {
         if (groups == null) return;
@@ -217,13 +321,6 @@ public class EncounterDirectorPOC : MonoBehaviour
         {
             var group = groups[g];
             if (!group.enabled) continue;
-
-            if (group.prefab == null)
-            {
-                Debug.LogWarning($"[{nameof(EncounterDirectorPOC)}] Group {g} has no prefab assigned.", this);
-                continue;
-            }
-
             Transform teamRoot = null;
             string teamRootName = null;
 
@@ -233,11 +330,29 @@ public class EncounterDirectorPOC : MonoBehaviour
                 teamRoot = GetOrCreateTeamRoot(teamRootName, faction);
             }
 
-            int count = Mathf.Max(0, group.count);
+            var prefabSequence = BuildPrefabSequenceForGroup(group);
+
+            if (prefabSequence == null || prefabSequence.Length == 0)
+            {
+                Debug.LogWarning($"[{nameof(EncounterDirectorPOC)}] SpawnGroup {g} has no prefab(s) assigned or count is 0.", this);
+                continue;
+            }
+
+            int count = prefabSequence.Length;
             for (int i = 0; i < count; i++)
             {
                 var spawnPose = ResolveSpawnPoseWithSeparation(group, i);
-                var go = Instantiate(group.prefab, spawnPose.position, spawnPose.rotation);
+                var chosenPrefab = prefabSequence[i];
+                if (chosenPrefab == null)
+                {
+                    Debug.LogWarning($"[{nameof(EncounterDirectorPOC)}] Group {g} has a null prefab in its sequence.", this);
+                    continue;
+                }
+                var spawnPos = spawnPose.position;
+                if (raiseDroneSpawns && PrefabIsDrone(chosenPrefab))
+                    spawnPos += Vector3.up * droneSpawnYOffset;
+
+                var go = Instantiate(chosenPrefab, spawnPos, spawnPose.rotation);
 
                 if (teamRoot != null)
                 {
@@ -680,9 +795,22 @@ public class EncounterDirectorPOC : MonoBehaviour
         public bool enabled;
 
         [Header("Spawn")]
+        [Tooltip("Legacy single prefab. Leave empty if using prefabQuantities or prefabOptions.")]
         public GameObject prefab;
+
+        [Tooltip("Optional: exact quantities per prefab (Enemy / Assault Droid / Drone). Takes priority over prefabOptions/count.")]
+        public PrefabQuantity[] prefabQuantities;
+
+        [Tooltip("Optional: multiple prefabs. Used if prefabQuantities is empty.")]
+        public GameObject[] prefabOptions;
+
+        public SpawnPrefabMode prefabMode;
+
+        [Tooltip("If prefabQuantities is empty: total number to spawn (legacy).")]
         public int count;
 
+        [Tooltip("If using prefabQuantities, shuffle the spawn order so types are mixed.")]
+        public bool shuffleQuantities;
         [Tooltip("If set, spawns cycle through these points. Takes priority over spawn area.")]
         public Transform[] spawnPoints;
 
@@ -712,6 +840,16 @@ public class EncounterDirectorPOC : MonoBehaviour
         [Header("Behavior")]
         public EncounterBehavior initialBehavior;
 
+
+        [Tooltip("Optional route points for Patrol. If set, we broadcast Encounter_SetPatrolPoints(Vector3[]) to spawned units.")]
+        public Transform[] patrolPoints;
+
+        [Tooltip("If true and patrolPoints are set, adds a built-in patrol agent if the unit does not already have one.")]
+        public bool addBuiltInPatrolAgentIfMissing;
+
+        [Tooltip("If true, sets the team anchor planned destination to the first patrol point (for UI direction arrows).")]
+        public bool updateTeamAnchorPlannedDestination;
+
         [Header("Tagging (Optional)")]
         public string overrideUnityTag;
         public string fallbackTagIfUntagged;
@@ -729,6 +867,20 @@ public class EncounterDirectorPOC : MonoBehaviour
             center = c;
             radius = r;
         }
+    }
+
+    [Serializable]
+    public struct PrefabQuantity
+    {
+        public GameObject prefab;
+        public int count;
+    }
+
+    public enum SpawnPrefabMode
+    {
+        Single = 0,
+        Random = 1,
+        Cycle = 2
     }
 
     public enum Faction
@@ -793,6 +945,12 @@ public class EncounterDirectorPOC : MonoBehaviour
         _nextEnemyIconScaleLogTime[teamRootName] = now + interval;
 
         Debug.Log($"[EncounterDirectorPOC] Enemy icon '{teamRootName}' count={count} scale={scale:0.00} rectScale={iconRect.localScale}", this);
+    }
+
+    private bool PrefabIsDrone(GameObject prefab)
+    {
+        if (prefab == null) return false;
+        return prefab.GetComponentInChildren<DroneEnemyController>(true) != null;
     }
 
 }

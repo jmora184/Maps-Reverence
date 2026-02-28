@@ -31,7 +31,17 @@ public class Turret : MonoBehaviour
 
             if (shotCounter <= 0)
             {
-                Instantiate(bullet, firepoint.position, firepoint.rotation);
+                GameObject spawned = Instantiate(bullet, firepoint.position, firepoint.rotation);
+                BulletController bc = spawned != null ? spawned.GetComponent<BulletController>() : null;
+                if (bc != null)
+                {
+                    bc.owner = transform;
+                    bc.damageEnemy = false;
+                    bc.damageAlly = true;
+                    bc.damageNPC = false;
+                    bc.damageAnimals = true;
+                }
+
                 shotCounter = timeBetweenShots;
             }
        

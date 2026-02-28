@@ -58,11 +58,17 @@ public class BulletController : MonoBehaviour
     [Tooltip("Impact effect used when hitting ENEMIES (eg: GreenBloodSpray). Leave empty to use Impact Effect (legacy).")]
     public GameObject impactEffectEnemy;
 
+    [Tooltip("Impact effect used when hitting DRONES (eg: MetalSparks or ElectricBurst).")]
+    public GameObject impactEffectDrone;
+
     [Tooltip("Impact effect used when the PLAYER shoots an ALLY/PLAYER (eg: RedBloodSpray).")]
     public GameObject impactEffectAlly;
 
     [Tooltip("Optional impact effect for NPCs.")]
     public GameObject impactEffectNPC;
+
+    [Tooltip("Optional impact effect for Animals (tag \"animal\" / AnimalHealth).")]
+    public GameObject impactEffectAnimal;
 
     public float impactSurfaceOffset = 0.03f;
     public bool alignToCollisionNormal = true;
@@ -86,6 +92,9 @@ public class BulletController : MonoBehaviour
     [Tooltip("If true, bullets can damage NPCs (non-recruitable civilians).")]
     public bool damageNPC = true;
 
+    [Tooltip("If true, bullets can damage animals (AnimalHealth).")]
+    public bool damageAnimals = true;
+
     [Header("Legacy Compatibility")]
     [Tooltip("Legacy field used by older scripts (e.g., AllyController). Keep this in sync with baseDamage.")]
     public float Damage = 2f;
@@ -108,6 +117,7 @@ public class BulletController : MonoBehaviour
     public string allyTag = "Ally";
     public string npcTag = "NPC";
     public string playerTag = "Player";
+    public string animalTag = "animal";
 
     [Header("Fallback Ally Damage Message")]
     [Tooltip("Only used if AllyHealth isn't found. Example: TakeDamage, ApplyDamage, DamagePlayer.")]
@@ -138,6 +148,8 @@ float _spawnTime;
         // Back-compat: if Impact Effect Enemy not set, fall back to legacy Impact Effect
         if (impactEffectEnemy == null)
             impactEffectEnemy = impactEffect;
+        if (impactEffectDrone == null)
+            impactEffectDrone = impactEffectEnemy;
 
         if (theRB != null)
         {
@@ -316,9 +328,15 @@ float _spawnTime;
 
         NPCHealth npcHealth = hit.GetComponentInParent<NPCHealth>();
 
-        bool isEnemy = enemyHealth != null || HasTagInParents(hit, enemyTag);
+        AnimalHealth animalHealth = hit.GetComponentInParent<AnimalHealth>();
+
+
+        DroneEnemyController droneEnemy = hit.GetComponentInParent<DroneEnemyController>();
+        bool isEnemy = enemyHealth != null || droneEnemy != null || HasTagInParents(hit, enemyTag);
         bool isAlly = allyHealth != null || playerVitals != null || HasTagInParents(hit, allyTag) || HasTagInParents(hit, playerTag);
         bool isNPC = npcHealth != null || HasTagInParents(hit, npcTag);
+        bool isAnimal = animalHealth != null || HasTagInParents(hit, animalTag);
+        bool isDrone = droneEnemy != null;
 
         // Let enemies know WHO hit them so they aggro the attacker (prevents them from snapping to the player when an ally shoots).
         if (isEnemy)
@@ -370,6 +388,22 @@ if (enemyHealth != null)
             }
         }
 
+        else if (isAnimal && damageAnimals)
+        {
+            // Animals (your new wildlife system)
+            if (animalHealth != null)
+            {
+                // AnimalHealth uses int damage and accepts attacker transform (owner).
+                animalHealth.TakeDamage(dmgInt, owner); // IMPORTANT: owner should be the shooter transform for aggro to work.
+            }
+            else
+            {
+                // Fallback if the animal uses a different damage method
+                hit.SendMessageUpwards("TakeDamage", dmgInt, SendMessageOptions.DontRequireReceiver);
+                hit.SendMessageUpwards("TakeDamage", dmgFloat, SendMessageOptions.DontRequireReceiver);
+            }
+        }
+
         // FX (optional): spawn only when hitting a character
         // Special rule you asked for:
         // - Player bullet uses GreenBloodSpray for enemies
@@ -380,11 +414,20 @@ if (enemyHealth != null)
         if (isNPC && impactEffectNPC != null)
             fx = impactEffectNPC;
 
+        // Animal override (optional)
+        if (isAnimal && impactEffectAnimal != null)
+            fx = impactEffectAnimal;
+
+
+        // Drone override (optional)
+        if (isDrone && impactEffectDrone != null)
+            fx = impactEffectDrone;
+
         // Ally override ONLY when the shooter is the player
         if (isAlly && impactEffectAlly != null && IsOwnerPlayer())
             fx = impactEffectAlly;
 
-        if (fx != null && (isEnemy || isAlly || isNPC))
+        if (fx != null && (isEnemy || isAlly || isNPC || isAnimal || isDrone))
         {
             Vector3 p = hit.ClosestPoint(point);
             SpawnImpact(fx, p, normal);
@@ -476,6 +519,16 @@ private void NotifyEnemyAggroFromHit(Collider hit)
         if (enemyLegacy != null)
         {
             enemyLegacy.GetShot();
+        }
+
+        // Drone enemy controller (flying drone) - aggro on attacker
+        var drone = hit.GetComponentInParent<DroneEnemyController>();
+        if (drone != null)
+        {
+            if (owner != null)
+                drone.GetShot(owner);
+            else
+                drone.GetShot(hit.transform);
         }
     }
 
