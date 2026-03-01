@@ -270,7 +270,16 @@ public class Enemy2Controller : MonoBehaviour
     public GameObject bullet;
     public Transform firePoint;
 
-    [Header("Muzzle Flash (Simple Toggle)")]
+    
+
+[Header("Bullet Damage Factions")]
+[Tooltip("If true, this enemy's bullets can damage AnimalHealth targets.")]
+public bool bulletsDamageAnimals = true;
+
+[Tooltip("Optional: tag used for animals when bullet relies on tag fallback (does not matter if AnimalHealth exists).")]
+public string bulletsAnimalTag = "Animal";
+
+[Header("Muzzle Flash (Simple Toggle)")]
     [Tooltip("Assign your Muzzle Flash GameObject (mesh spheres/cubes). It can live anywhere; we'll move it to firePoint when firing.")]
     public GameObject muzzleFlashObject;
     [Range(0.005f, 0.2f)]
@@ -1502,7 +1511,11 @@ void HandleShooting(Transform target)
             // Enemy bullets should damage allies/players, not enemies.
             bc.damageEnemy = false;
             bc.damageAlly = true;
-        }
+        
+bc.damageAnimals = bulletsDamageAnimals;
+if (!string.IsNullOrEmpty(bulletsAnimalTag))
+    bc.animalTag = bulletsAnimalTag;
+}
         if (debugMuzzleFlash) Debug.Log($"[Enemy2Controller] Shot fired -> triggering muzzle flash on {name}", this);
         TriggerMuzzleFlashSimple();
         if (anim != null) anim.SetTrigger("fireShot");

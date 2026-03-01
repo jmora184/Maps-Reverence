@@ -73,6 +73,77 @@ public class AnimalHealth : MonoBehaviour
             Die(attacker);
     }
 
+// --- Compatibility overloads (so bullets/melee can damage animals using common method names) ---
+
+/// <summary>
+/// Common interface-style entry point used by many projectiles.
+/// </summary>
+public void TakeDamage(float amount)
+{
+    TakeDamage(Mathf.CeilToInt(amount), null);
+}
+
+/// <summary>
+/// Some scripts call TakeDamage(int) without attacker context.
+/// </summary>
+public void TakeDamage(int amount)
+{
+    TakeDamage(amount, null);
+}
+
+/// <summary>
+/// Some scripts send attacker context with float damage.
+/// </summary>
+public void TakeDamage(float amount, Transform attacker)
+{
+    TakeDamage(Mathf.CeilToInt(amount), attacker);
+}
+
+/// <summary>
+/// Alias used by older scripts.
+/// </summary>
+public void ApplyDamage(int amount)
+{
+    TakeDamage(amount, null);
+}
+
+public void ApplyDamage(float amount)
+{
+    TakeDamage(amount, null);
+}
+
+public void Damage(int amount)
+{
+    TakeDamage(amount, null);
+}
+
+public void Damage(float amount)
+{
+    TakeDamage(amount, null);
+}
+
+public void ReceiveDamage(int amount)
+{
+    TakeDamage(amount, null);
+}
+
+public void ReceiveDamage(float amount)
+{
+    TakeDamage(amount, null);
+}
+
+public void Hurt(int amount)
+{
+    TakeDamage(amount, null);
+}
+
+public void Hurt(float amount)
+{
+    TakeDamage(amount, null);
+}
+
+
+
     private void Die(Transform killer)
     {
         if (_deathHandled) return;

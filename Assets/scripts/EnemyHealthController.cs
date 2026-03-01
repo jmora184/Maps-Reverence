@@ -60,6 +60,7 @@ public bool clearLocomotionParamsOnDeath = true;
     private void Awake()
     {
         if (maxHealth <= 0) maxHealth = 5;
+        if (currentHealth <= 0) currentHealth = maxHealth;
         currentHealth = Mathf.Clamp(currentHealth, 0, maxHealth);
 
         // Auto-wire controllers if not set in inspector (safe + helps prevent "standing there" bugs)
@@ -80,7 +81,38 @@ RaiseHealthChanged();
     /// NOTE: This method does NOT take an attacker. Enemy2Controller.GetShot() should still aggro/return-fire
     /// using its internal fallback (typically Player) when attacker is unknown.
     /// </summary>
-    public void DamageEnemy(int damageAmount)
+    
+
+// --- Common damage entry points (so different bullet / melee scripts can talk to this health) ---
+
+/// <summary>
+/// Common Unity pattern: some projectiles call TakeDamage(float).
+/// This forwards into DamageEnemy(int).
+/// </summary>
+public void TakeDamage(float damage)
+{
+    // Round up so small damages still matter (e.g., 0.5 -> 1).
+    int dmgInt = Mathf.CeilToInt(damage);
+    DamageEnemy(dmgInt);
+}
+
+/// <summary>
+/// Some scripts call TakeDamage(int).
+/// </summary>
+public void TakeDamage(int damage)
+{
+    DamageEnemy(damage);
+}
+
+/// <summary>
+/// Alias for older scripts that call ApplyDamage.
+/// </summary>
+public void ApplyDamage(int damage)
+{
+    DamageEnemy(damage);
+}
+
+public void DamageEnemy(int damageAmount)
     {
         if (lockAfterDeath && _isDead) return;
 

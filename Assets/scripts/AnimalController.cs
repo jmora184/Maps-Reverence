@@ -31,7 +31,34 @@ public class AnimalController : MonoBehaviour
     public string allyTag = "Ally";
     public string enemyTag = "Enemy";
 
-    [Header("Ranges")]
+    
+
+[Header("Auto Aggro")]
+[Tooltip("If true, the animal will periodically look for nearby hostile targets (based on Hostility toggles). If false, it will only become aggressive via damage reaction / external target assignment.")]
+public bool autoAggroNearbyHostiles = true;
+
+
+[Tooltip("If true, auto-aggro can acquire the Player when within range. Default false so animals won't attack just because they see the player.")]
+public bool autoAggroPlayers = false;
+
+[Tooltip("If true, auto-aggro can acquire Allies when within range.")]
+public bool autoAggroAllies = false;
+
+[Tooltip("If true, auto-aggro can acquire Enemies when within range. Default true for 'wildlife attacks nearby enemies'.")]
+public bool autoAggroEnemies = true;
+
+[Tooltip("Search radius for auto-aggro. If <= 0, sightRange will be used.")]
+public float autoAggroRange = 0f;
+
+[Tooltip("Optional layer filtering for auto-aggro scans. Leave as Everything unless you want to restrict scans.")]
+public LayerMask autoAggroLayerMask = ~0;
+
+[Tooltip("If true, targets must be visible (raycast line-of-sight) to be acquired.")]
+public bool requireLineOfSight = false;
+
+[Tooltip("Layers considered as occluders for line-of-sight checks.")]
+public LayerMask lineOfSightBlockers = ~0;
+[Header("Ranges")]
     public float sightRange = 10f;
     public float chaseRange = 15f;
     public float attackRange = 1.8f;
@@ -54,8 +81,6 @@ public class AnimalController : MonoBehaviour
     public int attackDamage = 10;
     public float attackCooldown = 1.2f;
 
-    [Tooltip("Child hitbox with trigger collider + AnimalAttackHitbox.")]
-    public AnimalAttackHitbox attackHitbox;
 
     [Tooltip("If you don't want Animation Events, auto-open the hitbox window after triggering attack.")]
     public bool autoAttackWindow = true;
@@ -97,7 +122,6 @@ public class AnimalController : MonoBehaviour
         if (!agent) agent = GetComponent<NavMeshAgent>();
         if (!health) health = GetComponent<AnimalHealth>();
         if (!animator) animator = GetComponentInChildren<Animator>();
-        if (!attackHitbox) attackHitbox = GetComponentInChildren<AnimalAttackHitbox>();
 
         if (health != null)
         {
@@ -440,39 +464,79 @@ public class AnimalController : MonoBehaviour
     // ----------------------
     // Targeting
     // ----------------------
-    private void TryAcquireTarget()
+private void TryAcquireTarget()
+{
+    if (!IsAlive) return;
+    if (_target) return;
+
+    // If we're not auto-aggroing, we only fight when provoked (damage reaction) or when another system assigns a target.
+    if (!autoAggroNearbyHostiles) return;
+    if (!autoAggroPlayers && !autoAggroAllies && !autoAggroEnemies) return;
+
+    float range = (autoAggroRange > 0f) ? autoAggroRange : sightRange;
+
+    var hits = Physics.OverlapSphere(transform.position, range, autoAggroLayerMask, QueryTriggerInteraction.Ignore);
+    Transform best = null;
+    float bestD = float.MaxValue;
+
+    foreach (var c in hits)
     {
-        if (!IsAlive) return;
-        if (_target) return;
+        if (!c) continue;
+        var t = c.transform;
 
-        if (!hostileToPlayer && !hostileToAllies && !hostileToEnemies) return;
+        // Skip self / own hierarchy
+        if (t == transform || t.IsChildOf(transform)) continue;
 
-        var hits = Physics.OverlapSphere(transform.position, sightRange);
-        Transform best = null;
-        float bestD = float.MaxValue;
+        // Only consider configured hostile factions
+        if (!IsAutoAggroHostileTo(t)) continue;
 
-        foreach (var c in hits)
+        // Optional LOS check
+        if (requireLineOfSight)
         {
-            if (!c) continue;
-            var t = c.transform;
-            if (t == transform || t.IsChildOf(transform)) continue;
-            if (!IsHostileTo(t)) continue;
+            Vector3 origin = transform.position + Vector3.up * 0.75f;
+            Vector3 targetPos = t.position + Vector3.up * 0.75f;
+            Vector3 dir = (targetPos - origin);
+            float dist = dir.magnitude;
 
-            float d = Vector3.Distance(transform.position, t.position);
-            if (d < bestD)
+            if (dist > 0.01f)
             {
-                bestD = d;
-                best = t;
+                dir /= dist;
+                // If something blocks the ray before we reach the target, skip it.
+                if (Physics.Raycast(origin, dir, out RaycastHit hit, dist, lineOfSightBlockers, QueryTriggerInteraction.Ignore))
+                {
+                    // If we hit something that isn't the target (or its children), LOS is blocked.
+                    if (hit.transform != t && !hit.transform.IsChildOf(t))
+                        continue;
+                }
             }
         }
 
-        if (best)
+        float d = Vector3.Distance(transform.position, t.position);
+        if (d < bestD)
         {
-            _target = best;
-            _state = State.Chase;
-            ApplySpeedForState(_state);
+            bestD = d;
+            best = t;
         }
     }
+
+    if (best)
+    {
+        _target = best;
+        _state = State.Chase;
+        ApplySpeedForState(_state);
+    }
+}
+
+private bool IsAutoAggroHostileTo(Transform t)
+{
+    if (!t) return false;
+    if (autoAggroPlayers && t.CompareTag(playerTag)) return true;
+    if (autoAggroAllies && t.CompareTag(allyTag)) return true;
+    if (autoAggroEnemies && t.CompareTag(enemyTag)) return true;
+    return false;
+}
+
+
 
     private bool IsHostileTo(Transform t)
     {
@@ -497,7 +561,6 @@ public class AnimalController : MonoBehaviour
     {
         _attackWindowActive = true;
         _attackWindowEnd = Time.time + 999f;
-        if (attackHitbox) attackHitbox.BeginSwing();
     }
 
     /// <summary>Call from Animation Event when swing ends.</summary>
@@ -505,7 +568,6 @@ public class AnimalController : MonoBehaviour
     {
         _attackWindowActive = false;
         _attackWindowEnd = 0f;
-        if (attackHitbox) attackHitbox.EndSwing();
 
         CancelInvoke(nameof(BeginAttackWindow_Auto));
         CancelInvoke(nameof(EndAttackWindow));

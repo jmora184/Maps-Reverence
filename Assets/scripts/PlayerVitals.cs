@@ -9,7 +9,7 @@ using UnityEngine.UI;
 /// Attach to the Player.
 /// Drag your GREEN bar RectTransform into "Bar Fill" (pivot X should be 0).
 /// </summary>
-public class PlayerVitals : MonoBehaviour
+public class PlayerVitals : MonoBehaviour, IDamageable
 {
     public static PlayerVitals Instance { get; private set; }
 
@@ -78,6 +78,7 @@ public class PlayerVitals : MonoBehaviour
             if (logChanges) Debug.Log($"[PlayerVitals] DIED", this);
             OnDied?.Invoke();
         }
+
         else
         {
             PushToUI();
@@ -87,6 +88,21 @@ public class PlayerVitals : MonoBehaviour
         if (logChanges) Debug.Log($"[PlayerVitals] Damage {amount} => {currentHealth}/{maxHealth}", this);
         return true;
     }
+
+    // IDamageable implementation (used by melee, animal bites, bullets, etc.)
+    public void TakeDamage(int amount)
+    {
+        Damage(amount);
+    }
+
+    // IDamageable required overload in your project
+    public void TakeDamage(float amount)
+    {
+        // Convert to int damage (round to nearest)
+        Damage(Mathf.RoundToInt(amount));
+    }
+
+
 
     public void Heal(int amount)
     {

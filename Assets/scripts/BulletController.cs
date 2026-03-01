@@ -70,6 +70,9 @@ public class BulletController : MonoBehaviour
     [Tooltip("Optional impact effect for Animals (tag \"animal\" / AnimalHealth).")]
     public GameObject impactEffectAnimal;
 
+
+    [Tooltip("Optional impact effect for Bosses (tag \"Boss\" / AlienBossHealth).")]
+    public GameObject impactEffectBoss;
     public float impactSurfaceOffset = 0.03f;
     public bool alignToCollisionNormal = true;
 
@@ -95,6 +98,10 @@ public class BulletController : MonoBehaviour
     [Tooltip("If true, bullets can damage animals (AnimalHealth).")]
     public bool damageAnimals = true;
 
+
+
+    [Tooltip("If true, bullets can damage bosses (AlienBossHealth).")]
+    public bool damageBoss = true;
     [Header("Legacy Compatibility")]
     [Tooltip("Legacy field used by older scripts (e.g., AllyController). Keep this in sync with baseDamage.")]
     public float Damage = 2f;
@@ -119,6 +126,7 @@ public class BulletController : MonoBehaviour
     public string playerTag = "Player";
     public string animalTag = "animal";
 
+    public string bossTag = "Boss";
     [Header("Fallback Ally Damage Message")]
     [Tooltip("Only used if AllyHealth isn't found. Example: TakeDamage, ApplyDamage, DamagePlayer.")]
     public string allyDamageMessageName = "DamageAlly";
@@ -329,6 +337,8 @@ float _spawnTime;
         NPCHealth npcHealth = hit.GetComponentInParent<NPCHealth>();
 
         AnimalHealth animalHealth = hit.GetComponentInParent<AnimalHealth>();
+        AlienBossHealth bossHealth = hit.GetComponentInParent<AlienBossHealth>();
+        AlienBossController bossController = hit.GetComponentInParent<AlienBossController>();
 
 
         DroneEnemyController droneEnemy = hit.GetComponentInParent<DroneEnemyController>();
@@ -336,6 +346,7 @@ float _spawnTime;
         bool isAlly = allyHealth != null || playerVitals != null || HasTagInParents(hit, allyTag) || HasTagInParents(hit, playerTag);
         bool isNPC = npcHealth != null || HasTagInParents(hit, npcTag);
         bool isAnimal = animalHealth != null || HasTagInParents(hit, animalTag);
+        bool isBoss = bossHealth != null || HasTagInParents(hit, bossTag);
         bool isDrone = droneEnemy != null;
 
         // Let enemies know WHO hit them so they aggro the attacker (prevents them from snapping to the player when an ally shoots).
@@ -388,6 +399,29 @@ if (enemyHealth != null)
             }
         }
 
+
+        else if (isBoss && damageBoss)
+        {
+            // Bosses (AlienBoss system)
+            if (bossController != null && owner != null)
+            {
+                // Ensure boss switches target to attacker (provoked)
+                bossController.GetShot(owner);
+            }
+
+            if (bossHealth != null)
+            {
+                // AlienBossHealth accepts attacker transform for aggro logic
+                bossHealth.TakeDamage(dmgInt, owner);
+            }
+            else
+            {
+                // Fallback if the boss uses a different damage method
+                hit.SendMessageUpwards("TakeDamage", dmgInt, SendMessageOptions.DontRequireReceiver);
+                hit.SendMessageUpwards("TakeDamage", dmgFloat, SendMessageOptions.DontRequireReceiver);
+            }
+        }
+
         else if (isAnimal && damageAnimals)
         {
             // Animals (your new wildlife system)
@@ -418,6 +452,10 @@ if (enemyHealth != null)
         if (isAnimal && impactEffectAnimal != null)
             fx = impactEffectAnimal;
 
+        // Boss override (optional)
+        if (isBoss && impactEffectBoss != null)
+            fx = impactEffectBoss;
+
 
         // Drone override (optional)
         if (isDrone && impactEffectDrone != null)
@@ -427,7 +465,7 @@ if (enemyHealth != null)
         if (isAlly && impactEffectAlly != null && IsOwnerPlayer())
             fx = impactEffectAlly;
 
-        if (fx != null && (isEnemy || isAlly || isNPC || isAnimal || isDrone))
+        if (fx != null && (isEnemy || isAlly || isNPC || isAnimal || isBoss || isDrone))
         {
             Vector3 p = hit.ClosestPoint(point);
             SpawnImpact(fx, p, normal);
