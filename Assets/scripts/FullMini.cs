@@ -36,9 +36,6 @@ public class FullMini : MonoBehaviour
 
     public bool addMode = false;
     public bool moveMode = false;
-
-    float timeSinceStarted = 0f;
-
     public bool move2 = false;
     public bool move3 = false;
     public bool move4 = false;

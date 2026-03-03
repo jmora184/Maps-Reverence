@@ -1,222 +1,263 @@
 using System;
+using System.Reflection;
 using UnityEngine;
 
 /// <summary>
-/// FIXED VERSION
-/// 
-/// This melee damage script has NO hard dependency on any specific controller type.
-/// It will compile even if you don't have MeleeEnemyController.cs in the project.
-/// 
-/// How to use:
-/// 1) Put this on your melee enemy (same object as MeleeEnemy2Controller is ideal).
-/// 2) In the Inspector, set attackStateNames to match your Animator's attack state name(s) exactly.
-/// 3) Add an Animation Event on the HIT frame that calls TryApplyMeleeDamage(), OR
-///    call TryApplyMeleeDamage() from your controller right after triggering attack.
+/// MeleeEnemyMeleeDamageRange
+/// Melee damage WITHOUT hitbox colliders:
+/// - When the Animator ENTERS an attack animation state, deal damage ONCE if target is within range.
+/// - Target can be pulled from your melee controller (via reflection) or found by tag in range.
+///
+/// Works with AnimalDamageReceiver (animals implement IDamageable now).
 /// </summary>
 [DisallowMultipleComponent]
-public class MeleeEnemyMeleeDamageRang : MonoBehaviour
+public class MeleeEnemyMeleeDamageRange : MonoBehaviour
 {
     [Header("References")]
-    [Tooltip("Animator that plays the melee attack animation. If null, will auto-find in children.")]
+    [Tooltip("Your melee enemy controller script (optional but recommended). Used to resolve/set target.")]
+    public MonoBehaviour meleeController;
+
+    [Tooltip("Animator (auto-finds if null).")]
     public Animator animator;
 
-    [Tooltip("Optional: the transform to treat as the attacker root (for distance and aggro). If null, uses this transform.")]
-    public Transform rootAttacker;
+    [Header("Attack State Detection")]
+    [Tooltip("Exact Animator state names on layer 0 that represent attacks (case-sensitive).")]
+    public string[] attackStateNames = new string[] { "attack", "swing", "punch", "slash" };
 
-    [Tooltip("Optional: assign your controller component here (ex: MeleeEnemy2Controller). If null, script will try to find one automatically.")]
-    public Component controllerComponent;
+    public int layerIndex = 0;
+
+    [Header("Range Gate")]
+    public float attackRange = 2.2f;
+    public Transform rangeOrigin;
 
     [Header("Damage")]
-    [Min(0.1f)] public float attackRange = 2.4f;
-    [Min(0.01f)] public float damage = 15f;
+    public int damage = 10;
+    public float damageCooldown = 0.75f;
 
-    [Tooltip("Prevents repeated hits from the same animation state / rapid transitions.")]
-    [Min(0.01f)] public float damageCooldown = 0.6f;
+    [Header("Targeting")]
+    [Tooltip("Tags that this melee enemy is allowed to damage.")]
+    public string[] allowedTargetTags = new string[] { "Player", "Ally", "Animal", "Enemy" };
 
-    [Header("Attack Animation State Names (case-sensitive)")]
-    [Tooltip("Damage is only applied while the Animator is currently in one of these state names (layer 0). Add your real state name here.")]
-    public string[] attackStateNames = new string[] { "attack", "Attack", "MeleeAttack", "Bite", "Swing", "pound" };
+    [Tooltip("If true and controller target is null/out of range, find closest allowed target within range.")]
+    public bool fallbackFindTargetInRange = true;
 
-    [Header("Target Tags")]
-    [Tooltip("Tags this melee enemy is allowed to damage.")]
-    public string[] damageableTags = new string[] { "Player", "Ally", "Enemy", "Animal" };
+    [Tooltip("If true, when fallback finds a target it will try to set it on the controller (combatTarget/target).")]
+    public bool fallbackAssignTargetToController = true;
 
-    [Tooltip("When we hit something, try to make it aggro back onto this attacker (best-effort).")]
-    public bool causeVictimToAggroBack = true;
+    [Header("Debug")]
+    public bool logDamage = false;
 
-    private float nextDamageTime;
+    private bool _wasInAttack;
+    private float _nextDamageTime;
+
+    private static readonly BindingFlags BF = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
     private void Awake()
     {
-        if (animator == null) animator = GetComponentInChildren<Animator>();
-        if (rootAttacker == null) rootAttacker = transform;
+        if (!animator) animator = GetComponentInChildren<Animator>();
+        if (!rangeOrigin) rangeOrigin = transform;
+    }
 
-        if (controllerComponent == null)
+    private void Update()
+    {
+        if (!animator) return;
+
+        bool inAttack = IsInAnyState(animator, layerIndex, attackStateNames);
+
+        if (inAttack && !_wasInAttack)
         {
-            // Best-effort: pick a controller-like component that has SetCombatTarget/GetShot methods.
-            foreach (var c in GetComponents<MonoBehaviour>())
+            TryDamage();
+        }
+
+        _wasInAttack = inAttack;
+    }
+
+    private void TryDamage()
+    {
+        if (Time.time < _nextDamageTime) return;
+
+        Transform target = ResolveTarget();
+
+        if (!target && fallbackFindTargetInRange)
+        {
+            target = FindClosestAllowedTargetInRange();
+            if (target && fallbackAssignTargetToController)
+                TrySetControllerTarget(target);
+        }
+
+        if (!target) return;
+
+        float dist = Vector3.Distance(rangeOrigin.position, target.position);
+        if (dist > attackRange) return;
+
+        bool did = TryApplyDamage(target.gameObject, damage);
+        if (did)
+        {
+            _nextDamageTime = Time.time + Mathf.Max(0.01f, damageCooldown);
+
+            if (logDamage)
+                Debug.Log($"[MeleeEnemyMeleeDamageRange] {name} hit {target.name} for {damage} (dist {dist:0.00})");
+        }
+        else if (logDamage)
+        {
+            Debug.LogWarning($"[MeleeEnemyMeleeDamageRange] Could not find damage receiver on {target.name}.");
+        }
+    }
+
+    private Transform ResolveTarget()
+    {
+        if (!meleeController) return null;
+
+        // common names in your project style
+        string[] names = { "combatTarget", "target", "currentTarget", "enemyTarget", "attackTarget", "chaseTarget", "targetTransform" };
+
+        foreach (var n in names)
+        {
+            var f = meleeController.GetType().GetField(n, BF);
+            if (f != null)
             {
-                if (c == null) continue;
-                var t = c.GetType();
-                if (t.GetMethod("SetCombatTarget", new[] { typeof(Transform) }) != null ||
-                    t.GetMethod("GetShot", new[] { typeof(Transform) }) != null)
-                {
-                    controllerComponent = c;
-                    break;
-                }
+                object v = f.GetValue(meleeController);
+                if (v is Transform ft) return ft;
+                if (v is GameObject fgo) return fgo ? fgo.transform : null;
+                if (v is Component fc) return fc ? fc.transform : null;
             }
-        }
-    }
 
-    private bool IsInAttackState()
-    {
-        if (animator == null) return false;
-
-        var state = animator.GetCurrentAnimatorStateInfo(0);
-        for (int i = 0; i < attackStateNames.Length; i++)
-        {
-            var n = attackStateNames[i];
-            if (string.IsNullOrEmpty(n)) continue;
-            if (state.IsName(n)) return true;
-        }
-        return false;
-    }
-
-    /// <summary>
-    /// Call from an Animation Event near the HIT frame, or from your controller.
-    /// </summary>
-    public void TryApplyMeleeDamage()
-    {
-        if (Time.time < nextDamageTime) return;
-        if (!IsInAttackState()) return;
-
-        // 1) Prefer the controller's current target if available
-        Transform target = TryGetControllerTarget();
-
-        if (target != null)
-        {
-            TryDamageTarget(target);
-            return;
-        }
-
-        // 2) Fallback: overlap sphere search
-        var hits = Physics.OverlapSphere(rootAttacker.position, attackRange);
-        for (int i = 0; i < hits.Length; i++)
-        {
-            var col = hits[i];
-            if (col == null) continue;
-
-            var go = col.gameObject;
-            if (go == null) continue;
-
-            if (!IsAllowedTag(go.tag)) continue;
-
-            // Don't hit self
-            if (go.transform == rootAttacker || go.transform.IsChildOf(rootAttacker)) continue;
-
-            TryDamageTarget(go.transform);
-            return;
-        }
-    }
-
-    private Transform TryGetControllerTarget()
-    {
-        if (controllerComponent == null) return null;
-
-        var t = controllerComponent.GetType();
-
-        // Common method name:
-        // - GetCurrentTarget() => Transform
-        var m = t.GetMethod("GetCurrentTarget", Type.EmptyTypes);
-        if (m != null && m.ReturnType == typeof(Transform))
-        {
-            try { return (Transform)m.Invoke(controllerComponent, null); }
-            catch { }
+            var p = meleeController.GetType().GetProperty(n, BF);
+            if (p != null)
+            {
+                object v = p.GetValue(meleeController, null);
+                if (v is Transform pt) return pt;
+                if (v is GameObject pgo) return pgo ? pgo.transform : null;
+                if (v is Component pc) return pc ? pc.transform : null;
+            }
         }
 
         return null;
     }
 
-    private void TryDamageTarget(Transform target)
+    private void TrySetControllerTarget(Transform t)
     {
-        if (target == null) return;
+        if (!meleeController || !t) return;
 
-        float dist = Vector3.Distance(rootAttacker.position, target.position);
-        if (dist > attackRange) return;
+        // Try methods first
+        Type ct = meleeController.GetType();
 
-        bool didDamage = TryDamageByInterfaceOrMessage(target.gameObject, damage);
+        MethodInfo m =
+            ct.GetMethod("SetCombatTarget", BF, null, new[] { typeof(Transform) }, null) ??
+            ct.GetMethod("SetTarget", BF, null, new[] { typeof(Transform) }, null);
+        if (m != null) { m.Invoke(meleeController, new object[] { t }); return; }
 
-        if (didDamage)
+        m =
+            ct.GetMethod("SetCombatTarget", BF, null, new[] { typeof(GameObject) }, null) ??
+            ct.GetMethod("SetTarget", BF, null, new[] { typeof(GameObject) }, null);
+        if (m != null) { m.Invoke(meleeController, new object[] { t.gameObject }); return; }
+
+        // Otherwise, try common fields
+        string[] fields = { "combatTarget", "target", "currentTarget" };
+        foreach (var fn in fields)
         {
-            nextDamageTime = Time.time + damageCooldown;
+            var f = ct.GetField(fn, BF);
+            if (f == null) continue;
 
-            if (causeVictimToAggroBack)
-                TryCauseAggroBack(target);
+            if (f.FieldType == typeof(Transform)) { f.SetValue(meleeController, t); return; }
+            if (f.FieldType == typeof(GameObject)) { f.SetValue(meleeController, t.gameObject); return; }
         }
     }
 
-    private bool TryDamageByInterfaceOrMessage(GameObject victim, float amount)
+    private Transform FindClosestAllowedTargetInRange()
     {
-        if (victim == null) return false;
+        Transform best = null;
+        float bestDist = float.MaxValue;
 
-        // 1) IDamageable (preferred)
-        var damageable = victim.GetComponent<IDamageable>();
-        if (damageable != null)
+        Vector3 origin = rangeOrigin ? rangeOrigin.position : transform.position;
+
+        for (int i = 0; i < allowedTargetTags.Length; i++)
         {
-            damageable.TakeDamage(amount);
+            string tag = allowedTargetTags[i];
+            if (string.IsNullOrEmpty(tag)) continue;
+
+            GameObject[] gos;
+            try { gos = GameObject.FindGameObjectsWithTag(tag); }
+            catch { continue; } // tag might not exist in project
+
+            for (int g = 0; g < gos.Length; g++)
+            {
+                var go = gos[g];
+                if (!go || go == gameObject) continue;
+
+                float d = Vector3.Distance(origin, go.transform.position);
+                if (d <= attackRange && d < bestDist)
+                {
+                    bestDist = d;
+                    best = go.transform;
+                }
+            }
+        }
+
+        return best;
+    }
+
+    private bool TryApplyDamage(GameObject victim, int amount)
+    {
+        if (!victim) return false;
+
+        // 1) Interface
+        var dmg = victim.GetComponentInParent<IDamageable>();
+        if (dmg != null)
+        {
+            dmg.TakeDamage(amount);
             return true;
         }
 
-        // 2) Best-effort message calls (no hard dependency)
-        victim.SendMessage("TakeDamage", amount, SendMessageOptions.DontRequireReceiver);
-        victim.SendMessage("ApplyDamage", amount, SendMessageOptions.DontRequireReceiver);
-
-        // We can't know for sure if it landed, but at least it won't error.
-        return true;
-    }
-
-    private void TryCauseAggroBack(Transform victim)
-    {
-        if (victim == null) return;
-
-        var victimBehaviours = victim.GetComponentsInParent<MonoBehaviour>();
-        for (int i = 0; i < victimBehaviours.Length; i++)
+        // 2) Reflection methods on parent chain
+        MonoBehaviour[] mbs = victim.GetComponentsInParent<MonoBehaviour>(true);
+        foreach (var mb in mbs)
         {
-            var b = victimBehaviours[i];
-            if (b == null) continue;
-
-            var t = b.GetType();
-
-            var m1 = t.GetMethod("GetShot", new[] { typeof(Transform) });
-            if (m1 != null)
-            {
-                try { m1.Invoke(b, new object[] { rootAttacker }); } catch { }
-                return;
-            }
-
-            var m2 = t.GetMethod("SetCombatTarget", new[] { typeof(Transform) });
-            if (m2 != null)
-            {
-                try { m2.Invoke(b, new object[] { rootAttacker }); } catch { }
-                return;
-            }
+            if (!mb) continue;
+            if (TryInvokeDamageMethod(mb, amount))
+                return true;
         }
-    }
 
-    private bool IsAllowedTag(string tag)
-    {
-        for (int i = 0; i < damageableTags.Length; i++)
+        // 3) SendMessage fallback (best effort)
+        try
         {
-            if (damageableTags[i] == tag) return true;
+            victim.SendMessage("TakeDamage", (float)amount, SendMessageOptions.DontRequireReceiver);
+            victim.SendMessage("TakeDamage", amount, SendMessageOptions.DontRequireReceiver);
+            return true;
         }
+        catch { /* ignore */ }
+
         return false;
     }
 
-#if UNITY_EDITOR
-    private void OnDrawGizmosSelected()
+    private static bool TryInvokeDamageMethod(MonoBehaviour mb, int amount)
     {
-        if (rootAttacker == null) rootAttacker = transform;
-        Gizmos.DrawWireSphere(rootAttacker.position, attackRange);
+        Type t = mb.GetType();
+        string[] methodNames = { "TakeDamage", "ApplyDamage", "ReceiveDamage", "Damage" };
+
+        foreach (string name in methodNames)
+        {
+            MethodInfo mi = t.GetMethod(name, BF, null, new[] { typeof(int) }, null);
+            if (mi != null) { mi.Invoke(mb, new object[] { amount }); return true; }
+
+            mi = t.GetMethod(name, BF, null, new[] { typeof(float) }, null);
+            if (mi != null) { mi.Invoke(mb, new object[] { (float)amount }); return true; }
+        }
+
+        return false;
     }
-#endif
+
+    private static bool IsInAnyState(Animator a, int layer, string[] stateNames)
+    {
+        if (!a) return false;
+
+        AnimatorStateInfo s = a.GetCurrentAnimatorStateInfo(layer);
+        for (int i = 0; i < stateNames.Length; i++)
+        {
+            var n = stateNames[i];
+            if (!string.IsNullOrEmpty(n) && s.IsName(n))
+                return true;
+        }
+        return false;
+    }
 }

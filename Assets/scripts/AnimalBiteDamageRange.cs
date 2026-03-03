@@ -55,6 +55,9 @@ public bool enableMultiTarget = false;
 [Tooltip("Which layers are considered damageable targets when Multi-Target is enabled.")]
 public LayerMask targetLayers = ~0;
 
+[Tooltip("If true, multi-target uses QueryTriggerInteraction.Collide so trigger hitboxes are included.")]
+public bool includeTriggerColliders = true;
+
 [Header("Target Factions (used when Multi-Target is enabled)")]
 public bool damagePlayer = true;
 public bool damageAllies = true;
@@ -143,7 +146,7 @@ private void DealDamage(string reason)
     // Multi-target mode: damage allowed targets within biteRange
     if (enableMultiTarget)
     {
-        Collider[] hits = Physics.OverlapSphere(originPos, biteRange, targetLayers, QueryTriggerInteraction.Ignore);
+        Collider[] hits = Physics.OverlapSphere(originPos, biteRange, targetLayers, includeTriggerColliders ? QueryTriggerInteraction.Collide : QueryTriggerInteraction.Ignore);
         if (hits == null || hits.Length == 0) return;
 
         bool hitAny = false;
@@ -204,8 +207,19 @@ private void DealDamage(string reason)
     }
 }
 
+    private bool HasTagInParents(Transform t, string tag)
+    {
+        if (t == null || string.IsNullOrEmpty(tag)) return false;
+        while (t != null)
+        {
+            if (string.Equals(t.tag, tag, System.StringComparison.OrdinalIgnoreCase))
+                return true;
+            t = t.parent;
+        }
+        return false;
+    }
 
-private bool IsAllowedTarget(Collider c)
+bool IsAllowedTarget(Collider c)
 {
     if (!c) return false;
 
@@ -218,21 +232,21 @@ private bool IsAllowedTarget(Collider c)
         {
             string req = requiredTags[i];
             if (string.IsNullOrEmpty(req)) continue;
-            if (t1 == req || t2 == req) return true;
+            if (string.Equals(t1, req, System.StringComparison.OrdinalIgnoreCase) || string.Equals(t2, req, System.StringComparison.OrdinalIgnoreCase)) return true;
         }
         return false;
     }
 
-    string tag = (c.transform.root != null) ? c.transform.root.tag : c.tag;
+    // IMPORTANT: some prefabs have an untagged root with tagged children.
+/// We therefore detect faction tags anywhere up the parent chain (starting from the collider hit).
+Transform t = c.transform;
 
-    if (damagePlayer && tag == playerTag) return true;
-    if (damageAllies && tag == allyTag) return true;
-    if (damageEnemies && tag == enemyTag) return true;
+if (damagePlayer && HasTagInParents(t, playerTag)) return true;
+if (damageAllies && HasTagInParents(t, allyTag)) return true;
+if (damageEnemies && HasTagInParents(t, enemyTag)) return true;
 
-    return false;
+return false;
 }
-
-
 private void TryNotifyEnemyAggro(Collider c)
 {
     if (!c) return;

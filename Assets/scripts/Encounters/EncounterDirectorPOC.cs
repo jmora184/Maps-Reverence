@@ -370,7 +370,7 @@ public class EncounterDirectorPOC : MonoBehaviour
                     RegisterSpawnedAllyTeamMember(group.teamIndex, go.transform);
 
                 ApplyFactionTag(go, group);
-                BroadcastBehavior(go, group);
+                BroadcastBehavior(go, group, teamRoot);
             }
         }
     }
@@ -571,9 +571,138 @@ public class EncounterDirectorPOC : MonoBehaviour
         catch (Exception) { /* Tag not defined in Tag Manager; ignore */ }
     }
 
-    private void BroadcastBehavior(GameObject go, SpawnGroup group)
+    private void BroadcastBehavior(GameObject go, SpawnGroup group, Transform teamRoot)
     {
+        if (go == null) return;
+
+        // Always broadcast behavior enum (existing hooks in EncounterPatrolAgent / EncounterDefendAgent)
         go.SendMessage("Encounter_SetBehavior", group.initialBehavior, SendMessageOptions.DontRequireReceiver);
+
+        // --- Patrol route points ---
+        // If patrolPoints are provided, broadcast them so any script (including EncounterPatrolAgent) can consume them.
+        var patrolWorld = ResolvePatrolPointsWorld(group);
+        if (patrolWorld != null && patrolWorld.Length > 0)
+        {
+            go.SendMessage("Encounter_SetPatrolPoints", patrolWorld, SendMessageOptions.DontRequireReceiver);
+
+            // Controller-aware routing (Enemy2 / MeleeEnemy2 / Drone) so real AI prefabs can follow routes/objectives
+            if (group.enableControllerAwareRouting)
+                EnsureObjectiveRouter(go, group, teamRoot, patrolWorld, Vector3.zero, 0f, false);
+
+            // Optionally add built-in Patrol agent (NavMeshAgent based) ONLY if the unit doesn't already have a movement controller.
+            if (group.addBuiltInPatrolAgentIfMissing && group.initialBehavior == EncounterBehavior.Patrol)
+            {
+                EnsureBuiltInPatrol(go);
+            }
+
+            // Optionally set team anchor planned destination so the team direction arrow points along the route.
+            if (group.updateTeamAnchorPlannedDestination && teamRoot != null)
+            {
+                var anchor = teamRoot.GetComponent<EncounterTeamAnchor>();
+                if (anchor != null)
+                    anchor.SetMoveTarget(patrolWorld[0]);
+            }
+        }
+
+        // --- Hold / Defend center ---
+        // For quick POC, we drive hold/defend by broadcasting a DefendPayload.
+        // If you don't assign defendCenter, we fall back to spawnAreaCenter/teamRoot/EncounterDirector position.
+        if (group.initialBehavior == EncounterBehavior.Hold || group.initialBehavior == EncounterBehavior.Defend)
+        {
+            Vector3 center = transform.position;
+
+            if (group.defendCenter != null) center = group.defendCenter.position;
+            else if (group.spawnAreaCenter != null) center = group.spawnAreaCenter.position;
+            else if (group.spawnPoints != null && group.spawnPoints.Length > 0 && group.spawnPoints[0] != null) center = group.spawnPoints[0].position;
+            else if (teamRoot != null) center = teamRoot.position;
+
+            float radius = (group.initialBehavior == EncounterBehavior.Defend) ? Mathf.Max(0f, group.defendRadius) : 0f;
+
+            go.SendMessage("Encounter_SetDefend", new DefendPayload(center, radius), SendMessageOptions.DontRequireReceiver);
+
+            // Controller-aware routing (Enemy2 / MeleeEnemy2 / Drone) so real AI prefabs can move to hold/defend
+            if (group.enableControllerAwareRouting)
+                EnsureObjectiveRouter(go, group, teamRoot, null, center, radius, true);
+
+            if (group.addBuiltInDefendAgentIfMissing && (group.initialBehavior == EncounterBehavior.Hold || group.initialBehavior == EncounterBehavior.Defend))
+            {
+                EnsureBuiltInDefend(go);
+            }
+
+            // Arrow points to defend/hold center
+            if (teamRoot != null)
+            {
+                var anchor = teamRoot.GetComponent<EncounterTeamAnchor>();
+                if (anchor != null)
+                    anchor.SetMoveTarget(center);
+            }
+        }
+    }
+
+    private void EnsureBuiltInPatrol(GameObject go)
+    {
+        if (go == null) return;
+
+        // Only add if a NavMeshAgent exists AND no known movement controllers exist.
+        if (go.GetComponent<NavMeshAgent>() == null) return;
+        if (HasAnyMovementController(go)) return;
+
+        if (go.GetComponent<EncounterPatrolAgent>() == null)
+            go.AddComponent<EncounterPatrolAgent>();
+    }
+
+    private void EnsureBuiltInDefend(GameObject go)
+    {
+        if (go == null) return;
+
+        if (go.GetComponent<NavMeshAgent>() == null) return;
+        if (HasAnyMovementController(go)) return;
+
+        if (go.GetComponent<EncounterDefendAgent>() == null)
+            go.AddComponent<EncounterDefendAgent>();
+    }
+
+    
+    private void EnsureObjectiveRouter(GameObject go, SpawnGroup group, Transform teamRoot, Vector3[] patrolWorld, Vector3 defendCenter, float defendRadius, bool isDefend)
+    {
+        if (go == null) return;
+
+        // Only add router if prefab has one of the supported controllers OR you explicitly want navmesh fallback routing.
+        bool hasEnemy2 = go.GetComponentInChildren<Enemy2Controller>(true) != null;
+        bool hasMelee2 = go.GetComponentInChildren<MeleeEnemy2Controller>(true) != null;
+        bool hasDrone = go.GetComponentInChildren<DroneEnemyController>(true) != null;
+
+        if (!hasEnemy2 && !hasMelee2 && !hasDrone)
+        {
+            // If no controller, router is still useful to drive a plain NavMeshAgent (same as EncounterPatrolAgent/DefendAgent).
+            if (!group.enableRouterForPlainNavMeshAgents) return;
+            if (go.GetComponentInChildren<UnityEngine.AI.NavMeshAgent>(true) == null) return;
+        }
+
+        var router = go.GetComponent<EncounterObjectiveRouter>();
+        if (router == null) router = go.AddComponent<EncounterObjectiveRouter>();
+
+        // Configure
+        router.loopPatrol = group.patrolLoop;
+        router.pingPong = group.patrolPingPong;
+        router.arriveDistance = Mathf.Max(0.1f, group.routerArriveDistance);
+        router.updateInterval = Mathf.Max(0.05f, group.routerUpdateInterval);
+        router.maxSeconds = Mathf.Max(0.5f, group.routerMaxSeconds);
+
+        if (isDefend)
+            router.SetDefend(defendCenter, defendRadius);
+        else if (patrolWorld != null && patrolWorld.Length > 0)
+            router.SetPatrol(patrolWorld);
+    }
+private bool HasAnyMovementController(GameObject go)
+    {
+        // If any of these exist, the prefab is already driving movement (we should NOT add built-in agents).
+        if (go.GetComponentInChildren<Enemy2Controller>(true) != null) return true;
+        if (go.GetComponentInChildren<MeleeEnemy2Controller>(true) != null) return true;
+        if (go.GetComponentInChildren<DroneEnemyController>(true) != null) return true;
+
+        // Extend here as you add more controllers.
+        return false;
     }
 
     // ---------------- Enemy Team Icons ----------------
@@ -849,6 +978,39 @@ public class EncounterDirectorPOC : MonoBehaviour
 
         [Tooltip("If true, sets the team anchor planned destination to the first patrol point (for UI direction arrows).")]
         public bool updateTeamAnchorPlannedDestination;
+
+        [Header("Defend / Hold (Optional)")]
+        [Tooltip("Optional: center point for Hold/Defend. If null, uses spawnAreaCenter / first spawnPoint / team root / director.")]
+        public Transform defendCenter;
+
+        [Tooltip("Defend radius. Used only when initialBehavior=Defend. (0 = Hold behavior).")]
+        public float defendRadius;
+
+        [Tooltip("If true and initialBehavior is Hold/Defend, adds EncounterDefendAgent if the unit does not already have its own movement controller.")]
+        public bool addBuiltInDefendAgentIfMissing;
+
+        [Header("Controller-Aware Routing (Recommended)")]
+        [Tooltip("If true, EncounterDirectorPOC will add EncounterObjectiveRouter to units so Enemy2/Melee/Drone controllers can follow patrol/defend objectives without disabling their AI.")]
+        public bool enableControllerAwareRouting;
+
+        [Tooltip("If true, EncounterObjectiveRouter may also drive plain NavMeshAgents that do not have Enemy2/Melee/Drone controllers.")]
+        public bool enableRouterForPlainNavMeshAgents;
+
+        [Tooltip("Patrol route looping behavior. If both loop and pingpong are false, route is one-way and stops at last point.")]
+        public bool patrolLoop;
+
+        [Tooltip("Patrol ping-pong behavior. If true, route reverses at ends.")]
+        public bool patrolPingPong;
+
+        [Tooltip("How close to a route point / defend center counts as arrived.")]
+        public float routerArriveDistance;
+
+        [Tooltip("How often to update controller targets / destinations while routing.")]
+        public float routerUpdateInterval;
+
+        [Tooltip("Safety timeout: stop routing after this many seconds (0 means never).")]
+        public float routerMaxSeconds;
+
 
         [Header("Tagging (Optional)")]
         public string overrideUnityTag;

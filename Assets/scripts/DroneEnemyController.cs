@@ -115,27 +115,23 @@ public class DroneEnemyController : MonoBehaviour
     public int maxHealth = 50;
     public int currentHealth = 50;
 
-    [Tooltip("Animator on the drone root or child (optional).")]
-    public Animator animator;
+    [Tooltip("Explosion VFX prefab to spawn when the drone dies (optional).")]
+    public GameObject explosionPrefab;
 
-    [Tooltip("Animator trigger name for death.")]
-    public string deathTriggerName = "Die";
+    
+    [Tooltip("Offset for where the explosion spawns (use Y to move it up).")]
+    public Vector3 explosionOffset = new Vector3(0f, 1.2f, 0f);
 
-    [Tooltip("Rotate this many degrees around Z when dying (90 = tip over sideways).")]
-    public float deathRotateZDegrees = 90f;
-
-    [Tooltip("If true, uses Rigidbody gravity fall on death when a Rigidbody exists.")]
-    public bool usePhysicsFallOnDeath = true;
-
-    [Tooltip("If no Rigidbody (or physics fall disabled), we will lerp down to ground over this duration.")]
-    public float nonPhysicsFallDuration = 0.6f;
+[Tooltip("Disable colliders on death so the wreck doesn't block anything or keep taking hits.")]
+    public bool disableCollidersOnDeath = true;
 
     [Tooltip("Destroy the drone GameObject after death.")]
     public bool destroyOnDeath = true;
 
-    public float destroyDelay = 6f;
+    [Tooltip("Seconds to wait before destroying the drone after death (lets explosion VFX play).")]
+    public float destroyDelay = 2.5f;
 
-    [Header("Debug")]
+[Header("Debug")]
     public bool drawGizmos = true;
 
     // Internals
@@ -157,7 +153,6 @@ public class DroneEnemyController : MonoBehaviour
     private void Awake()
     {
         _rb = GetComponent<Rigidbody>();
-        if (animator == null) animator = GetComponentInChildren<Animator>();
         if (currentHealth <= 0) currentHealth = maxHealth;
     }
 
@@ -644,7 +639,7 @@ public class DroneEnemyController : MonoBehaviour
 
     #region Death
 
-    private void Die()
+        private void Die()
     {
         if (_isDead) return;
         _isDead = true;
@@ -653,61 +648,36 @@ public class DroneEnemyController : MonoBehaviour
         combatTarget = null;
         _velocity = Vector3.zero;
 
-        // Trigger die animation
-        if (animator != null && !string.IsNullOrEmpty(deathTriggerName))
-            animator.SetTrigger(deathTriggerName);
-
-        // Rotate 90 degrees on Z (tip over)
-        transform.rotation = transform.rotation * Quaternion.Euler(0f, 0f, deathRotateZDegrees);
-
-        // Stop/disable "alive" physics settings
-        if (_rb != null && usePhysicsFallOnDeath)
+        // Stop any remaining motion/physics.
+        if (_rb != null)
         {
-            // If you had it kinematic while alive, make it dynamic now.
-            _rb.isKinematic = false;
-            _rb.useGravity = true;
-
-            // Optional: a tiny nudge so it starts falling/settling
-            _rb.AddForce(Vector3.down * 1.5f, ForceMode.VelocityChange);
+            _rb.linearVelocity = Vector3.zero;
+            _rb.angularVelocity = Vector3.zero;
+            _rb.isKinematic = true;
         }
-        else
+
+        // Disable colliders so it can't be hit / block anything after "death".
+        if (disableCollidersOnDeath)
         {
-            // No rigidbody: do a simple ground drop
-            StartCoroutine(FallToGroundNonPhysics());
+            foreach (var col in GetComponentsInChildren<Collider>())
+                col.enabled = false;
+        }
+
+        // Spawn explosion VFX (optional).
+        if (explosionPrefab != null)
+        {
+            Instantiate(explosionPrefab, transform.position + explosionOffset, Quaternion.identity);
         }
 
         // Disable this script so it stops thinking.
         enabled = false;
 
         if (destroyOnDeath)
-            Destroy(gameObject, Mathf.Max(0.1f, destroyDelay));
+            Destroy(gameObject, Mathf.Max(0.05f, destroyDelay));
     }
 
-    private IEnumerator FallToGroundNonPhysics()
-    {
-        Vector3 start = transform.position;
-        Vector3 end = start;
 
-        // Raycast down to find ground; if not found, just drop a bit.
-        if (Physics.Raycast(start + Vector3.up * 1f, Vector3.down, out RaycastHit hit, 500f, ~0, QueryTriggerInteraction.Ignore))
-            end = hit.point;
-        else
-            end = start + Vector3.down * 3f;
-
-        float dur = Mathf.Max(0.05f, nonPhysicsFallDuration);
-        float t = 0f;
-
-        while (t < 1f)
-        {
-            t += Time.deltaTime / dur;
-            transform.position = Vector3.Lerp(start, end, Mathf.SmoothStep(0f, 1f, t));
-            yield return null;
-        }
-
-        transform.position = end;
-    }
-
-    #endregion
+#endregion
 
     #region Gizmos
 

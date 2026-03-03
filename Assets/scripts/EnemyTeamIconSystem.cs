@@ -251,7 +251,19 @@ public class EnemyTeamIconSystem : MonoBehaviour
         arrow.orbitCenter = orbitalRT != null ? orbitalRT : iconRootRT;
 
         // ALWAYS bind the arrow to a dedicated ArrowImage (so the STAR never rotates).
-        Transform arrowT = FindDeepChild(iconRoot, "ArrowImage");
+        Transform arrowT = null;
+
+        // Prefer the prefab\'s OrbitalAnchor/ArrowImage if it exists, even if another ArrowImage exists elsewhere.
+        if (orbitalRT != null)
+        {
+            var preferred = FindDeepChild(orbitalRT, "ArrowImage");
+            if (preferred != null)
+                arrowT = preferred;
+        }
+
+        // Fallback: any ArrowImage under iconRoot.
+        if (arrowT == null)
+            arrowT = FindDeepChild(iconRoot, "ArrowImage");
         if (arrowT == null) arrowT = FindDeepChild(iconRoot, "Arrow");
         if (arrowT == null) arrowT = FindDeepChild(iconRoot, "ArrowGraphic");
 
@@ -315,6 +327,23 @@ public class EnemyTeamIconSystem : MonoBehaviour
         if (!arrowT.gameObject.activeSelf) arrowT.gameObject.SetActive(true);
 
         // Force the binding (overwrite any incorrect inspector wiring).
+        
+        // If we still don't have a valid sprite, hide the Image so it doesn't show as a white square.
+        if (arrowImg != null && (arrowImg.sprite == null || IsBuiltinWhiteSprite(arrowImg.sprite)))
+        {
+            var refSprite2 = FindReferenceSprite("ArrowImage", iconRoot);
+            if (refSprite2 != null) arrowImg.sprite = refSprite2;
+
+            if (arrowImg.sprite == null || IsBuiltinWhiteSprite(arrowImg.sprite))
+            {
+                // Safest: disable the Image component entirely.
+                arrowImg.enabled = false;
+            }
+        }
+
+        // Remove any duplicate ArrowImage objects (common when multiple systems run or a runtime arrow was spawned).
+        CleanupDuplicateArrowImages(iconRoot, arrowT);
+
         arrow.arrowRect = arrowT as RectTransform ?? arrowT.GetComponent<RectTransform>();
         if (arrow.arrowRect != null)
             arrow.arrowGraphic = arrow.arrowRect.GetComponent<Graphic>();
@@ -403,8 +432,35 @@ public class EnemyTeamIconSystem : MonoBehaviour
             var found = FindDeepChild(c, name);
             if (found != null) return found;
         }
+
         return null;
     }
+    private static void CleanupDuplicateArrowImages(Transform iconRoot, Transform keep)
+    {
+        if (iconRoot == null) return;
+
+        // Prefer keeping the OrbitalAnchor/ArrowImage if it exists.
+        var orbital = FindDeepChild(iconRoot, "OrbitalAnchor");
+        if (orbital != null)
+        {
+            var preferred = FindDeepChild(orbital, "ArrowImage");
+            if (preferred != null) keep = preferred;
+        }
+
+        // Collect all ArrowImage transforms
+        var all = iconRoot.GetComponentsInChildren<Transform>(true);
+        for (int i = 0; i < all.Length; i++)
+        {
+            var t = all[i];
+            if (t == null) continue;
+            if (t.name != "ArrowImage") continue;
+            if (keep != null && t == keep) continue;
+
+            // Destroy duplicates
+            Object.Destroy(t.gameObject);
+        }
+    }
+
     private void ApplyArrowTuningRuntime(EnemyTeamDirectionArrowUI arrow)
     {
         if (arrow == null || arrow.arrowRect == null) return;

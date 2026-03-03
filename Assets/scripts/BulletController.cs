@@ -58,8 +58,28 @@ public class BulletController : MonoBehaviour
     [Tooltip("Impact effect used when hitting ENEMIES (eg: GreenBloodSpray). Leave empty to use Impact Effect (legacy).")]
     public GameObject impactEffectEnemy;
 
-    [Tooltip("Impact effect used when hitting DRONES (eg: MetalSparks or ElectricBurst).")]
+    [Tooltip("Impact effect used when hitting the WORLD (walls, floor, props). Leave empty to use Impact Effect.")]
+    public GameObject impactEffectWorld;
+
+    [Tooltip("If true, spawn an impact effect when hitting non-damageable world geometry.")]
+    public bool spawnWorldImpacts = true;
+
+    
+
+    [Header("Turret Impact Override (optional)")]
+    [Tooltip("If true, this bullet will use the turret impact effects below (when assigned). Set this from your turret when spawning bullets.")]
+    public bool firedByTurret = false;
+
+    [Tooltip("Turret-specific impact effect for targets (characters/robots). If empty, falls back to the normal impact selection.")]
+    public GameObject turretImpactEffectTarget;
+
+    [Tooltip("Turret-specific impact effect for the world (walls/floor/props). If empty, falls back to Impact Effect World / Impact Effect.")]
+    public GameObject turretImpactEffectWorld;
+[Tooltip("Impact effect used when hitting DRONES (eg: MetalSparks or ElectricBurst).")]
     public GameObject impactEffectDrone;
+
+    [Tooltip("Optional impact effect for Turrets (TurretHealthController). Useful for metal sparks when shooting turrets.")]
+    public GameObject impactEffectTurret;
 
     [Tooltip("Impact effect used when the PLAYER shoots an ALLY/PLAYER (eg: RedBloodSpray).")]
     public GameObject impactEffectAlly;
@@ -173,7 +193,19 @@ float _spawnTime;
         }
     }
 
-    private void FixedUpdate()
+    
+    /// <summary>
+    /// Call this right after Instantiate() when spawning bullets from a turret.
+    /// This lets turrets use their own impact VFX without changing the rest of your bullet setup.
+    /// </summary>
+    public void ConfigureTurretImpacts(GameObject turretTargetFx, GameObject turretWorldFx)
+    {
+        firedByTurret = true;
+        turretImpactEffectTarget = turretTargetFx;
+        turretImpactEffectWorld = turretWorldFx;
+    }
+
+private void FixedUpdate()
     {
         // Lifetime
         if (Time.time - _spawnTime >= lifeTime)
@@ -347,6 +379,8 @@ float _spawnTime;
         bool isNPC = npcHealth != null || HasTagInParents(hit, npcTag);
         bool isAnimal = animalHealth != null || HasTagInParents(hit, animalTag);
         bool isBoss = bossHealth != null || HasTagInParents(hit, bossTag);
+        var turretHealth = hit.GetComponentInParent<TurretHealthController>();
+        bool isTurret = turretHealth != null;
         bool isDrone = droneEnemy != null;
 
         // Let enemies know WHO hit them so they aggro the attacker (prevents them from snapping to the player when an ally shoots).
@@ -438,7 +472,7 @@ if (enemyHealth != null)
             }
         }
 
-        // FX (optional): spawn only when hitting a character
+        // FX: pick impact prefab
         // Special rule you asked for:
         // - Player bullet uses GreenBloodSpray for enemies
         // - BUT when the PLAYER shoots an ally/player, use RedBloodSpray instead
@@ -457,6 +491,10 @@ if (enemyHealth != null)
             fx = impactEffectBoss;
 
 
+        // Turret override (optional)
+        if (isTurret && impactEffectTurret != null)
+            fx = impactEffectTurret;
+
         // Drone override (optional)
         if (isDrone && impactEffectDrone != null)
             fx = impactEffectDrone;
@@ -465,7 +503,22 @@ if (enemyHealth != null)
         if (isAlly && impactEffectAlly != null && IsOwnerPlayer())
             fx = impactEffectAlly;
 
-        if (fx != null && (isEnemy || isAlly || isNPC || isAnimal || isBoss || isDrone))
+        bool hitCharacter = (isEnemy || isAlly || isNPC || isAnimal || isBoss || isDrone || isTurret);
+
+        // Turret override (optional): let turret bullets use their own impact VFX.
+        if (firedByTurret && hitCharacter && turretImpactEffectTarget != null)
+            fx = turretImpactEffectTarget;
+
+        // If it wasn't a character, allow a "world" impact (sparks/dust) if enabled.
+        if (!hitCharacter && spawnWorldImpacts)
+        {
+            if (firedByTurret && turretImpactEffectWorld != null)
+                fx = turretImpactEffectWorld;
+            else
+                fx = impactEffectWorld != null ? impactEffectWorld : impactEffect;
+        }
+
+        if (fx != null && (hitCharacter || spawnWorldImpacts))
         {
             Vector3 p = hit.ClosestPoint(point);
             SpawnImpact(fx, p, normal);
@@ -508,79 +561,54 @@ if (enemyHealth != null)
         if (hit == null) return false;
         if (string.IsNullOrEmpty(tag)) return false;
 
-        if (hit.CompareTag(tag)) return true;
-
         Transform t = hit.transform;
-        int safety = 0;
-        while (t != null && safety++ < 16)
+        while (t != null)
         {
-            if (t.CompareTag(tag)) return true;
+            // SAFE: CompareTag throws if the requested tag name is not defined in the Tag Manager.
+            // We compare the existing tag string instead, and do it case-insensitively so "Animal" and "animal" both work.
+            if (string.Equals(t.tag, tag, System.StringComparison.OrdinalIgnoreCase))
+                return true;
+
             t = t.parent;
         }
+
         return false;
     }
 
-    
-        private bool IsOwnerPlayer()
+    // ---------------------------
+    // Helpers added for compile-fix
+    // ---------------------------
+
+    private bool IsOwnerPlayer()
     {
         if (owner == null) return false;
-
-        // Tag-based check (recommended)
-        if (!string.IsNullOrEmpty(playerTag) && owner.CompareTag(playerTag))
-            return true;
-
-        // Component-based fallback
-        if (owner.GetComponentInParent<Player2Controller>() != null)
-            return true;
-
-        return false;
+        // Safe, case-insensitive tag compare
+        return string.Equals(owner.tag, playerTag, System.StringComparison.OrdinalIgnoreCase);
     }
 
-private void NotifyEnemyAggroFromHit(Collider hit)
+    private void NotifyEnemyAggroFromHit(Collider hit)
     {
-        if (hit == null) return;
+        if (hit == null || owner == null) return;
 
-        // Prefer Enemy2Controller if present (your current AI)
-        var enemy2 = hit.GetComponentInParent<Enemy2Controller>();
-        if (enemy2 != null)
-        {
-            // If owner is known, pass it so Enemy2 targets the real attacker (ally/player).
-            if (owner != null)
-                enemy2.GetShot(owner);
-            else
-                enemy2.GetShot();
-            return;
-        }
-
-        // Fallback: legacy enemy controller
-        var enemyLegacy = hit.GetComponentInParent<EnemyController>();
-        if (enemyLegacy != null)
-        {
-            enemyLegacy.GetShot();
-        }
-
-        // Drone enemy controller (flying drone) - aggro on attacker
-        var drone = hit.GetComponentInParent<DroneEnemyController>();
-        if (drone != null)
-        {
-            if (owner != null)
-                drone.GetShot(owner);
-            else
-                drone.GetShot(hit.transform);
-        }
+        // Best-effort: notify common enemy scripts to aggro onto the attacker.
+        hit.SendMessageUpwards("GetShot", owner, SendMessageOptions.DontRequireReceiver);
+        hit.SendMessageUpwards("SetCombatTarget", owner, SendMessageOptions.DontRequireReceiver);
+        hit.SendMessageUpwards("SetTarget", owner, SendMessageOptions.DontRequireReceiver);
     }
 
-private void SpawnImpact(GameObject fxPrefab, Vector3 point, Vector3 normal)
+    private void SpawnImpact(GameObject fxPrefab, Vector3 point, Vector3 normal)
     {
-        Vector3 n = normal.sqrMagnitude > 0.0001f ? normal.normalized : -transform.forward;
-        float offset = Mathf.Max(0.001f, impactSurfaceOffset);
-        Vector3 spawnPos = point + n * offset;
+        if (fxPrefab == null) return;
 
-        Vector3 forward = alignToCollisionNormal ? n : (-transform.forward);
-        if (forward.sqrMagnitude < 0.0001f) forward = n;
+        Vector3 spawnPos = point + (normal * impactSurfaceOffset);
 
-        Quaternion rot = Quaternion.LookRotation(forward);
-        Instantiate(fxPrefab, spawnPos, rot);
+        Quaternion rot = Quaternion.identity;
+        if (alignToCollisionNormal && normal.sqrMagnitude > 0.0001f)
+            rot = Quaternion.LookRotation(normal);
+
+        GameObject fx = Instantiate(fxPrefab, spawnPos, rot);
+        // Safety: auto-destroy common impact effects
+        Destroy(fx, 6f);
     }
 
 }
