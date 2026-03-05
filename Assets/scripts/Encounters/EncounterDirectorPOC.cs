@@ -88,6 +88,17 @@ public class EncounterDirectorPOC : MonoBehaviour
     [Tooltip("If true, uses sqrt growth (nice for larger teams). If false, linear growth.")]
     public bool enemyIconUseSqrt = true;
 
+
+    [Header("Enemy Team Icon Manual Size")]
+    [Tooltip("If enabled, ignores team-size scaling and uses fixedEnemyIconScale for the enemy team star/icon.")]
+    public bool useFixedEnemyIconScale = false;
+
+    [Tooltip("Fixed scale to use when useFixedEnemyIconScale is enabled.")]
+    public float fixedEnemyIconScale = 1f;
+
+    [Tooltip("Additional multiplier applied on top of the computed/fixed scale (enemy icons only).")]
+    public float enemyIconScaleMultiplier = 1f;
+
     [Header("Enemy Team Icon Debug")]
     public bool debugLogEnemyIconScale = false;
     public float debugEnemyIconScaleInterval = 1.0f;
@@ -100,6 +111,17 @@ public class EncounterDirectorPOC : MonoBehaviour
 
     // Track LIVE members per enemy team so icon follows their centroid
     private readonly Dictionary<string, List<Transform>> _enemyTeamMembers = new Dictionary<string, List<Transform>>();
+
+    // Per-team manual scale overrides for enemy team icons (keyed by team root name)
+    [Serializable]
+    private struct EnemyIconScaleOverride
+    {
+        public bool enabled;
+        public float scale;
+        public float multiplier;
+    }
+
+    private readonly Dictionary<string, EnemyIconScaleOverride> _enemyIconScaleOverrides = new Dictionary<string, EnemyIconScaleOverride>();
 
     private readonly Dictionary<string, float> _nextEnemyIconScaleLogTime = new Dictionary<string, float>();
 
@@ -328,6 +350,22 @@ public class EncounterDirectorPOC : MonoBehaviour
             {
                 teamRootName = $"{teamPrefix}{group.teamIndex}";
                 teamRoot = GetOrCreateTeamRoot(teamRootName, faction);
+
+                // Per-team manual enemy icon scale override (applies to this teamIndex only)
+                if (faction == Faction.Enemy && group.overrideEnemyTeamIconScale && !string.IsNullOrEmpty(teamRootName))
+                {
+                    var ov = new EnemyIconScaleOverride
+                    {
+                        enabled = true,
+                        scale = (group.manualEnemyTeamIconScale > 0f) ? group.manualEnemyTeamIconScale : 1f,
+                        multiplier = (group.manualEnemyTeamIconScaleMultiplier > 0f) ? group.manualEnemyTeamIconScaleMultiplier : 1f
+                    };
+                    _enemyIconScaleOverrides[teamRootName] = ov;
+                    // Also push to EnemyTeamIconSystem (if present) so per-team scaling works even when EncounterDirectorPOC is not spawning icons.
+                    if (EnemyTeamIconSystem.Instance != null)
+                        EnemyTeamIconSystem.Instance.SetTeamScaleOverride(teamRootName, ov.scale, ov.multiplier, true);
+                }
+
             }
 
             var prefabSequence = BuildPrefabSequenceForGroup(group);
@@ -872,18 +910,38 @@ private bool HasAnyMovementController(GameObject go)
                 local += iconScreenOffsetPixels;
                 data.iconRect.anchoredPosition = local;
             }
-            // Scale by live team size (applied here, once per frame).
-            if (scaleEnemyTeamIconsBySize)
+            // Scale by enemy team size (or per-team manual override). Applied here once per frame (enemy icons only).
+            int liveCount = GetEnemyTeamLiveMemberCount(data.teamRootName);
+            float s;
+
+            // Per-team manual scale override (set by an Enemy SpawnGroup with overrideEnemyTeamIconScale=true)
+            if (_enemyIconScaleOverrides.TryGetValue(data.teamRootName, out var ov) && ov.enabled)
             {
-                int liveCount = GetEnemyTeamLiveMemberCount(data.teamRootName);
-                float s = ComputeEnemyTeamIconScale(liveCount);
-                data.iconRect.localScale = new Vector3(s, s, 1f);
-                MaybeLogEnemyIconScale(data.teamRootName, liveCount, s, data.iconRect);
+                s = (ov.scale > 0f) ? ov.scale : 1f;
+                if (ov.multiplier > 0f) s *= ov.multiplier;
+            }
+            else
+            {
+                if (useFixedEnemyIconScale)
+                {
+                    s = fixedEnemyIconScale;
+                }
+                else if (scaleEnemyTeamIconsBySize)
+                {
+                    s = ComputeEnemyTeamIconScale(liveCount);
+                }
+                else
+                {
+                    s = 1f;
+                }
+
+                s *= enemyIconScaleMultiplier;
             }
 
-
-
-            // Keep above other UI elements that may be rebuilt/reordered.
+            data.iconRect.localScale = Vector3.one;
+            ApplyEnemyTeamStarImageScale(data.iconRect, s);
+            MaybeLogEnemyIconScale(data.teamRootName, liveCount, s, data.iconRect);
+// Keep above other UI elements that may be rebuilt/reordered.
             data.iconRect.SetAsLastSibling();
         }
     }
@@ -915,7 +973,45 @@ private bool HasAnyMovementController(GameObject go)
         return fallbackTeamRoot != null ? fallbackTeamRoot.position : transform.position;
     }
 
-    // ---------------- Data ----------------
+    
+
+    // --- Enemy Team Icon scaling helpers (StarImage-based) ---
+    // Some UI scripts keep the icon root scale at (1,1,1). To ensure the visual skull/star scales,
+    // we scale the child "StarImage" RectTransform directly.
+    private readonly Dictionary<int, RectTransform> _enemyIconStarCache = new Dictionary<int, RectTransform>();
+
+    private void ApplyEnemyTeamStarImageScale(RectTransform iconRoot, float s)
+    {
+        if (iconRoot == null) return;
+
+        int id = iconRoot.GetInstanceID();
+        if (!_enemyIconStarCache.TryGetValue(id, out var starRect) || starRect == null)
+        {
+            starRect = FindChildRectByName(iconRoot, "StarImage");
+            _enemyIconStarCache[id] = starRect;
+        }
+
+        if (starRect != null)
+        {
+            starRect.localScale = new Vector3(s, s, 1f);
+        }
+    }
+
+    private static RectTransform FindChildRectByName(RectTransform root, string childName)
+    {
+        if (root == null || string.IsNullOrEmpty(childName)) return null;
+
+        // Includes inactive
+        var rects = root.GetComponentsInChildren<RectTransform>(true);
+        for (int i = 0; i < rects.Length; i++)
+        {
+            if (rects[i] != null && rects[i].name == childName)
+                return rects[i];
+        }
+        return null;
+    }
+
+// ---------------- Data ----------------
 
     [Serializable]
     public struct SpawnGroup
@@ -965,6 +1061,16 @@ private bool HasAnyMovementController(GameObject go)
 
         [Tooltip("Optional. If this group is an Enemy team (teamIndex > 0), you can override the icon prefab used for that team.")]
         public RectTransform teamIconPrefabOverride;
+
+        [Tooltip("If enabled (Enemy only), this group will set a manual scale for that enemy team's star/icon (per teamIndex).")]
+        public bool overrideEnemyTeamIconScale;
+
+        [Tooltip("Manual enemy team icon scale to apply for this teamIndex when overrideEnemyTeamIconScale is enabled.")]
+        public float manualEnemyTeamIconScale;
+
+        [Tooltip("Optional additional multiplier applied with manualEnemyTeamIconScale (Enemy only).")]
+        public float manualEnemyTeamIconScaleMultiplier;
+
 
         [Header("Behavior")]
         public EncounterBehavior initialBehavior;

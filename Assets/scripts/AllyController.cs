@@ -86,6 +86,16 @@ public class AllyController : MonoBehaviour
     [Tooltip("Fallback vertical offset added to target.position when no AimPoint/Collider is found.")]
     public float aimHeightOffset = 1.2f;
 
+    [Header("Line Of Sight (Shooting)")]
+    [Tooltip("If true, the ally will only FIRE when it has a clear line of sight to the aim point (raycast using lineOfSightMask).")]
+    public bool requireLineOfSightToShoot = false;
+
+    [Tooltip("Small offset forward from the firePoint to avoid immediately raycasting into our own collider.")]
+    public float lineOfSightFirePointForwardOffset = 0.05f;
+
+    [Tooltip("Line of sight check uses this mask. Usually Everything except UI.")]
+    public LayerMask lineOfSightMask = ~0;
+
     [Header("Combat Range")]
     [Tooltip("Preferred distance to keep from the enemy while fighting.")]
     public float desiredAttackRange = 6f;
@@ -1714,6 +1724,37 @@ public class AllyController : MonoBehaviour
         // ✅ IMPORTANT: Don't shoot unless we're close enough.
         if (onlyShootWhenInDesiredAttackRange && !IsWithinShootRange(dist, useBand, minRange, maxRange, range, useDynamicRange))
             return;
+
+        // LOS gate: only shoot when we have a clear line of sight to the aim position.
+        if (requireLineOfSightToShoot)
+        {
+            // If no firePoint, approximate an eye position.
+            Vector3 losFrom = (firePoint != null) ? firePoint.position : (transform.position + Vector3.up * 1.5f);
+
+            if (firePoint != null)
+                losFrom += firePoint.forward * Mathf.Max(0f, lineOfSightFirePointForwardOffset);
+
+            Vector3 losTo = targetPoint;
+            Vector3 losDir = (losTo - losFrom);
+            float losDist = losDir.magnitude;
+
+            if (losDist > 0.05f)
+            {
+                losDir /= losDist;
+
+                // If we hit something before reaching the target, we only allow shooting if that hit belongs to the enemy.
+                if (Physics.Raycast(losFrom, losDir, out RaycastHit hit, losDist, lineOfSightMask, QueryTriggerInteraction.Ignore))
+                {
+                    if (hit.transform != enemy && !hit.transform.IsChildOf(enemy))
+                        return;
+                }
+                else
+                {
+                    // Raycast hit nothing (should be rare). Treat as no LOS.
+                    return;
+                }
+            }
+        }
 
         // Fire
         fireCount -= Time.deltaTime;

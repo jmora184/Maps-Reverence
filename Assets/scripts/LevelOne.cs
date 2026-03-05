@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using UnityEngine;
 using UnityEngine.AI;
+using UnityEngine.UI;
 
 /// <summary>
 /// LevelOne - Spawn teams that march to an objective, but still fight if they get aggro.
@@ -23,14 +24,115 @@ public class LevelOne : MonoBehaviour
     [Header("Team Plans")]
     public List<TeamSpawnPlan> teams = new List<TeamSpawnPlan>();
 
+    [Header("Ally Team Plans (LevelOne)")]
+    [Tooltip("Optional ally teams to spawn. Allies do not patrol or use move-target mode in LevelOne.")]
+    public List<AllySpawnPlan> allyTeams = new List<AllySpawnPlan>();
+
+    [Header("Ally Team Registration")]
+    [Tooltip("If enabled, spawned Ally teams are registered into TeamManager (same approach as EncounterDirectorPOC). This makes ally team star clicks + commands work like normal.")]
+    public bool registerAllyTeamsWithTeamManager = true;
+
+
     [Header("Test Hotkey")]
     public bool enableHotkey = true;
     public KeyCode spawnAllKey = KeyCode.T;
+
+    [Header("Enemy Team Icons (Command Mode)")]
+    [Tooltip("UI prefab for an enemy team icon (root RectTransform that contains StarImage + OrbitalAnchor/ArrowImage + optional TMP).")]
+    public RectTransform enemyTeamIconPrefab;
+
+    [Tooltip("Where spawned enemy team icons will live in the UI hierarchy (e.g., MiniUI/EnemyIconParent).")]
+    public RectTransform enemyTeamIconsParent;
+
+    [Tooltip("Camera used for projecting world -> screen for the team icons (usually your CommandCamera).")]
+    public Camera commandCamera;
+
+    [Tooltip("If enabled, icons will only be visible when the Command Camera component is enabled and active.")]
+    public bool onlyShowWhenCommandCameraEnabled = true;
+
+    [Tooltip("World offset applied to the team anchor position when projecting to the UI.")]
+    public Vector3 iconWorldOffset = new Vector3(0f, 2f, 0f);
+
+    [Tooltip("Screen-space pixel offset applied after projection.")]
+    public Vector2 iconScreenOffsetPixels = Vector2.zero;
+
+    [Tooltip("If set (>0), this sets the icon root sizeDelta (square). Leave 0 to keep prefab size.")]
+    public float iconRootSizePixels = 0f;
+
+    [Tooltip("Base localScale for the icon root (UI).")]
+    public float iconRootLocalScale = 1f;
+
+    [Header("Icon Arrow Scaling")]
+    [Tooltip("If true, ArrowImage sizeDelta scales with the team icon scale. If false, ArrowImage keeps its prefab size.")]
+    public bool scaleArrowWithTeam = false;
+
+    [Tooltip("If true, the arrow orbit radius scales with the team icon scale (using the prefab's orbitRadiusPixels as the base).")]
+    public bool scaleArrowOrbitRadiusWithTeam = true;
+
+    [Tooltip("Extra multiplier applied when scaling the arrow orbit radius.")]
+    public float arrowOrbitRadiusMultiplier = 1f;
+
+    [Header("Ally Team Icons (Optional)")]
+    [Tooltip("UI prefab for an ally team icon. If null, allies will spawn without team icons.")]
+    public RectTransform allyTeamIconPrefab;
+
+    [Tooltip("Where spawned ally team icons will live in the UI hierarchy (e.g., MiniUI/AllyIconParent).")]
+    public RectTransform allyTeamIconsParent;
+
+    [Tooltip("Camera used for projecting world -> screen for the ally team icons. If null, uses Command Camera.")]
+    public Camera allyIconCameraOverride;
+
+    [Tooltip("World offset applied to the ally team anchor position when projecting to the UI.")]
+    public Vector3 allyIconWorldOffset = new Vector3(0f, 2f, 0f);
+
+    [Tooltip("Screen-space pixel offset applied after projection (ally icons).")]
+    public Vector2 allyIconScreenOffsetPixels = Vector2.zero;
+
+    [Tooltip("If enabled, ally icons will only be visible when the Command Camera component is enabled and active.")]
+    public bool onlyShowAllyIconsWhenCommandCameraEnabled = true;
+
+    [Tooltip("Multiplier applied to the ally team icon root scale (TeamStarIcon_UI). 1 = prefab scale.")]
+    public float allyIconScaleMultiplier = 1f;
+
+
+
+
+
+    // Runtime icon instances by team root
+    private readonly Dictionary<Transform, TeamIconRuntimeData> _iconsByTeamRoot = new Dictionary<Transform, TeamIconRuntimeData>(32);
+
+    private readonly Dictionary<Transform, TeamIconRuntimeData> _allyIconsByTeamRoot = new Dictionary<Transform, TeamIconRuntimeData>(16);
+
+    // Track ally team members so the ally team star count is correct even if units are not parented under the team root.
+    private readonly Dictionary<Transform, List<Transform>> _allyMembersByTeamRoot = new Dictionary<Transform, List<Transform>>(16);
+
+    // Register spawned ALLY teams into TeamManager so your existing ally-team star/icon logic works.
+    // Keyed by AllySpawnPlan.teamIndex.
+    private readonly Dictionary<int, Transform> _allyTeamLeaders = new Dictionary<int, Transform>();
+    private readonly Dictionary<int, Team> _allyTeams = new Dictionary<int, Team>();
+
+    // Cached command state machine for icon click/targeting bridge binding.
+    private CommandStateMachine _commandStateMachine;
+
 
     private void Update()
     {
         if (enableHotkey && Input.GetKeyDown(spawnAllKey))
             SpawnAllTeams();
+
+        UpdateEnemyTeamIcons();
+        UpdateAllyTeamIcons();
+    }
+
+    private CommandStateMachine ResolveCommandStateMachine()
+    {
+        if (_commandStateMachine != null) return _commandStateMachine;
+#if UNITY_2023_1_OR_NEWER
+        _commandStateMachine = UnityEngine.Object.FindFirstObjectByType<CommandStateMachine>();
+#else
+        _commandStateMachine = UnityEngine.Object.FindObjectOfType<CommandStateMachine>();
+#endif
+        return _commandStateMachine;
     }
 
     [ContextMenu("Spawn All Teams Now")]
@@ -44,6 +146,12 @@ public class LevelOne : MonoBehaviour
 
         for (int i = 0; i < teams.Count; i++)
             SpawnTeam(i);
+
+        if (allyTeams != null && allyTeams.Count > 0)
+        {
+            for (int i = 0; i < allyTeams.Count; i++)
+                SpawnAllyTeam(i);
+        }
     }
 
     public void SpawnTeam(int teamIndex)
@@ -93,6 +201,11 @@ public class LevelOne : MonoBehaviour
         anchor.smooth = true;
         anchor.smoothSpeed = plan.anchorSmoothSpeed;
         anchor.driveTransformPosition = false;
+
+
+        ApplyEnemyIconScale(anchor, plan);
+
+        EnsureIconForTeam(teamRootGO.transform, anchor, plan);
 
         // UI arrow target
         if (plan.moveTargetMode != MoveTargetMode.None)
@@ -193,7 +306,55 @@ public class LevelOne : MonoBehaviour
     public void SpawnTeam3() => SpawnTeam(3);
     public void SpawnTeam4() => SpawnTeam(4);
 
-    private void SpawnLegacy(TeamSpawnPlan plan, Transform parent, List<GameObject> spawned)
+    
+    private void ApplyEnemyIconScale(EncounterTeamAnchor anchor, TeamSpawnPlan plan)
+    {
+        if (anchor == null || plan == null) return;
+
+        var t = anchor.GetType();
+
+        bool anySet = false;
+
+        anySet |= TrySetFieldOrProperty(t, anchor, "useFixedEnemyIconScale", plan.useFixedEnemyIconScale);
+        anySet |= TrySetFieldOrProperty(t, anchor, "fixedEnemyIconScale", plan.fixedEnemyIconScale);
+        anySet |= TrySetFieldOrProperty(t, anchor, "enemyIconScaleMultiplier", plan.enemyIconScaleMultiplier);
+
+        // Some versions of the icon anchor use more generic names.
+        anySet |= TrySetFieldOrProperty(t, anchor, "useFixedIconScale", plan.useFixedEnemyIconScale);
+        anySet |= TrySetFieldOrProperty(t, anchor, "fixedIconScale", plan.fixedEnemyIconScale);
+        anySet |= TrySetFieldOrProperty(t, anchor, "iconScaleMultiplier", plan.enemyIconScaleMultiplier);
+
+        if (plan.debugEnemyIconScale && !anySet)
+            Debug.LogWarning("[LevelOne] Could not apply enemy icon scale because EncounterTeamAnchor has no compatible scale fields/properties in this project version.", anchor);
+    }
+
+    private bool TrySetFieldOrProperty(Type t, object obj, string name, object value)
+    {
+        try
+        {
+            var f = t.GetField(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (f != null)
+            {
+                f.SetValue(obj, value);
+                return true;
+            }
+
+            var p = t.GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (p != null && p.CanWrite)
+            {
+                p.SetValue(obj, value, null);
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning($"[LevelOne] Failed setting {name} on {t.Name}: {ex.Message}", obj as UnityEngine.Object);
+        }
+
+        return false;
+    }
+
+private void SpawnLegacy(TeamSpawnPlan plan, Transform parent, List<GameObject> spawned)
     {
         int count = Mathf.Max(0, plan.enemyCount);
         for (int i = 0; i < count; i++)
@@ -319,6 +480,36 @@ public class LevelOne : MonoBehaviour
     public enum MoveTargetMode { None = 0, Player = 1, Transform = 2, FixedPosition = 3 }
 
     [Serializable]
+    public class AllySpawnPlan
+    {
+        [Header("Identity")]
+        [Tooltip("Team index used when registering with TeamManager (like EncounterDirectorPOC). Use 1,2,3...")]
+        public int teamIndex = 1;
+        public string teamNamePrefix = "AllyTeam_";
+        public string teamName = "";
+
+        [Header("Spawn")]
+        public Transform spawnPoint;
+        public GameObject allyPrefab;
+        [Min(0)] public int allyCount = 4;
+        [Tooltip("Random spawn radius around the spawnPoint.")]
+        public float spawnRadius = 3f;
+        public float yOffset = 0f;
+
+        [Header("NavMesh")]
+        public bool snapToNavMesh = true;
+        public float navMeshSampleDistance = 6f;
+
+        [Header("Parenting")]
+        public bool parentUnderTeamRoot = true;
+
+        [Header("Anchor Smoothing (UI)")]
+        public float anchorSmoothSpeed = 10f;
+
+        [HideInInspector] public int spawnSequence = 0;
+    }
+
+[Serializable]
     public class TeamSpawnPlan
     {
         [Header("Team Identity")]
@@ -336,6 +527,19 @@ public class LevelOne : MonoBehaviour
 
         [Header("Anchor Smoothing (UI Icon)")]
         public float anchorSmoothSpeed = 10f;
+
+
+        [Header("Enemy Team Icon Size (Enemy Only)")]
+        [Tooltip("If true, forces the enemy team icon/star to a fixed scale (does not affect ally icons).")]
+        public bool useFixedEnemyIconScale = false;
+
+        [Tooltip("Fixed scale to use when useFixedEnemyIconScale is true.")]
+        public float fixedEnemyIconScale = 1f;
+
+        [Tooltip("Multiplies the enemy icon scale (works with fixed or size-based scaling).")]
+        public float enemyIconScaleMultiplier = 1f;
+
+        public bool debugEnemyIconScale = false;
 
         [Header("Objective Target")]
         public MoveTargetMode moveTargetMode = MoveTargetMode.Transform;
@@ -378,6 +582,692 @@ public class LevelOne : MonoBehaviour
         [Min(0)] public int count = 1;
         public float yOffset = 0f;
     }
+    [Serializable]
+    private class TeamIconRuntimeData
+    {
+        public Transform teamRoot;
+        public EncounterTeamAnchor anchor;
+        public RectTransform iconRoot;
+        public string teamRootName;
+
+        // Cached UI sub-refs (optional)
+        public RectTransform starRect;
+        public RectTransform arrowRect;
+        public MonoBehaviour arrowUi;
+
+        // Cached sizing
+        public Vector2 baseStarSize;
+        public Vector2 baseArrowSize;
+        public bool baseSizesCaptured;
+
+        // Cached arrow orbit radius (EnemyTeamDirectionArrowUI.orbitRadiusPixels)
+        public float baseOrbitRadiusPixels;
+        public bool baseOrbitRadiusCaptured;
+   
+        // Member tracking (optional)
+        public List<Transform> members;
+
+        // Cached count label refs (Legacy Text or TMP)
+        public UnityEngine.UI.Text legacyCountText;
+        public Component tmpCountText;
+    }
+
+    private void EnsureIconForTeam(Transform teamRoot, EncounterTeamAnchor anchor, TeamSpawnPlan plan)
+    {
+        if (!teamRoot) return;
+
+        // If user hasn't wired UI refs, just skip silently (LevelOne can still run without icons).
+        if (!enemyTeamIconPrefab || !enemyTeamIconsParent || !commandCamera)
+            return;
+
+        if (_iconsByTeamRoot.TryGetValue(teamRoot, out var data) && data != null && data.iconRoot)
+            return;
+
+        var icon = Instantiate(enemyTeamIconPrefab, enemyTeamIconsParent);
+        icon.name = $"EnemyTeamIcon_{teamRoot.name}";
+        icon.localScale = new Vector3(iconRootLocalScale, iconRootLocalScale, 1f);
+
+        if (iconRootSizePixels > 0f)
+            icon.sizeDelta = new Vector2(iconRootSizePixels, iconRootSizePixels);
+
+        data = new TeamIconRuntimeData
+        {
+            teamRoot = teamRoot,
+            anchor = anchor,
+            iconRoot = icon,
+            teamRootName = teamRoot.name
+        };
+
+        // Try to find expected children
+        data.starRect = icon.transform.Find("StarImage")?.GetComponent<RectTransform>()
+                        ?? icon.transform.Find("OrbitalAnchor/StarImage")?.GetComponent<RectTransform>();
+
+        data.arrowRect = icon.transform.Find("OrbitalAnchor/ArrowImage")?.GetComponent<RectTransform>();
+
+        // Cache base sizes so scaling is stable
+        if (data.starRect)
+        {
+            data.baseStarSize = data.starRect.sizeDelta;
+            data.baseSizesCaptured = true;
+        }
+        if (data.arrowRect)
+        {
+            data.baseArrowSize = data.arrowRect.sizeDelta;
+            data.baseSizesCaptured = true;
+        }
+
+        // Bind arrow UI script if present
+        var arrowUi = icon.GetComponentInChildren<MonoBehaviour>(includeInactive: true);
+        // Better: specifically look by type name to avoid grabbing random MonoBehaviours
+        foreach (var mb in icon.GetComponentsInChildren<MonoBehaviour>(true))
+        {
+            if (mb == null) continue;
+            if (mb.GetType().Name == "EnemyTeamDirectionArrowUI")
+            {
+                arrowUi = mb;
+                break;
+            }
+        }
+        data.arrowUi = arrowUi;
+
+        if (data.arrowUi != null)
+            BindArrowUi(data.arrowUi, anchor);
+
+        // Bind the click/targeting bridge (so clicking the enemy team star behaves like EncounterPOC).
+        BindEnemyIconTargetingBridge(icon, anchor, teamRoot);
+
+        // Cache base orbit radius so scaling stays consistent
+        if (data.arrowUi != null)
+            TryCaptureArrowOrbitRadius(data);
+
+        // Apply initial scale based on plan
+        ApplyPlanScaleToIcon(data, plan);
+
+        _iconsByTeamRoot[teamRoot] = data;
+    }
+
+    private void UpdateEnemyTeamIcons()
+    {
+        if (_iconsByTeamRoot.Count == 0) return;
+        if (!enemyTeamIconsParent || !commandCamera) return;
+
+        bool show = true;
+        if (onlyShowWhenCommandCameraEnabled)
+            show = commandCamera != null && commandCamera.enabled && commandCamera.gameObject.activeInHierarchy;
+
+        // We need the parent canvas for proper conversion
+        Canvas canvas = enemyTeamIconsParent.GetComponentInParent<Canvas>();
+        Camera uiCam = null;
+        if (canvas != null)
+        {
+            // For Screen Space - Camera / World Space
+            if (canvas.renderMode != RenderMode.ScreenSpaceOverlay)
+                uiCam = canvas.worldCamera != null ? canvas.worldCamera : commandCamera;
+        }
+
+        // Cleanup dead keys
+        var dead = ListPool<Transform>.Get();
+        foreach (var kvp in _iconsByTeamRoot)
+        {
+            if (kvp.Key == null || kvp.Value == null || kvp.Value.iconRoot == null)
+                dead.Add(kvp.Key);
+        }
+        for (int i = 0; i < dead.Count; i++)
+            _iconsByTeamRoot.Remove(dead[i]);
+        ListPool<Transform>.Release(dead);
+
+        foreach (var kvp in _iconsByTeamRoot)
+        {
+            var data = kvp.Value;
+            if (data == null || !data.iconRoot) continue;
+
+            data.iconRoot.gameObject.SetActive(show);
+            if (!show) continue;
+
+            Vector3 worldPos = data.teamRoot.position + iconWorldOffset;
+            Vector3 screen = commandCamera.WorldToScreenPoint(worldPos);
+
+            // Behind camera
+            if (screen.z < 0.01f)
+            {
+                data.iconRoot.gameObject.SetActive(false);
+                continue;
+            }
+
+            screen.x += iconScreenOffsetPixels.x;
+            screen.y += iconScreenOffsetPixels.y;
+
+            if (RectTransformUtility.ScreenPointToLocalPointInRectangle(enemyTeamIconsParent, screen, uiCam, out var local))
+                data.iconRoot.anchoredPosition = local;
+
+            // Update enemy team member count label (best effort: uses childCount because enemies are typically parented under the team root).
+            SetIconCount(data, GetLiveEnemyCount(data.teamRoot));
+
+            // Keep arrow UI bound (some scripts clear refs on enable/disable)
+            if (data.arrowUi != null && data.anchor != null)
+                BindArrowUi(data.arrowUi, data.anchor);
+        }
+    }
+
+    // =========================
+    // Ally Teams (LevelOne)
+    // =========================
+
+    public void SpawnAllyTeam(int allyTeamIndex)
+    {
+        if (allyTeams == null || allyTeamIndex < 0 || allyTeamIndex >= allyTeams.Count)
+        {
+            Debug.LogError($"[LevelOne] Invalid ally team index {allyTeamIndex}.", this);
+            return;
+        }
+
+        AllySpawnPlan plan = allyTeams[allyTeamIndex];
+        if (plan == null)
+        {
+            Debug.LogError($"[LevelOne] Ally plan at index {allyTeamIndex} is null.", this);
+            return;
+        }
+
+        if (plan.spawnPoint == null)
+        {
+            Debug.LogError($"[LevelOne] Ally plan {allyTeamIndex} spawnPoint is not assigned.", this);
+            return;
+        }
+
+        if (plan.allyPrefab == null)
+        {
+            Debug.LogError($"[LevelOne] Ally plan {allyTeamIndex} allyPrefab is not assigned.", this);
+            return;
+        }
+
+        plan.spawnSequence++;
+
+        string safePrefix = string.IsNullOrWhiteSpace(plan.teamNamePrefix) ? "AllyTeam_" : plan.teamNamePrefix;
+        string baseName = string.IsNullOrWhiteSpace(plan.teamName)
+            ? $"{safePrefix}{allyTeamIndex + 1}_{plan.spawnSequence}"
+            : $"{plan.teamName}_{plan.spawnSequence}";
+
+        string teamRootName = $"{baseName}_{Guid.NewGuid().ToString("N").Substring(0, 6)}";
+
+        var teamRootGO = new GameObject(teamRootName);
+        teamRootGO.transform.position = plan.spawnPoint.position;
+
+        // UI centroid anchor
+        var anchor = teamRootGO.AddComponent<EncounterTeamAnchor>();
+        anchor.faction = EncounterDirectorPOC.Faction.Ally;
+        anchor.updateContinuously = true;
+        anchor.smooth = true;
+        anchor.smoothSpeed = plan.anchorSmoothSpeed;
+        anchor.driveTransformPosition = false;
+
+        EnsureAllyIconForTeam(teamRootGO.transform, anchor);
+
+        SpawnAllies(plan, teamRootGO.transform);
+    }
+
+    private void SpawnAllies(AllySpawnPlan plan, Transform teamRoot)
+    {
+        int count = Mathf.Max(0, plan.allyCount);
+        if (count <= 0) return;
+
+        Vector3 center = plan.spawnPoint.position;
+        float radius = Mathf.Max(0f, plan.spawnRadius);
+        float sampleDist = Mathf.Max(0.5f, plan.navMeshSampleDistance);
+
+        for (int i = 0; i < count; i++)
+        {
+            Vector2 circle = UnityEngine.Random.insideUnitCircle * radius;
+            Vector3 pos = center + new Vector3(circle.x, 0f, circle.y);
+            pos.y += plan.yOffset;
+
+            if (plan.snapToNavMesh)
+            {
+                if (NavMesh.SamplePosition(pos, out var hit, sampleDist, NavMesh.AllAreas))
+                    pos = hit.position + Vector3.up * plan.yOffset;
+            }
+
+            var go = Instantiate(plan.allyPrefab, pos, Quaternion.identity);
+            if (plan.parentUnderTeamRoot && teamRoot != null)
+                go.transform.SetParent(teamRoot, true);
+
+            // Track members so the ally team icon count is correct.
+            RegisterAllyMember(teamRoot, go.transform);
+
+            // Register spawned ALLY members into TeamManager so your existing ally team star/icon + command UI works.
+            if (registerAllyTeamsWithTeamManager)
+                RegisterSpawnedAllyTeamMember(plan.teamIndex, go.transform);
+        }
+    }
+
+    private void EnsureAllyIconForTeam(Transform teamRoot, EncounterTeamAnchor anchor)
+    {
+        if (!teamRoot) return;
+
+        // If we're registering allies with TeamManager, let the existing TeamManager UI/icon system handle ally team stars.
+        // This keeps clicks/commands behaving exactly like your EncounterDirectorPOC setup.
+        if (registerAllyTeamsWithTeamManager && TeamManager.Instance != null)
+            return;
+
+        // If user hasn't wired ally UI refs, just skip silently.
+        if (!allyTeamIconPrefab || !allyTeamIconsParent)
+            return;
+
+        Camera cam = allyIconCameraOverride != null ? allyIconCameraOverride : commandCamera;
+        if (!cam) return;
+
+        if (_allyIconsByTeamRoot.TryGetValue(teamRoot, out var data) && data != null && data.iconRoot)
+            return;
+
+        var icon = Instantiate(allyTeamIconPrefab, allyTeamIconsParent);
+        icon.name = $"AllyTeamIcon_{teamRoot.name}";
+        icon.localScale = new Vector3(iconRootLocalScale * allyIconScaleMultiplier, iconRootLocalScale * allyIconScaleMultiplier, 1f);
+
+        if (iconRootSizePixels > 0f)
+            icon.sizeDelta = new Vector2(iconRootSizePixels, iconRootSizePixels);
+
+        data = new TeamIconRuntimeData
+        {
+            teamRoot = teamRoot,
+            anchor = anchor,
+            iconRoot = icon,
+            teamRootName = teamRoot.name
+        };
+
+        _allyIconsByTeamRoot[teamRoot] = data;
+
+        // Initialize member list + update label immediately (count may update again each frame).
+        data.members = new List<Transform>(32);
+        SetIconCount(data, GetLiveAllyCount(teamRoot));
+    }
+
+    private void UpdateAllyTeamIcons()
+    {
+        if (_allyIconsByTeamRoot.Count == 0) return;
+        if (!allyTeamIconsParent) return;
+
+        Camera cam = allyIconCameraOverride != null ? allyIconCameraOverride : commandCamera;
+        if (!cam) return;
+
+        bool show = true;
+        if (onlyShowAllyIconsWhenCommandCameraEnabled)
+            show = cam.enabled && cam.gameObject.activeInHierarchy;
+
+        Canvas canvas = allyTeamIconsParent.GetComponentInParent<Canvas>();
+        Camera uiCam = null;
+        if (canvas != null && canvas.renderMode != RenderMode.ScreenSpaceOverlay)
+            uiCam = canvas.worldCamera != null ? canvas.worldCamera : cam;
+
+        // Cleanup dead keys
+        var dead = ListPool<Transform>.Get();
+        foreach (var kvp in _allyIconsByTeamRoot)
+        {
+            if (kvp.Key == null || kvp.Value == null || kvp.Value.iconRoot == null)
+                dead.Add(kvp.Key);
+        }
+        for (int i = 0; i < dead.Count; i++)
+            _allyIconsByTeamRoot.Remove(dead[i]);
+        ListPool<Transform>.Release(dead);
+
+        foreach (var kvp in _allyIconsByTeamRoot)
+        {
+            var data = kvp.Value;
+            if (data == null || !data.iconRoot) continue;
+
+            data.iconRoot.gameObject.SetActive(show);
+            if (!show) continue;
+
+            Vector3 worldPos = data.teamRoot.position + allyIconWorldOffset;
+            Vector3 screen = cam.WorldToScreenPoint(worldPos);
+
+            if (screen.z < 0.01f)
+            {
+                data.iconRoot.gameObject.SetActive(false);
+                continue;
+            }
+
+            screen.x += allyIconScreenOffsetPixels.x;
+            screen.y += allyIconScreenOffsetPixels.y;
+
+            if (RectTransformUtility.ScreenPointToLocalPointInRectangle(allyTeamIconsParent, screen, uiCam, out var local))
+                data.iconRoot.anchoredPosition = local;
+
+            // Update ally team member count label
+            SetIconCount(data, GetLiveAllyCount(data.teamRoot));
+        }
+    }
+
+
+
+
+    // --- Ally icon count helpers ---
+    private void RegisterAllyMember(Transform teamRoot, Transform member)
+    {
+        if (!teamRoot || !member) return;
+        if (!_allyMembersByTeamRoot.TryGetValue(teamRoot, out var list) || list == null)
+        {
+            list = new List<Transform>(32);
+            _allyMembersByTeamRoot[teamRoot] = list;
+        }
+        list.Add(member);
+    }
+
+    // Mirror EncounterDirectorPOC behavior: register spawned ally teams into TeamManager.
+    // First spawned member becomes leader; when we have at least two, we create a Team.
+    private void RegisterSpawnedAllyTeamMember(int teamIndex, Transform member)
+    {
+        if (teamIndex <= 0) return;
+        if (member == null) return;
+        if (TeamManager.Instance == null) return;
+
+        // First spawned member becomes the leader.
+        if (!_allyTeamLeaders.TryGetValue(teamIndex, out var leader) || leader == null)
+        {
+            _allyTeamLeaders[teamIndex] = member;
+            return;
+        }
+
+        // Create the Team the moment we have at least two members.
+        if (!_allyTeams.TryGetValue(teamIndex, out var team) || team == null)
+        {
+            team = TeamManager.Instance.CreateTeam(leader, member);
+            if (team != null)
+            {
+                // Leader-based anchor like POC.
+                team.Anchor = leader;
+                _allyTeams[teamIndex] = team;
+            }
+            return;
+        }
+
+        // Add additional members WITHOUT triggering TeamManager's auto-formation.
+        team.Add(member);
+        team.Anchor = leader;
+    }
+
+    private int GetLiveAllyCount(Transform teamRoot)
+    {
+        if (!teamRoot) return 0;
+        if (!_allyMembersByTeamRoot.TryGetValue(teamRoot, out var list) || list == null)
+        {
+            // Fallback: if they ARE parented, childCount is a decent proxy.
+            return teamRoot.childCount;
+        }
+
+        int live = 0;
+        for (int i = list.Count - 1; i >= 0; i--)
+        {
+            var t = list[i];
+            if (t == null)
+            {
+                list.RemoveAt(i);
+                continue;
+            }
+            if (t.gameObject.activeInHierarchy) live++;
+        }
+        return live;
+    }
+
+    private int GetLiveEnemyCount(Transform teamRoot)
+    {
+        if (!teamRoot) return 0;
+        // In LevelOne, enemies are typically parented under the enemy team root. Use childCount as a simple proxy.
+        // If you later stop parenting enemies under the root, we can switch this to a tracked list like allies.
+        int live = 0;
+        for (int i = 0; i < teamRoot.childCount; i++)
+        {
+            var c = teamRoot.GetChild(i);
+            if (c != null && c.gameObject.activeInHierarchy) live++;
+        }
+        return live;
+    }
+
+    private void CacheCountLabelRefs(TeamIconRuntimeData data)
+    {
+        if (data == null || data.iconRoot == null) return;
+
+        // Legacy UI.Text
+        if (data.legacyCountText == null)
+            data.legacyCountText = data.iconRoot.GetComponentInChildren<UnityEngine.UI.Text>(true);
+
+        // TMP_Text via reflection (avoid hard dependency)
+        if (data.tmpCountText == null)
+        {
+            var tmpType = Type.GetType("TMPro.TMP_Text, Unity.TextMeshPro");
+            if (tmpType != null)
+            {
+                var c = data.iconRoot.GetComponentInChildren(tmpType, true);
+                if (c != null) data.tmpCountText = c;
+            }
+        }
+    }
+
+    private void SetIconCount(TeamIconRuntimeData data, int count)
+    {
+        if (data == null) return;
+
+        CacheCountLabelRefs(data);
+
+        if (data.legacyCountText != null)
+            data.legacyCountText.text = count.ToString();
+
+        if (data.tmpCountText != null)
+        {
+            try
+            {
+                var p = data.tmpCountText.GetType().GetProperty("text");
+                if (p != null && p.CanWrite) p.SetValue(data.tmpCountText, count.ToString(), null);
+            }
+            catch { /* ignore */ }
+        }
+    }
+
+    private void BindArrowUi(MonoBehaviour arrowUi, EncounterTeamAnchor anchor)
+    {
+        if (arrowUi == null) return;
+
+        var t = arrowUi.GetType();
+
+        // Common field/property names seen in your project variants
+        TrySetFieldOrProperty(t, arrowUi, "worldCamera", commandCamera);
+        TrySetFieldOrProperty(t, arrowUi, "WorldCamera", commandCamera);
+
+        TrySetFieldOrProperty(t, arrowUi, "teamAnchor", anchor);
+        TrySetFieldOrProperty(t, arrowUi, "TeamAnchor", anchor);
+
+        // Some builds use a move target provider component; LevelOne uses EncounterTeamAnchor.SetMoveTarget
+        // so leaving MoveTargetProvider null is OK (velocity fallback / direction may still work).
+    }
+
+    private void BindEnemyIconTargetingBridge(RectTransform iconRoot, EncounterTeamAnchor anchor, Transform teamRoot)
+    {
+        if (iconRoot == null) return;
+
+        MonoBehaviour bridge = null;
+        foreach (var mb in iconRoot.GetComponentsInChildren<MonoBehaviour>(true))
+        {
+            if (mb == null) continue;
+            if (mb.GetType().Name == "EnemyTeamIconTargetingBridge")
+            {
+                bridge = mb;
+                break;
+            }
+        }
+
+        if (bridge == null) return;
+
+        var sm = ResolveCommandStateMachine();
+        var t = bridge.GetType();
+
+        // Common reference names across your iterations
+        TrySetFieldOrProperty(t, bridge, "commandStateMachine", sm);
+        TrySetFieldOrProperty(t, bridge, "CommandStateMachine", sm);
+        TrySetFieldOrProperty(t, bridge, "stateMachine", sm);
+
+        // Some builds of the bridge expose only a Transform field named EnemyTeamAnchor
+        // (shown in your inspector as "Enemy Team Anchor"). Support those names too.
+        TrySetFieldOrProperty(t, bridge, "enemyTeamAnchor", anchor != null ? anchor.transform : null);
+        TrySetFieldOrProperty(t, bridge, "EnemyTeamAnchor", anchor != null ? anchor.transform : null);
+
+        TrySetFieldOrProperty(t, bridge, "teamAnchor", anchor);
+        TrySetFieldOrProperty(t, bridge, "TeamAnchor", anchor);
+        TrySetFieldOrProperty(t, bridge, "anchor", anchor);
+        TrySetFieldOrProperty(t, bridge, "Anchor", anchor);
+
+        TrySetFieldOrProperty(t, bridge, "teamRoot", teamRoot);
+        TrySetFieldOrProperty(t, bridge, "TeamRoot", teamRoot);
+        TrySetFieldOrProperty(t, bridge, "teamTransform", teamRoot);
+        TrySetFieldOrProperty(t, bridge, "TeamTransform", teamRoot);
+
+        // If the bridge needs a faction flag
+        TrySetFieldOrProperty(t, bridge, "faction", EncounterDirectorPOC.Faction.Enemy);
+        TrySetFieldOrProperty(t, bridge, "Faction", EncounterDirectorPOC.Faction.Enemy);
+    }
+
+    private void ApplyPlanScaleToIcon(TeamIconRuntimeData data, TeamSpawnPlan plan)
+    {
+        if (data == null || data.iconRoot == null || plan == null) return;
+
+        float s = 1f;
+        if (plan.useFixedEnemyIconScale)
+            s = Mathf.Max(0.01f, plan.fixedEnemyIconScale);
+
+        s *= Mathf.Max(0.01f, plan.enemyIconScaleMultiplier);
+
+        // Keep arrow orbit distance consistent
+        TryApplyArrowOrbitRadius(data, s);
+
+        // Prefer driving StarImage/ArrowImage via sizeDelta so it matches your UI expectations
+        if (data.starRect)
+        {
+            if (!data.baseSizesCaptured || data.baseStarSize.sqrMagnitude < 0.001f)
+                data.baseStarSize = data.starRect.sizeDelta;
+
+            if (data.baseStarSize.sqrMagnitude > 0.001f)
+                data.starRect.sizeDelta = data.baseStarSize * s;
+            else
+                data.starRect.localScale = new Vector3(s, s, 1f);
+        }
+        else
+        {
+            // Fallback: scale the icon root
+            data.iconRoot.localScale = new Vector3(iconRootLocalScale * s, iconRootLocalScale * s, 1f);
+        }
+
+        if (data.arrowRect)
+        {
+            if (!data.baseSizesCaptured || data.baseArrowSize.sqrMagnitude < 0.001f)
+                data.baseArrowSize = data.arrowRect.sizeDelta;
+
+            if (scaleArrowWithTeam)
+            {
+                if (data.baseArrowSize.sqrMagnitude > 0.001f)
+                    data.arrowRect.sizeDelta = data.baseArrowSize * s;
+            }
+        }
+    }
+
+
+    private void TryCaptureArrowOrbitRadius(TeamIconRuntimeData data)
+    {
+        if (data == null || data.arrowUi == null) return;
+        if (data.baseOrbitRadiusCaptured) return;
+
+        try
+        {
+            var t = data.arrowUi.GetType();
+
+            // Most common: field named orbitRadiusPixels
+            var f = t.GetField("orbitRadiusPixels", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (f != null && f.FieldType == typeof(float))
+            {
+                data.baseOrbitRadiusPixels = (float)f.GetValue(data.arrowUi);
+                data.baseOrbitRadiusCaptured = true;
+                return;
+            }
+
+            // Fallback: property OrbitRadiusPixels / orbitRadiusPixels
+            var p = t.GetProperty("orbitRadiusPixels", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                    ?? t.GetProperty("OrbitRadiusPixels", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+            if (p != null && p.PropertyType == typeof(float) && p.CanRead)
+            {
+                data.baseOrbitRadiusPixels = (float)p.GetValue(data.arrowUi, null);
+                data.baseOrbitRadiusCaptured = true;
+                return;
+            }
+        }
+        catch
+        {
+            // ignore
+        }
+    }
+
+    private void TryApplyArrowOrbitRadius(TeamIconRuntimeData data, float scale)
+    {
+        if (!scaleArrowOrbitRadiusWithTeam) return;
+        if (data == null || data.arrowUi == null) return;
+
+        if (!data.baseOrbitRadiusCaptured)
+            TryCaptureArrowOrbitRadius(data);
+
+        if (!data.baseOrbitRadiusCaptured) return;
+
+        float s = Mathf.Max(0.01f, scale);
+        float m = Mathf.Max(0.01f, arrowOrbitRadiusMultiplier);
+        float r = data.baseOrbitRadiusPixels * s * m;
+
+        try
+        {
+            var t = data.arrowUi.GetType();
+
+            var f = t.GetField("orbitRadiusPixels", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (f != null && f.FieldType == typeof(float))
+            {
+                f.SetValue(data.arrowUi, r);
+                return;
+            }
+
+            var p = t.GetProperty("orbitRadiusPixels", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                    ?? t.GetProperty("OrbitRadiusPixels", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+            if (p != null && p.PropertyType == typeof(float) && p.CanWrite)
+            {
+                p.SetValue(data.arrowUi, r, null);
+                return;
+            }
+        }
+        catch
+        {
+            // ignore
+        }
+    }
+
+
+    /// <summary>
+    /// Tiny list pool to avoid GC when cleaning up icon dictionary.
+    /// </summary>
+    private static class ListPool<T>
+    {
+        private static readonly Stack<List<T>> _pool = new Stack<List<T>>(8);
+        public static List<T> Get()
+        {
+            if (_pool.Count > 0)
+            {
+                var l = _pool.Pop();
+                l.Clear();
+                return l;
+            }
+            return new List<T>(8);
+        }
+
+        public static void Release(List<T> list)
+        {
+            if (list == null) return;
+            list.Clear();
+            if (_pool.Count < 32) _pool.Push(list);
+        }
+    }
+
 }
 
 /// <summary>

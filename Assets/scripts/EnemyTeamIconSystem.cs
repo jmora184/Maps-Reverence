@@ -1,474 +1,237 @@
+using System;
 using System.Collections.Generic;
 using UnityEngine;
-
 using UnityEngine.UI;
 
 /// <summary>
-/// Read-only UI system that displays one icon per Enemy Team root (EncounterTeamAnchor).
+/// Enemy team icon spawner/controller for Command Mode UI.
 ///
-/// Fixes:
-/// - Allows dragging ANY prefab (GameObject) instead of requiring EnemyTeamIconUI on the root.
-/// - Properly wires EnemyTeamDirectionArrowUI to a deep child "ArrowImage"/"Arrow" (so the STAR doesn't rotate).
-/// - Optional scale / pixel size to avoid "tiny icon" spawns.
+/// This version adds per-team manual scale overrides (by team root name),
+/// and FIXES the compile error you hit by including RebuildTeamOverrideMap().
+///
+/// Notes:
+/// - Your icons are UI (RectTransform/Image). Many setups keep parent scale at (1,1,1),
+///   so we apply the manual scale to the StarImage child by sizeDelta each LateUpdate.
+/// - EncounterDirectorPOC can push overrides per team via SetTeamIconScaleOverride().
 /// </summary>
-[DefaultExecutionOrder(2000)]
+[DisallowMultipleComponent]
 public class EnemyTeamIconSystem : MonoBehaviour
 {
-    [Header("Arrow Tuning")]
-    [Tooltip("Extra non-uniform scale applied to ArrowImage only (X and Y). (1,1) = unchanged.")]
-    public Vector2 arrowScaleXY = Vector2.one;
+    [Serializable]
+    public class TeamScaleOverride
+    {
+        [Tooltip("Team root name in the scene hierarchy, e.g. EnemyTeam_2")]
+        public string teamRootName;
 
-    [Tooltip("Extra pixel offset applied to ArrowImage only (anchoredPosition). (0,0) = unchanged.")]
-    public Vector2 arrowOffsetXY = Vector2.zero;
-
+        [Tooltip("Manual scale for this team icon (1 = default size)")]
+        public float scale = 1f;
+    }
 
     public static EnemyTeamIconSystem Instance { get; private set; }
 
     [Header("Prefab + Parent")]
-    [Tooltip("UI prefab for the enemy team icon (star). Can be ANY GameObject prefab.")]
-    public GameObject iconPrefab;
+    [Tooltip("Icon prefab (RectTransform) to instantiate per team.")]
+    public RectTransform iconPrefab;
 
-    [Tooltip("Parent under the Canvas where icons will be instantiated.")]
+    [Tooltip("UI parent for instantiated icons (RectTransform under your Command Mode canvas).")]
     public RectTransform iconParent;
 
-    [Header("Icon Size (optional)")]
-    [Tooltip("Force local scale for spawned icons. Use this if icons appear tiny/huge.")]
-    [Min(0.01f)]
-    public float iconLocalScale = 1f;
-
-    [Tooltip("Force icon size in pixels (width & height). Leave 0 to keep prefab size.")]
-    [Min(0f)]
-    public float iconSizePixels = 0f;
-
-    [Header("Cameras / Projection")]
-    [Tooltip("Camera used to project world points to screen points. For command mode icons, use your command camera.")]
+    [Header("Camera / Projection")]
+    [Tooltip("World camera used for WorldToScreenPoint (usually your CommandCamera).")]
     public Camera worldCamera;
 
-    [Header("Placement")]
-    [Tooltip("World-space offset added to the team's anchor position (e.g., raise above ground).")]
-    public Vector3 worldOffset = new Vector3(0f, 1.8f, 0f);
+    [Header("Icon Size (optional)")]
+    [Tooltip("If > 0, forces the star image size in pixels before scaling.")]
+    public float iconSizePixels = 0f;
 
-    [Tooltip("Screen-space pixel offset after projection.")]
-    public Vector2 screenOffsetPixels = Vector2.zero;
+    [Tooltip("Local scale applied to the icon root (kept small; StarImage gets the real scaling).")]
+    public float iconLocalScale = 1f;
 
-    [Header("Visibility")]
-    [Tooltip("If true, only show icons when command mode is active (wire a behaviour that is enabled in command mode).")]
-    public bool onlyShowInCommandMode = false;
+    [Header("Per-Team Manual Overrides")]
+    [Tooltip("Optional list of per-team scale overrides (keyed by team root name). EncounterDirectorPOC can also set these at runtime.")]
+    public List<TeamScaleOverride> teamScaleOverrides = new List<TeamScaleOverride>();
 
-    [Tooltip("If set, icons are only visible when this Behaviour is enabled (e.g., CommandCamera.enabled or a CommandMode script).")]
-    public Behaviour commandModeEnabledIndicator;
+    // Runtime map for fast lookup
+    private readonly Dictionary<string, float> _teamScaleMap = new Dictionary<string, float>(StringComparer.Ordinal);
 
-    [Tooltip("If true, hides icons when offscreen.")]
-    public bool hideWhenOffscreen = true;
+    // Track spawned icons by team root
+    private readonly Dictionary<Transform, RectTransform> _iconsByTeamRoot = new Dictionary<Transform, RectTransform>();
 
-    private readonly Dictionary<EncounterTeamAnchor, EnemyTeamIconUI> _icons = new();
-    private readonly List<EncounterTeamAnchor> _removeBuffer = new();
-
-    private void Awake()
+    void Awake()
     {
         if (Instance != null && Instance != this)
         {
-            Destroy(gameObject);
+            Destroy(this);
             return;
         }
         Instance = this;
+
+        RebuildTeamOverrideMap();
     }
 
-    private void OnDestroy()
+    void OnValidate()
     {
-        if (Instance == this) Instance = null;
+        // Keep map in sync when editing in inspector
+        RebuildTeamOverrideMap();
     }
 
-    private void LateUpdate()
+    /// <summary>
+    /// Call this from EncounterDirectorPOC when you want per-team manual scale.
+    /// teamRootName should match the actual root transform name (ex: EnemyTeam_2).
+    /// </summary>
+    public void SetTeamIconScaleOverride(string teamRootName, float scale)
     {
-        if (iconParent == null || iconPrefab == null) return;
-        if (worldCamera == null) worldCamera = Camera.main;
-        if (worldCamera == null) return;
+        if (string.IsNullOrWhiteSpace(teamRootName)) return;
 
-        bool allowVisible = !onlyShowInCommandMode || (commandModeEnabledIndicator != null && commandModeEnabledIndicator.enabled);
+        scale = Mathf.Max(0.01f, scale);
+        _teamScaleMap[teamRootName] = scale;
 
-        // Find all enemy team anchors
-        EncounterTeamAnchor[] anchors = FindObjectsOfType<EncounterTeamAnchor>();
-        foreach (var a in anchors)
+        // Also mirror into list for inspector visibility (best effort).
+        bool found = false;
+        for (int i = 0; i < teamScaleOverrides.Count; i++)
         {
-            if (a == null) continue;
-            if (a.faction != EncounterDirectorPOC.Faction.Enemy) continue;
-
-            if (!_icons.ContainsKey(a))
-                _icons[a] = CreateIconFor(a);
-        }
-
-        // Update existing icons
-        _removeBuffer.Clear();
-        foreach (var kvp in _icons)
-        {
-            var anchor = kvp.Key;
-            var icon = kvp.Value;
-
-            if (anchor == null || icon == null)
+            if (string.Equals(teamScaleOverrides[i].teamRootName, teamRootName, StringComparison.Ordinal))
             {
-                _removeBuffer.Add(anchor);
-                continue;
-            }
-
-            if (!allowVisible)
-            {
-                icon.SetVisible(false);
-                continue;
-            }
-
-            Vector3 worldPos = anchor.AnchorWorldPosition + worldOffset;
-            Vector3 sp = worldCamera.WorldToScreenPoint(worldPos);
-
-            bool isOnscreen = sp.z > 0f &&
-                              sp.x >= 0f && sp.x <= Screen.width &&
-                              sp.y >= 0f && sp.y <= Screen.height;
-
-            if (hideWhenOffscreen && !isOnscreen)
-            {
-                icon.SetVisible(false);
-                continue;
-            }
-
-            icon.SetVisible(true);
-            icon.SetScreenPosition((Vector2)sp + screenOffsetPixels);
-
-            // Update count (exclude a child named "Anchor" if present)
-            int count = CountTeamMembers(anchor.transform);
-            icon.SetCount(count);
-        }
-
-        // Cleanup removed
-        for (int i = 0; i < _removeBuffer.Count; i++)
-        {
-            var a = _removeBuffer[i];
-            if (a == null) continue;
-            if (_icons.TryGetValue(a, out var icon) && icon != null)
-                Destroy(icon.gameObject);
-            _icons.Remove(a);
-        }
-    }
-
-    private EnemyTeamIconUI CreateIconFor(EncounterTeamAnchor anchor)
-    {
-        GameObject go = Instantiate(iconPrefab, iconParent);
-        go.name = $"EnemyTeamIcon_{anchor.name}";
-        go.SetActive(true);
-
-        // Normalize size/scale (fix "tiny icon" issues)
-        var rt = go.GetComponent<RectTransform>();
-        if (rt != null)
-        {
-            // Respect prefab scale: multiply existing scale instead of overwriting it
-            var __baseScale = rt.localScale;
-            var __mult = Mathf.Max(0.01f, iconLocalScale);
-            rt.localScale = new Vector3(__baseScale.x * __mult, __baseScale.y * __mult, __baseScale.z * __mult);
-            if (iconSizePixels > 0.01f)
-            {
-                rt.SetSizeWithCurrentAnchors(RectTransform.Axis.Horizontal, iconSizePixels);
-                rt.SetSizeWithCurrentAnchors(RectTransform.Axis.Vertical, iconSizePixels);
+                teamScaleOverrides[i].scale = scale;
+                found = true;
+                break;
             }
         }
-
-        // Ensure EnemyTeamIconUI exists
-        var icon = go.GetComponent<EnemyTeamIconUI>();
-        if (icon == null) icon = go.AddComponent<EnemyTeamIconUI>();
-        AutoWireIconUI(icon);
-
-        // Optional: allow hover/click targeting
-        var bridge = go.GetComponent<EnemyTeamIconTargetingBridge>();
-        if (bridge == null) bridge = go.AddComponent<EnemyTeamIconTargetingBridge>();
-        bridge.hoverHintMessage = "Enemy Team";
-        bridge.Bind(anchor.transform);
-
-        // --- Direction arrow (optional) ---
-        // Prefer an arrow component already in the prefab (often wired in Inspector).
-        var arrow = go.GetComponentInChildren<EnemyTeamDirectionArrowUI>(true);
-        if (arrow == null) arrow = go.AddComponent<EnemyTeamDirectionArrowUI>();
-
-        EnsureArrowWired(go.transform, arrow, arrowScaleXY, arrowOffsetXY);
-        
-            ApplyArrowTuningRuntime(arrow);EnsureStarWired(go.transform);
-        arrow.spritePointsRight = true;
-        arrow.Bind(anchor, worldCamera);
-
-        return icon;
-    }
-
-    public static int CountTeamMembers(Transform teamRoot)
-    {
-        if (teamRoot == null) return 0;
-        int count = 0;
-        for (int i = 0; i < teamRoot.childCount; i++)
+        if (!found)
         {
-            var c = teamRoot.GetChild(i);
-            if (c == null) continue;
-            if (c.name == "Anchor") continue;
-            if (!c.gameObject.activeInHierarchy) continue;
-            count++;
-        }
-        return count;
-    }
-
-    private static void AutoWireIconUI(EnemyTeamIconUI icon)
-    {
-        if (icon == null) return;
-
-        if (icon.rect == null) icon.rect = icon.GetComponent<RectTransform>();
-        if (icon.image == null) icon.image = icon.GetComponent<Image>();
-
-        if (icon.countText == null)
-        {
-            // Try common names first
-            Transform t = icon.transform.Find("CountText");
-            if (t == null) t = icon.transform.Find("Count");
-            if (t == null)
-            {
-                // Fallback: first Text found in children
-                Text txt = icon.GetComponentInChildren<Text>(true);
-                if (txt != null) icon.countText = txt;
-            }
-            else
-            {
-                icon.countText = t.GetComponent<Text>();
-            }
+            teamScaleOverrides.Add(new TeamScaleOverride { teamRootName = teamRootName, scale = scale });
         }
     }
 
     /// <summary>
-    /// Make sure EnemyTeamDirectionArrowUI drives an ArrowImage child (not the star/root),
-    /// even if ArrowImage is nested under OrbitalAnchor.
+    /// Backwards-compatible alias (EncounterDirectorPOC expects this name).
     /// </summary>
-    private static void EnsureArrowWired(Transform iconRoot, EnemyTeamDirectionArrowUI arrow, Vector2 arrowScaleXY, Vector2 arrowOffsetXY)
+    public void SetTeamScaleOverride(string teamRootName, float scale)
     {
-        if (iconRoot == null || arrow == null) return;
+        SetTeamIconScaleOverride(teamRootName, scale);
+    }
 
-        // Prefer an OrbitalAnchor as the rotation center if it exists (keeps the arrow outside the star).
-        Transform orbitalAnchorT = FindDeepChild(iconRoot, "OrbitalAnchor");
-        var iconRootRT = iconRoot as RectTransform ?? iconRoot.GetComponent<RectTransform>();
-        var orbitalRT = orbitalAnchorT as RectTransform ?? (orbitalAnchorT != null ? orbitalAnchorT.GetComponent<RectTransform>() : null);
+    /// <summary>
+    /// Backwards-compatible overload. Treats scale*multiplier as final scale.
+    /// Optional iconSizePixelsOverride (>0) will set the base iconSizePixels used by this system.
+    /// </summary>
+    public void SetTeamScaleOverride(string teamRootName, float scale, float multiplier, float iconSizePixelsOverride)
+    {
+        if (iconSizePixelsOverride > 0f)
+            iconSizePixels = iconSizePixelsOverride;
 
-        arrow.orbitCenter = orbitalRT != null ? orbitalRT : iconRootRT;
+        SetTeamIconScaleOverride(teamRootName, scale * multiplier);
+    }
 
-        // ALWAYS bind the arrow to a dedicated ArrowImage (so the STAR never rotates).
-        Transform arrowT = null;
+    /// <summary>
+    /// Backwards-compatible overload. Treats scale*multiplier as final scale.
+    /// The bool is accepted for API compatibility; this system already applies scaling via sizeDelta.
+    /// </summary>
+    public void SetTeamScaleOverride(string teamRootName, float scale, float multiplier, bool useSizeDeltaOverride)
+    {
+        // useSizeDeltaOverride intentionally ignored (this implementation always prefers sizeDelta when possible).
+        SetTeamIconScaleOverride(teamRootName, scale * multiplier);
+    }
 
-        // Prefer the prefab\'s OrbitalAnchor/ArrowImage if it exists, even if another ArrowImage exists elsewhere.
-        if (orbitalRT != null)
+
+    /// <summary>
+    /// IMPORTANT: this method was missing and caused your CS0103 error.
+    /// It rebuilds the runtime dictionary from the inspector list.
+    /// </summary>
+    private void RebuildTeamOverrideMap()
+    {
+        _teamScaleMap.Clear();
+
+        if (teamScaleOverrides == null) return;
+
+        for (int i = 0; i < teamScaleOverrides.Count; i++)
         {
-            var preferred = FindDeepChild(orbitalRT, "ArrowImage");
-            if (preferred != null)
-                arrowT = preferred;
+            var ovr = teamScaleOverrides[i];
+            if (ovr == null) continue;
+            if (string.IsNullOrWhiteSpace(ovr.teamRootName)) continue;
+
+            _teamScaleMap[ovr.teamRootName.Trim()] = Mathf.Max(0.01f, ovr.scale);
         }
+    }
 
-        // Fallback: any ArrowImage under iconRoot.
-        if (arrowT == null)
-            arrowT = FindDeepChild(iconRoot, "ArrowImage");
-        if (arrowT == null) arrowT = FindDeepChild(iconRoot, "Arrow");
-        if (arrowT == null) arrowT = FindDeepChild(iconRoot, "ArrowGraphic");
+    /// <summary>
+    /// Register or update an icon instance for a team root.
+    /// Safe to call multiple times.
+    /// </summary>
+    public RectTransform EnsureIconForTeam(Transform teamRoot)
+    {
+        if (!teamRoot) return null;
 
-        Image arrowImg = null;
+        if (_iconsByTeamRoot.TryGetValue(teamRoot, out var existing) && existing)
+            return existing;
 
-        if (arrowT == null)
+        if (!iconPrefab || !iconParent)
+            return null;
+
+        var icon = Instantiate(iconPrefab, iconParent);
+        icon.name = $"EnemyTeamIcon_{teamRoot.name}";
+        icon.localScale = new Vector3(iconLocalScale, iconLocalScale, 1f);
+
+        _iconsByTeamRoot[teamRoot] = icon;
+        return icon;
+    }
+
+    /// <summary>
+    /// Applies per-team scale to the StarImage child (preferred) or the root as fallback.
+    /// This is called every LateUpdate so it wins over scripts that normalize scale.
+    /// </summary>
+    private void ApplyScaleToIcon(RectTransform iconRoot, string teamRootName)
+    {
+        if (!iconRoot) return;
+
+        float s = 1f;
+        if (!string.IsNullOrEmpty(teamRootName) && _teamScaleMap.TryGetValue(teamRootName, out var mapScale))
+            s = mapScale;
+
+        s = Mathf.Max(0.01f, s);
+
+        // Try to find StarImage child
+        var star = iconRoot.transform.Find("OrbitalAnchor/StarImage") as Transform;
+        RectTransform starRect = star ? star.GetComponent<RectTransform>() : null;
+
+        if (starRect)
         {
-            // Create a safe default under OrbitalAnchor.
-            Transform parent = orbitalAnchorT;
-            if (parent == null)
-            {
-                var orbitalGO = new GameObject("OrbitalAnchor", typeof(RectTransform));
-                parent = orbitalGO.transform;
-                parent.SetParent(iconRoot, false);
-                orbitalRT = parent.GetComponent<RectTransform>();
-                orbitalRT.anchorMin = new Vector2(0.5f, 0.5f);
-                orbitalRT.anchorMax = new Vector2(0.5f, 0.5f);
-                orbitalRT.anchoredPosition = Vector2.zero;
-                orbitalRT.sizeDelta = Vector2.zero;
+            // Drive by sizeDelta (more reliable for UI than localScale in your setup)
+            if (iconSizePixels > 0f)
+                starRect.sizeDelta = new Vector2(iconSizePixels, iconSizePixels);
 
-                arrow.orbitCenter = orbitalRT;
+            // If base size is 0 for some reason, fall back to localScale
+            if (starRect.sizeDelta.sqrMagnitude > 0.001f)
+            {
+                starRect.sizeDelta = starRect.sizeDelta.normalized * 0f + (starRect.sizeDelta * s);
             }
-
-            var arrowGO = new GameObject("ArrowImage", typeof(RectTransform), typeof(Image));
-            arrowGO.transform.SetParent(parent, false);
-            arrowT = arrowGO.transform;
-
-            // Important: arrow should not block clicks.
-            arrowImg = arrowGO.GetComponent<Image>();
-            if (arrowImg != null) arrowImg.raycastTarget = false;
-
-            // Prevent the "white box" issue:
-            // If we had to create an Image, Unity assigns a built-in white sprite.
-            // Try to copy the real arrow sprite from any existing ArrowImage in the scene.
-            if (arrowImg != null)
+            else
             {
-                var refSprite = FindReferenceSprite("ArrowImage", iconRoot);
-                if (refSprite != null) arrowImg.sprite = refSprite;
-                else
-                {
-                    // No reference found: hide until user assigns a sprite in the prefab.
-                    var c = arrowImg.color; c.a = 0f; arrowImg.color = c;
-                }
+                starRect.localScale = new Vector3(s, s, 1f);
             }
         }
         else
         {
-            // Ensure it has an Image.
-            arrowImg = arrowT.GetComponent<Image>();
-            if (arrowImg == null) arrowImg = arrowT.gameObject.AddComponent<Image>();
-
-            // If it's still the built-in white sprite, replace with a reference sprite.
-            if (arrowImg != null && (arrowImg.sprite == null || IsBuiltinWhiteSprite(arrowImg.sprite)))
-            {
-                var refSprite = FindReferenceSprite("ArrowImage", iconRoot);
-                if (refSprite != null) arrowImg.sprite = refSprite;
-            }
-        }
-
-        // Make sure it's active.
-        if (!arrowT.gameObject.activeSelf) arrowT.gameObject.SetActive(true);
-
-        // Force the binding (overwrite any incorrect inspector wiring).
-        
-        // If we still don't have a valid sprite, hide the Image so it doesn't show as a white square.
-        if (arrowImg != null && (arrowImg.sprite == null || IsBuiltinWhiteSprite(arrowImg.sprite)))
-        {
-            var refSprite2 = FindReferenceSprite("ArrowImage", iconRoot);
-            if (refSprite2 != null) arrowImg.sprite = refSprite2;
-
-            if (arrowImg.sprite == null || IsBuiltinWhiteSprite(arrowImg.sprite))
-            {
-                // Safest: disable the Image component entirely.
-                arrowImg.enabled = false;
-            }
-        }
-
-        // Remove any duplicate ArrowImage objects (common when multiple systems run or a runtime arrow was spawned).
-        CleanupDuplicateArrowImages(iconRoot, arrowT);
-
-        arrow.arrowRect = arrowT as RectTransform ?? arrowT.GetComponent<RectTransform>();
-        if (arrow.arrowRect != null)
-            arrow.arrowGraphic = arrow.arrowRect.GetComponent<Graphic>();
-    
-        // Apply per-arrow tuning (scale + offset)
-        if (arrow.arrowRect != null)
-        {
-            arrow.arrowRect.localScale = new Vector3(arrowScaleXY.x, arrowScaleXY.y, 1f);
-            arrow.arrowRect.anchoredPosition += arrowOffsetXY;
-        }
-}
-
-
-    private static void EnsureStarWired(Transform iconRoot)
-    {
-        if (iconRoot == null) return;
-
-        Transform orbital = FindDeepChild(iconRoot, "OrbitalAnchor");
-        Transform starT = FindDeepChild(iconRoot, "StarImage");
-        if (starT == null) starT = FindDeepChild(iconRoot, "Star");
-
-        if (starT == null)
-        {
-            // Create under OrbitalAnchor (or root if missing)
-            Transform parent = orbital != null ? orbital : iconRoot;
-            var starGO = new GameObject("StarImage", typeof(RectTransform), typeof(Image));
-            starGO.transform.SetParent(parent, false);
-            starT = starGO.transform;
-
-            var img = starGO.GetComponent<Image>();
-            if (img != null) img.raycastTarget = false;
-        }
-
-        if (!starT.gameObject.activeSelf) starT.gameObject.SetActive(true);
-
-        var starImg = starT.GetComponent<Image>();
-        if (starImg == null) starImg = starT.gameObject.AddComponent<Image>();
-
-        // If no sprite (or builtin), try to copy from any existing StarImage in the scene.
-        if (starImg.sprite == null || IsBuiltinWhiteSprite(starImg.sprite))
-        {
-            var refSprite = FindReferenceSprite("StarImage", iconRoot);
-            if (refSprite != null) starImg.sprite = refSprite;
-        }
-
-        // Ensure the star renders on TOP of the arrow:
-        // In Unity UI, later siblings render on top.
-        if (starT.parent != null)
-            starT.SetAsLastSibling();
-    }
-    private static bool IsBuiltinWhiteSprite(Sprite s)
-    {
-        if (s == null) return false;
-        // Unity's built-in default for UI Image is often named "UISprite"
-        return string.Equals(s.name, "UISprite", System.StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static Sprite FindReferenceSprite(string childName, Transform excludeRoot)
-    {
-        // Look for any Image named childName (or containing "Arrow") with a non-builtin sprite.
-        var images = GameObject.FindObjectsOfType<Image>(true);
-        foreach (var img in images)
-        {
-            if (img == null) continue;
-            if (excludeRoot != null && img.transform.IsChildOf(excludeRoot)) continue;
-
-            var n = img.gameObject.name;
-            bool nameMatch = string.Equals(n, childName, System.StringComparison.OrdinalIgnoreCase) ||
-                             (childName == "ArrowImage" && n.ToLowerInvariant().Contains("arrow"));
-
-            if (!nameMatch) continue;
-
-            if (img.sprite != null && !IsBuiltinWhiteSprite(img.sprite))
-                return img.sprite;
-        }
-        return null;
-    }
-
-    private static Transform FindDeepChild(Transform parent, string name)
-    {
-        if (parent == null) return null;
-        for (int i = 0; i < parent.childCount; i++)
-        {
-            var c = parent.GetChild(i);
-            if (c.name == name) return c;
-            var found = FindDeepChild(c, name);
-            if (found != null) return found;
-        }
-
-        return null;
-    }
-    private static void CleanupDuplicateArrowImages(Transform iconRoot, Transform keep)
-    {
-        if (iconRoot == null) return;
-
-        // Prefer keeping the OrbitalAnchor/ArrowImage if it exists.
-        var orbital = FindDeepChild(iconRoot, "OrbitalAnchor");
-        if (orbital != null)
-        {
-            var preferred = FindDeepChild(orbital, "ArrowImage");
-            if (preferred != null) keep = preferred;
-        }
-
-        // Collect all ArrowImage transforms
-        var all = iconRoot.GetComponentsInChildren<Transform>(true);
-        for (int i = 0; i < all.Length; i++)
-        {
-            var t = all[i];
-            if (t == null) continue;
-            if (t.name != "ArrowImage") continue;
-            if (keep != null && t == keep) continue;
-
-            // Destroy duplicates
-            Object.Destroy(t.gameObject);
+            // Fallback: scale root
+            iconRoot.localScale = new Vector3(iconLocalScale * s, iconLocalScale * s, 1f);
         }
     }
 
-    private void ApplyArrowTuningRuntime(EnemyTeamDirectionArrowUI arrow)
+    void LateUpdate()
     {
-        if (arrow == null || arrow.arrowRect == null) return;
+        // Keep overrides current if list is edited at runtime
+        // (cheap: dictionary already built; this does nothing unless list changed via inspector)
+        // If you want, you can comment this out.
+        // RebuildTeamOverrideMap();
 
-        // Ensure we run after the arrow script has computed its orbit position.
-        // This re-applies scale/position every frame so changes in the inspector take effect immediately.
-        arrow.arrowRect.localScale = new Vector3(arrowScaleXY.x, arrowScaleXY.y, 1f);
-        arrow.arrowRect.anchoredPosition += arrowOffsetXY;
+        // Update each icon's scale. (Positioning/following handled elsewhere in your project.)
+        foreach (var kvp in _iconsByTeamRoot)
+        {
+            var teamRoot = kvp.Key;
+            var iconRoot = kvp.Value;
+            if (!teamRoot || !iconRoot) continue;
+
+            ApplyScaleToIcon(iconRoot, teamRoot.name);
+        }
     }
-
 }

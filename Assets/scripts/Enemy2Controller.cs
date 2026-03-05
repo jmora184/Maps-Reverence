@@ -24,6 +24,9 @@ public class Enemy2Controller : MonoBehaviour
     [Tooltip("Max distance to accept a new combat target from damage (GetShot(attacker)). If 0, uses distanceToChase.")]
     public float aggroFromDamageMaxDistance = 0f;
 
+    [Tooltip("If true, ignore aggro when the attacker is another Enemy (prevents enemies from turning on each other due to stray bullets).")]
+    public bool ignoreAggroFromOtherEnemies = true;
+
     [Tooltip("Legacy stop distance (kept for Inspector compatibility).")]
     public float distanceToStop = 2f;
 
@@ -52,6 +55,13 @@ public class Enemy2Controller : MonoBehaviour
 
     [Tooltip("Optional: if true, require a clear line of sight to aggro an ally.")]
     public bool requireLineOfSightToAggro = false;
+
+    [Header("Line Of Sight (Shooting)")]
+    [Tooltip("If true, the enemy will only FIRE when it has a clear line of sight to the aim point (raycast using lineOfSightMask).")]
+    public bool requireLineOfSightToShoot = true;
+
+    [Tooltip("Small offset forward from the firePoint to avoid immediately raycasting into our own collider.")]
+    public float lineOfSightFirePointForwardOffset = 0.05f;
 
     [Tooltip("Line of sight check uses this mask. Usually Everything except UI.")]
     public LayerMask lineOfSightMask = ~0;
@@ -519,6 +529,10 @@ public string bulletsAnimalTag = "Animal";
     {
         if (t == null) return;
 
+        // Prevent friendly-fire / same-faction aggro (enemy vs enemy) from stray bullets or accidental targeting.
+        if (ignoreAggroFromOtherEnemies && IsOtherEnemyTransform(t))
+            return;
+
         // Some targeting/order systems call SetCombatTarget when an ally "targets" an enemy,
         // even from very far away. That creates unwanted "telepathy aggro".
         // We keep LONG-RANGE aggro ONLY for actual damage (GetShot) via _damageAggroUntil window.
@@ -576,6 +590,9 @@ public string bulletsAnimalTag = "Animal";
         if (_isDead) return;
         if (attacker != null)
         {
+            // Prevent friendly-fire / same-faction aggro from stray bullets.
+            if (ignoreAggroFromOtherEnemies && IsOtherEnemyTransform(attacker))
+                return;
             // Damage aggro can have its own radius, separate from SetCombatTarget orders.
             // This prevents an enemy from "snapping" to an attacker anywhere on the map.
             float maxAggroDist = (aggroFromDamageMaxDistance > 0f) ? aggroFromDamageMaxDistance : distanceToChase;
@@ -598,7 +615,20 @@ public string bulletsAnimalTag = "Animal";
     /// <summary>
     /// Called by WaterSlowZone triggers. Multiplier is clamped and applied to this enemy's NavMeshAgent speed.
     /// </summary>
-    public void SetWaterSlow(bool inWater, float speedMultiplier)
+    
+    private bool IsOtherEnemyTransform(Transform t)
+    {
+        if (t == null) return false;
+
+        // Same GameObject or child/parent - treat as self.
+        if (t == transform || t.IsChildOf(transform) || transform.IsChildOf(t)) return false;
+
+        // Tag-based: any attacker tagged "Enemy" should be ignored for aggro.
+        // If you have different tags for factions, extend this check.
+        return t.CompareTag("Enemy") || (t.root != null && t.root.CompareTag("Enemy"));
+    }
+
+public void SetWaterSlow(bool inWater, float speedMultiplier)
     {
         if (!enableWaterSlow) return;
 
@@ -1500,6 +1530,24 @@ void HandleShooting(Transform target)
         bool canFire = !useFireConeGate || aimAngle <= Mathf.Clamp(fireConeDegrees, 1f, 179f);
 
         if (!canFire) return;
+
+        // LOS gate: only shoot when we have a clear line of sight to the aim position.
+        if (requireLineOfSightToShoot)
+        {
+            Vector3 losFrom = firePoint.position + firePoint.forward * Mathf.Max(0f, lineOfSightFirePointForwardOffset);
+            Vector3 losDir = aimPos - losFrom;
+            float losDist = losDir.magnitude;
+            if (losDist > 0.001f)
+            {
+                losDir /= losDist;
+                if (Physics.Raycast(losFrom, losDir, out RaycastHit hit, losDist, lineOfSightMask, QueryTriggerInteraction.Ignore))
+                {
+                    // If we hit something that isn't the target, we don't have a clear shot.
+                    if (hit.transform != target && !hit.transform.IsChildOf(target))
+                        return;
+                }
+            }
+        }
 
         GameObject spawned = Instantiate(bullet, firePoint.position, firePoint.rotation);
 
