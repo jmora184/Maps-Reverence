@@ -716,6 +716,9 @@ private void SpawnLegacy(TeamSpawnPlan plan, Transform parent, List<GameObject> 
             _iconsByTeamRoot.Remove(dead[i]);
         ListPool<Transform>.Release(dead);
 
+        // Teams that have no live enemies: remove + destroy icon
+        var emptyTeams = ListPool<Transform>.Get();
+
         foreach (var kvp in _iconsByTeamRoot)
         {
             var data = kvp.Value;
@@ -724,7 +727,7 @@ private void SpawnLegacy(TeamSpawnPlan plan, Transform parent, List<GameObject> 
             data.iconRoot.gameObject.SetActive(show);
             if (!show) continue;
 
-            Vector3 worldPos = data.teamRoot.position + iconWorldOffset;
+            Vector3 worldPos = ResolveEnemyTeamAnchorWorld(data) + iconWorldOffset;
             Vector3 screen = commandCamera.WorldToScreenPoint(worldPos);
 
             // Behind camera
@@ -741,16 +744,49 @@ private void SpawnLegacy(TeamSpawnPlan plan, Transform parent, List<GameObject> 
                 data.iconRoot.anchoredPosition = local;
 
             // Update enemy team member count label (best effort: uses childCount because enemies are typically parented under the team root).
-            SetIconCount(data, GetLiveEnemyCount(data.teamRoot));
+            int live = GetLiveEnemyCount(data.teamRoot);
+            SetIconCount(data, live);
+
+            // If the team is wiped, destroy its UI (star+arrow) and stop tracking it.
+            if (live <= 0)
+            {
+                DestroyEnemyTeamIconUI(data);
+                emptyTeams.Add(kvp.Key);
+                continue;
+            }
 
             // Keep arrow UI bound (some scripts clear refs on enable/disable)
             if (data.arrowUi != null && data.anchor != null)
                 BindArrowUi(data.arrowUi, data.anchor);
         }
+
+        // Remove any wiped teams after iteration
+        for (int i = 0; i < emptyTeams.Count; i++)
+        {
+            _iconsByTeamRoot.Remove(emptyTeams[i]);
+        }
+        ListPool<Transform>.Release(emptyTeams);
+    }
+
+
+    private void DestroyEnemyTeamIconUI(TeamIconRuntimeData data)
+    {
+        if (data == null) return;
+
+        // Destroy the whole icon root (contains StarImage + ArrowImage + any orbit/bridge scripts).
+        if (data.iconRoot != null)
+            Destroy(data.iconRoot.gameObject);
+
+        data.iconRoot = null;
+        data.starRect = null;
+        data.arrowRect = null;
+        data.arrowUi = null;
+        data.anchor = null;
+        data.teamRoot = null;
     }
 
     // =========================
-    // Ally Teams (LevelOne)
+    // Ally Teams \(LevelOne\)
     // =========================
 
     public void SpawnAllyTeam(int allyTeamIndex)
@@ -916,7 +952,7 @@ private void SpawnLegacy(TeamSpawnPlan plan, Transform parent, List<GameObject> 
             data.iconRoot.gameObject.SetActive(show);
             if (!show) continue;
 
-            Vector3 worldPos = data.teamRoot.position + allyIconWorldOffset;
+            Vector3 worldPos = ResolveAllyTeamAnchorWorld(data) + allyIconWorldOffset;
             Vector3 screen = cam.WorldToScreenPoint(worldPos);
 
             if (screen.z < 0.01f)
@@ -937,6 +973,149 @@ private void SpawnLegacy(TeamSpawnPlan plan, Transform parent, List<GameObject> 
     }
 
 
+
+
+
+    // -------------------------
+    // Team anchor world position
+    // -------------------------
+    // LevelOne originally projected icons from teamRoot.position, but teamRoot is a static spawn anchor.
+    // To make the team star follow the team as they move/fight, we resolve a live centroid each frame.
+
+    private Vector3 ResolveEnemyTeamAnchorWorld(TeamIconRuntimeData data)
+    {
+        if (data == null) return Vector3.zero;
+
+        // 1) Prefer centroid from live child members (enemies are parented under the enemy team root in LevelOne spawns).
+        if (data.teamRoot != null)
+        {
+            var centroid = ComputeCentroidFromChildren(data.teamRoot);
+            if (centroid.HasValue) return centroid.Value;
+        }
+
+        // 2) Fallback: if EncounterTeamAnchor exposes a world position, try to read it (best effort, no hard dependency).
+        if (data.anchor != null)
+        {
+            if (TryGetVector3FromAnchor(data.anchor, out var v)) return v;
+        }
+
+        // 3) Ultimate fallback: teamRoot position.
+        return data.teamRoot != null ? data.teamRoot.position : Vector3.zero;
+    }
+
+    private Vector3 ResolveAllyTeamAnchorWorld(TeamIconRuntimeData data)
+    {
+        if (data == null) return Vector3.zero;
+
+        // 1) Prefer tracked member list (works even if allies are NOT parented under teamRoot).
+        if (data.teamRoot != null && _allyMembersByTeamRoot.TryGetValue(data.teamRoot, out var list) && list != null && list.Count > 0)
+        {
+            var centroid = ComputeCentroidFromList(list);
+            if (centroid.HasValue) return centroid.Value;
+        }
+
+        // 2) If they are parented, use children.
+        if (data.teamRoot != null)
+        {
+            var centroid = ComputeCentroidFromChildren(data.teamRoot);
+            if (centroid.HasValue) return centroid.Value;
+        }
+
+        // 3) Try anchor reflection
+        if (data.anchor != null)
+        {
+            if (TryGetVector3FromAnchor(data.anchor, out var v)) return v;
+        }
+
+        return data.teamRoot != null ? data.teamRoot.position : Vector3.zero;
+    }
+
+    private Vector3? ComputeCentroidFromChildren(Transform root)
+    {
+        if (root == null) return null;
+
+        Vector3 sum = Vector3.zero;
+        int alive = 0;
+
+        // Include only active children (dead/disabled units are ignored).
+        for (int i = 0; i < root.childCount; i++)
+        {
+            var c = root.GetChild(i);
+            if (c == null) continue;
+            if (!c.gameObject.activeInHierarchy) continue;
+            sum += c.position;
+            alive++;
+        }
+
+        if (alive <= 0) return null;
+        return sum / alive;
+    }
+
+    private Vector3? ComputeCentroidFromList(List<Transform> list)
+    {
+        if (list == null) return null;
+
+        Vector3 sum = Vector3.zero;
+        int alive = 0;
+
+        for (int i = list.Count - 1; i >= 0; i--)
+        {
+            var t = list[i];
+            if (t == null)
+            {
+                list.RemoveAt(i);
+                continue;
+            }
+            if (!t.gameObject.activeInHierarchy) continue;
+            sum += t.position;
+            alive++;
+        }
+
+        if (alive <= 0) return null;
+        return sum / alive;
+    }
+
+    private bool TryGetVector3FromAnchor(Component anchor, out Vector3 value)
+    {
+        value = Vector3.zero;
+        if (anchor == null) return false;
+
+        // Common field/property names we might have in EncounterTeamAnchor across iterations.
+        // We do this via reflection to avoid hard dependencies on the exact API.
+        string[] names =
+        {
+            "WorldPosition",
+            "worldPosition",
+            "SmoothedWorldPosition",
+            "smoothedWorldPosition",
+            "AnchorWorld",
+            "anchorWorld",
+            "Centroid",
+            "centroid",
+            "CurrentWorld",
+            "currentWorld"
+        };
+
+        var t = anchor.GetType();
+        for (int i = 0; i < names.Length; i++)
+        {
+            var n = names[i];
+
+            var f = t.GetField(n, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (f != null && f.FieldType == typeof(Vector3))
+            {
+                try { value = (Vector3)f.GetValue(anchor); return true; } catch { }
+            }
+
+            var p = t.GetProperty(n, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (p != null && p.CanRead && p.PropertyType == typeof(Vector3))
+            {
+                try { value = (Vector3)p.GetValue(anchor, null); return true; } catch { }
+            }
+        }
+
+        return false;
+    }
 
 
     // --- Ally icon count helpers ---

@@ -48,15 +48,14 @@ public class WeaponAmmo : MonoBehaviour
     [Tooltip("If true, blocks TryConsumeRound while reloading.")]
     public bool blockFireWhileReloading = true;
 
-    
-
     [Header("Manual Reload Input (optional)")]
     [Tooltip("If true, this component listens for a reload key press and starts reload (it will also trigger your OnReloadRequested animation event).")]
     public bool enableManualReloadKey = true;
 
     [Tooltip("Key to manually reload this weapon (set to None if you handle input elsewhere).")]
     public KeyCode reloadKey = KeyCode.N;
-public int InMag { get; private set; }
+
+    public int InMag { get; private set; }
     public int Reserve { get; private set; }
     public bool IsReloading { get; private set; }
 
@@ -64,30 +63,51 @@ public int InMag { get; private set; }
     public event Action<WeaponAmmo> OnReloadStarted;
     public event Action<WeaponAmmo> OnReloadFinished;
 
+    private Coroutine _reloadRoutine;
+
     void Awake()
     {
-        // If you DID want to use animator and forgot to assign it, try to find one.
         if (animator == null) animator = GetComponentInParent<Animator>();
         ResetAmmoToDefaults();
     }
 
-    
+    void OnEnable()
+    {
+        OnAmmoChanged?.Invoke(this);
+    }
+
+    void OnDisable()
+    {
+        CancelReload(false);
+    }
+
+    void OnDestroy()
+    {
+        CancelReload(false);
+    }
+
     void Update()
     {
         if (!enableManualReloadKey) return;
         if (reloadKey == KeyCode.None) return;
+        if (!gameObject.activeInHierarchy) return;
 
         if (Input.GetKeyDown(reloadKey))
             StartReload();
     }
 
-public void ResetAmmoToDefaults()
+    public void ResetAmmoToDefaults()
     {
         int total = Mathf.Max(0, totalAmmoStart);
         int load = Mathf.Min(magazineSize, total);
         InMag = load;
         Reserve = total - load;
         IsReloading = false;
+        _reloadRoutine = null;
+
+        if (animator != null && !string.IsNullOrEmpty(isReloadingBool))
+            animator.SetBool(isReloadingBool, false);
+
         OnAmmoChanged?.Invoke(this);
     }
 
@@ -122,16 +142,41 @@ public void ResetAmmoToDefaults()
 
     public void StartReload()
     {
+        if (!isActiveAndEnabled) return;
         if (IsReloading) return;
         if (Reserve <= 0) return;
         if (InMag >= magazineSize) return;
 
-        StartCoroutine(ReloadRoutine());
+        if (_reloadRoutine != null)
+            StopCoroutine(_reloadRoutine);
+
+        _reloadRoutine = StartCoroutine(ReloadRoutine());
+    }
+
+    public void CancelReload(bool invokeAmmoChanged = true)
+    {
+        if (_reloadRoutine != null)
+        {
+            StopCoroutine(_reloadRoutine);
+            _reloadRoutine = null;
+        }
+
+        if (IsReloading)
+        {
+            IsReloading = false;
+
+            if (animator != null && !string.IsNullOrEmpty(isReloadingBool))
+                animator.SetBool(isReloadingBool, false);
+
+            if (invokeAmmoChanged)
+                OnAmmoChanged?.Invoke(this);
+        }
     }
 
     IEnumerator ReloadRoutine()
     {
         IsReloading = true;
+        _reloadRoutine = null;
 
         // 1) Preferred: call your existing reload controller
         if (OnReloadRequested != null)
@@ -151,6 +196,10 @@ public void ResetAmmoToDefaults()
         OnAmmoChanged?.Invoke(this);
 
         yield return new WaitForSeconds(reloadDuration);
+
+        // If the object was disabled during reload, OnDisable should have canceled already.
+        if (!isActiveAndEnabled)
+            yield break;
 
         // Fill mag from reserve
         int needed = magazineSize - InMag;

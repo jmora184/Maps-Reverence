@@ -2,23 +2,18 @@ using System.Collections;
 using UnityEngine;
 
 /// <summary>
-/// Simple "reload animation" that:
-/// 1) Plays a weapon swing using THIS script's motion values (no melee dependency)
-/// 2) Temporarily hides the magazine GameObject (AR_A_Mag) and shows it again
-/// 3) (Optional) blocks firing while the animation runs
-///
-/// This is ONLY the visual animation + mag toggle (no ammo logic yet).
+/// Visual reload animation for the currently equipped weapon.
+/// Fixes weapon-switch issues by cleaning up properly when the weapon/script is disabled mid-reload.
 /// </summary>
 public class PlayerWeaponReloadAnimation : MonoBehaviour
 {
-    
     // Called by WeaponAmmo via UnityEvent (OnReloadRequested)
     public void RequestReload()
     {
         TryReload();
     }
 
-[Header("Input")]
+    [Header("Input")]
     public KeyCode reloadKey = KeyCode.N;
 
     [Header("References")]
@@ -58,6 +53,20 @@ public class PlayerWeaponReloadAnimation : MonoBehaviour
     private Coroutine _reloadCo;
     private bool _isReloading;
 
+    private Player2Controller _blockedPlayerController;
+    private bool _capturedPrevShootBlock;
+    private bool _prevPlayerShootBlock;
+
+    private void OnDisable()
+    {
+        CancelReloadAndReset();
+    }
+
+    private void OnDestroy()
+    {
+        CancelReloadAndReset();
+    }
+
     void Update()
     {
         if (Input.GetKeyDown(reloadKey))
@@ -73,13 +82,52 @@ public class PlayerWeaponReloadAnimation : MonoBehaviour
 
         ResolveMagazineObject();
 
-        if (_reloadCo != null) StopCoroutine(_reloadCo);
+        if (_reloadCo != null)
+            StopCoroutine(_reloadCo);
+
         _reloadCo = StartCoroutine(ReloadRoutine());
+    }
+
+    /// <summary>
+    /// Call this from weapon-switch code if you want an explicit cleanup before deactivating the weapon.
+    /// </summary>
+    public void CancelReload()
+    {
+        CancelReloadAndReset();
+    }
+
+    private void CancelReloadAndReset()
+    {
+        if (_reloadCo != null)
+        {
+            StopCoroutine(_reloadCo);
+            _reloadCo = null;
+        }
+
+        if (_weaponVisual != null)
+        {
+            if (_weaponCached)
+            {
+                _weaponVisual.localPosition = _weaponStartPos;
+                _weaponVisual.localRotation = _weaponStartRot;
+            }
+            else
+            {
+                _weaponVisual.localPosition = Vector3.zero;
+                _weaponVisual.localRotation = Quaternion.identity;
+            }
+        }
+
+        if (magazineObject != null)
+            magazineObject.SetActive(true);
+
+        RestorePlayerShootBlock();
+
+        _isReloading = false;
     }
 
     void ResolveWeaponVisual()
     {
-        // Prefer explicit override on THIS script.
         if (weaponVisualRootOverride != null)
         {
             if (_weaponVisual != weaponVisualRootOverride)
@@ -90,7 +138,6 @@ public class PlayerWeaponReloadAnimation : MonoBehaviour
             return;
         }
 
-        // Otherwise animate the active gun root.
         Gun activeGun = FindActiveGun();
         if (activeGun != null && _weaponVisual != activeGun.transform)
         {
@@ -123,10 +170,12 @@ public class PlayerWeaponReloadAnimation : MonoBehaviour
         if (_weaponVisual == null)
         {
             _isReloading = false;
+            _reloadCo = null;
             yield break;
         }
 
-        if (!_weaponCached) CacheWeaponStart();
+        if (!_weaponCached)
+            CacheWeaponStart();
 
         Vector3 localOffset = reloadLocalOffset;
         Vector3 localEuler = reloadLocalEuler;
@@ -135,24 +184,20 @@ public class PlayerWeaponReloadAnimation : MonoBehaviour
 
         float totalTime = moveDur + hold + moveDur;
 
-        // Fire blocking for the full animation.
         if (blockFiringDuringReload)
         {
             float blockTime = totalTime + Mathf.Max(0f, extraFiringBlockTime);
             BlockFiring(blockTime);
         }
 
-        // Also block the Player2Controller shooting loop.
-        bool prevPlayerShootBlock = false;
-        bool capturedPrevBlock = false;
         if (blockPlayerControllerShooting)
         {
-            var pc = FindPlayerController();
-            if (pc != null)
+            _blockedPlayerController = FindPlayerController();
+            if (_blockedPlayerController != null)
             {
-                prevPlayerShootBlock = pc.blockShooting;
-                capturedPrevBlock = true;
-                pc.blockShooting = true;
+                _prevPlayerShootBlock = _blockedPlayerController.blockShooting;
+                _capturedPrevShootBlock = true;
+                _blockedPlayerController.blockShooting = true;
             }
         }
 
@@ -167,10 +212,11 @@ public class PlayerWeaponReloadAnimation : MonoBehaviour
 
         float elapsed = 0f;
 
-        // Forward
         float t = 0f;
         while (t < 1f)
         {
+            if (_weaponVisual == null) break;
+
             t += Time.deltaTime / moveDur;
             float s = Smooth01(t);
             _weaponVisual.localPosition = Vector3.Lerp(fromPos, toPos, s);
@@ -181,12 +227,13 @@ public class PlayerWeaponReloadAnimation : MonoBehaviour
             yield return null;
         }
 
-        // Hold at peak
         if (hold > 0f)
         {
             float holdT = 0f;
             while (holdT < hold)
             {
+                if (_weaponVisual == null) break;
+
                 holdT += Time.deltaTime;
 
                 elapsed += Time.deltaTime;
@@ -195,10 +242,11 @@ public class PlayerWeaponReloadAnimation : MonoBehaviour
             }
         }
 
-        // Return
         t = 0f;
         while (t < 1f)
         {
+            if (_weaponVisual == null) break;
+
             t += Time.deltaTime / moveDur;
             float s = Smooth01(t);
             _weaponVisual.localPosition = Vector3.Lerp(toPos, fromPos, s);
@@ -209,20 +257,16 @@ public class PlayerWeaponReloadAnimation : MonoBehaviour
             yield return null;
         }
 
-        // Ensure we end cleanly.
-        _weaponVisual.localPosition = fromPos;
-        _weaponVisual.localRotation = fromRot;
+        if (_weaponVisual != null)
+        {
+            _weaponVisual.localPosition = fromPos;
+            _weaponVisual.localRotation = fromRot;
+        }
 
-        // Make sure mag ends visible.
         if (magazineObject != null)
             magazineObject.SetActive(true);
 
-        // Restore previous shooting block state if we changed it.
-        if (capturedPrevBlock)
-        {
-            var pc = FindPlayerController();
-            if (pc != null) pc.blockShooting = prevPlayerShootBlock;
-        }
+        RestorePlayerShootBlock();
 
         _isReloading = false;
         _reloadCo = null;
@@ -245,6 +289,18 @@ public class PlayerWeaponReloadAnimation : MonoBehaviour
             magazineObject.SetActive(true);
             magShownAgain = true;
         }
+    }
+
+    void RestorePlayerShootBlock()
+    {
+        if (_capturedPrevShootBlock && _blockedPlayerController != null)
+        {
+            _blockedPlayerController.blockShooting = _prevPlayerShootBlock;
+        }
+
+        _blockedPlayerController = null;
+        _capturedPrevShootBlock = false;
+        _prevPlayerShootBlock = false;
     }
 
     static float Smooth01(float t)

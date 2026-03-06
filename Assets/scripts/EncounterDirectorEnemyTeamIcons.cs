@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using TMPro;
 using UnityEngine;
 
 /// <summary>
@@ -54,6 +55,7 @@ public class EncounterDirectorEnemyTeamIcons : MonoBehaviour
 
     private float _nextScanTime;
     private readonly Dictionary<Transform, RectTransform> _iconByTeamRoot = new Dictionary<Transform, RectTransform>();
+    private readonly Dictionary<Transform, TMP_Text> _flankTextByTeamRoot = new Dictionary<Transform, TMP_Text>();
     private readonly List<Transform> _teamsScratch = new List<Transform>(64);
 
     private void Awake()
@@ -104,6 +106,8 @@ public class EncounterDirectorEnemyTeamIcons : MonoBehaviour
 
             if (!icon.gameObject.activeSelf) icon.gameObject.SetActive(true);
             icon.position = (Vector2)screen + screenOffsetPixels;
+
+            UpdateFlankText(teamRoot, icon);
         }
     }
 
@@ -155,6 +159,11 @@ public class EncounterDirectorEnemyTeamIcons : MonoBehaviour
             icon.name = $"EnemyTeamIcon_{teamRoot.name}";
             icon.gameObject.SetActive(true);
             _iconByTeamRoot[teamRoot] = icon;
+            _flankTextByTeamRoot[teamRoot] = FindFlankText(icon);
+
+            var overlay = FindObjectOfType<CommandOverlayUI>();
+            if (overlay != null)
+                overlay.RegisterEnemyTeamIcon(teamRoot, icon, "Enemy Team");
 
             // --- Direction arrow (optional) ---
             var anchor = teamRoot.GetComponent<EncounterTeamAnchor>();
@@ -186,6 +195,48 @@ public class EncounterDirectorEnemyTeamIcons : MonoBehaviour
                 Destroy(icon.gameObject);
 
             _iconByTeamRoot.Remove(dead[i]);
+            _flankTextByTeamRoot.Remove(dead[i]);
         }
     }
+
+
+    private void UpdateFlankText(Transform teamRoot, RectTransform icon)
+    {
+        if (teamRoot == null || icon == null) return;
+
+        if (!_flankTextByTeamRoot.TryGetValue(teamRoot, out TMP_Text flankText) || flankText == null)
+        {
+            flankText = FindFlankText(icon);
+            _flankTextByTeamRoot[teamRoot] = flankText;
+        }
+
+        if (flankText == null) return;
+
+        int flankCount = TeamFlankIndicatorSystem.Instance != null
+            ? TeamFlankIndicatorSystem.Instance.GetCommittedAttackerTeamCount(teamRoot)
+            : 0;
+
+        bool show = flankCount >= 2;
+        if (flankText.gameObject.activeSelf != show)
+            flankText.gameObject.SetActive(show);
+
+        if (show)
+            flankText.text = $"Flank X{flankCount}";
+    }
+
+    private TMP_Text FindFlankText(RectTransform icon)
+    {
+        if (icon == null) return null;
+
+        Transform starImage = icon.Find("StarImage");
+        if (starImage != null)
+        {
+            TMP_Text tmp = starImage.GetComponentInChildren<TMP_Text>(true);
+            if (tmp != null)
+                return tmp;
+        }
+
+        return icon.GetComponentInChildren<TMP_Text>(true);
+    }
+
 }

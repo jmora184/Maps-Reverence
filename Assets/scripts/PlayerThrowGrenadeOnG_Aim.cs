@@ -1,10 +1,12 @@
+using System;
 using UnityEngine;
 
 /// <summary>
 /// Press G to play the "throw_grenade" animation AND launch a grenade in the direction the player is looking.
 /// - Uses camera forward as the throw direction.
 /// - Optionally rotates the Soldier_marine body to match the camera yaw so the throw looks correct.
-/// - Optionally snaps Soldier_marine to a specific transform (your screenshot values).
+/// - Optionally snaps Soldier_marine to a specific transform.
+/// - Tracks grenade ammo and exposes an event so UI can react when grenade count changes.
 ///
 /// Attach to Player (or any manager object).
 /// </summary>
@@ -42,6 +44,23 @@ public class PlayerThrowGrenadeOnG_Aim : MonoBehaviour
     [Tooltip("Optional cooldown (seconds) to prevent spam. 0 = none.")]
     public float cooldown = 0.35f;
 
+    [Header("Grenade Ammo")]
+    [Tooltip("If true, the player must have grenades available to throw.")]
+    public bool useLimitedGrenades = true;
+
+    [Tooltip("How many grenades the player starts with.")]
+    public int startingGrenades = 3;
+
+    [Tooltip("Maximum grenades the player can carry.")]
+    public int maxGrenades = 3;
+
+    [Tooltip("Current grenade count at runtime.")]
+    public int currentGrenades = 3;
+
+    [Header("Movement Inheritance")]
+    [Tooltip("Adds some of the player's current movement velocity into the grenade throw so you can't outrun it.")]
+    public float inheritedVelocityMultiplier = 1f;
+
     [Header("Match Body To Aim")]
     [Tooltip("Rotate the soldier to match camera yaw (left/right) so the throw faces where you look.")]
     public bool matchCameraYaw = true;
@@ -58,7 +77,17 @@ public class PlayerThrowGrenadeOnG_Aim : MonoBehaviour
     public Vector3 targetRotationEuler = Vector3.zero;
     public Vector3 targetScale = new Vector3(2f, 2f, 2f);
 
+    [Header("Debug")]
+    public bool debugLogs = false;
+
+    /// <summary>
+    /// Fired whenever grenade count changes. Sends currentGrenades and maxGrenades.
+    /// </summary>
+    public event Action<int, int> OnGrenadeCountChanged;
+
     private float _nextAllowedTime;
+    private Rigidbody _ownerRb;
+    private CharacterController _ownerCharacterController;
 
     private void Awake()
     {
@@ -67,12 +96,33 @@ public class PlayerThrowGrenadeOnG_Aim : MonoBehaviour
 
         if (playerCamera == null && Camera.main != null)
             playerCamera = Camera.main;
+
+        _ownerRb = GetComponent<Rigidbody>();
+        _ownerCharacterController = GetComponent<CharacterController>();
+
+        maxGrenades = Mathf.Max(0, maxGrenades);
+        startingGrenades = Mathf.Clamp(startingGrenades, 0, maxGrenades > 0 ? maxGrenades : startingGrenades);
+        currentGrenades = useLimitedGrenades ? startingGrenades : Mathf.Max(currentGrenades, startingGrenades);
+
+        NotifyGrenadeCountChanged();
+    }
+
+    private void OnEnable()
+    {
+        NotifyGrenadeCountChanged();
     }
 
     private void Update()
     {
         if (!Input.GetKeyDown(throwKey)) return;
         if (Time.time < _nextAllowedTime) return;
+
+        if (useLimitedGrenades && currentGrenades <= 0)
+        {
+            if (debugLogs)
+                Debug.Log($"{nameof(PlayerThrowGrenadeOnG_Aim)}: No grenades left.", this);
+            return;
+        }
 
         if (soldierMarineRoot == null)
         {
@@ -106,9 +156,19 @@ public class PlayerThrowGrenadeOnG_Aim : MonoBehaviour
         animator.ResetTrigger(triggerName);
         animator.SetTrigger(triggerName);
 
-        // 2) Launch grenade (optional)
+        // 2) Launch grenade
         if (grenadePrefab != null)
-            SpawnAndThrowGrenade();
+        {
+            bool threw = SpawnAndThrowGrenade();
+            if (threw && useLimitedGrenades)
+            {
+                currentGrenades = Mathf.Max(0, currentGrenades - 1);
+                NotifyGrenadeCountChanged();
+
+                if (debugLogs)
+                    Debug.Log($"{nameof(PlayerThrowGrenadeOnG_Aim)}: Grenade thrown. Remaining: {currentGrenades}/{maxGrenades}", this);
+            }
+        }
 
         if (cooldown > 0f)
             _nextAllowedTime = Time.time + cooldown;
@@ -116,7 +176,6 @@ public class PlayerThrowGrenadeOnG_Aim : MonoBehaviour
 
     private void MatchYawToCamera()
     {
-        // Match only yaw (Y), ignore pitch so body doesn't try to flip.
         Vector3 camForward = playerCamera.transform.forward;
         camForward.y = 0f;
 
@@ -124,12 +183,10 @@ public class PlayerThrowGrenadeOnG_Aim : MonoBehaviour
             return;
 
         Quaternion targetYaw = Quaternion.LookRotation(camForward.normalized, Vector3.up);
-
-        // Smooth rotate the soldier root (or snap if you want instant).
         soldierMarineRoot.rotation = Quaternion.Slerp(soldierMarineRoot.rotation, targetYaw, yawRotateSpeed * Time.deltaTime);
     }
 
-    private void SpawnAndThrowGrenade()
+    private bool SpawnAndThrowGrenade()
     {
         Vector3 spawnPos;
         Quaternion spawnRot;
@@ -141,33 +198,46 @@ public class PlayerThrowGrenadeOnG_Aim : MonoBehaviour
         }
         else
         {
-            // fallback: spawn in front of camera
             spawnPos = playerCamera.transform.position + playerCamera.transform.forward * 0.6f;
             spawnRot = playerCamera.transform.rotation;
         }
 
         GameObject g = Instantiate(grenadePrefab, spawnPos, spawnRot);
+        if (g == null) return false;
 
-        // Compute throw velocity from camera forward + upward boost
+        if (g.TryGetComponent<GrenadeProjectile>(out GrenadeProjectile projectile))
+            projectile.SetOwner(gameObject);
+
         Vector3 dir = playerCamera.transform.forward.normalized;
-        Vector3 velocity = dir * throwSpeed + Vector3.up * upwardBoost;
+        Vector3 velocity = dir * throwSpeed + Vector3.up * upwardBoost + GetOwnerVelocity() * inheritedVelocityMultiplier;
 
         if (g.TryGetComponent<Rigidbody>(out Rigidbody rb))
         {
             rb.linearVelocity = Vector3.zero;
             rb.angularVelocity = Vector3.zero;
-
-            // Use velocity-based throw
             rb.linearVelocity = velocity;
+            rb.AddTorque(UnityEngine.Random.insideUnitSphere * 4f, ForceMode.VelocityChange);
 
-            // Optional: add some spin so it looks thrown
-            rb.AddTorque(Random.insideUnitSphere * 4f, ForceMode.VelocityChange);
+            if (debugLogs)
+                Debug.Log($"{nameof(PlayerThrowGrenadeOnG_Aim)}: Throw velocity = {velocity}", this);
         }
         else
         {
-            // No rigidbody - just move it forward as a fallback
             Debug.LogWarning($"{nameof(PlayerThrowGrenadeOnG_Aim)}: Grenade prefab has no Rigidbody. Add one for a real throw.", g);
         }
+
+        return true;
+    }
+
+    private Vector3 GetOwnerVelocity()
+    {
+        if (_ownerRb != null)
+            return _ownerRb.linearVelocity;
+
+        if (_ownerCharacterController != null)
+            return _ownerCharacterController.velocity;
+
+        return Vector3.zero;
     }
 
     private void SnapSoldier()
@@ -184,5 +254,32 @@ public class PlayerThrowGrenadeOnG_Aim : MonoBehaviour
             soldierMarineRoot.rotation = Quaternion.Euler(targetRotationEuler);
             soldierMarineRoot.localScale = targetScale;
         }
+    }
+
+    public void RefillGrenadesToFull()
+    {
+        currentGrenades = Mathf.Max(0, maxGrenades);
+        NotifyGrenadeCountChanged();
+
+        if (debugLogs)
+            Debug.Log($"{nameof(PlayerThrowGrenadeOnG_Aim)}: Grenades refilled to {currentGrenades}/{maxGrenades}", this);
+    }
+
+    public void SetGrenades(int amount)
+    {
+        currentGrenades = Mathf.Clamp(amount, 0, Mathf.Max(0, maxGrenades));
+        NotifyGrenadeCountChanged();
+    }
+
+    public void AddGrenades(int amount)
+    {
+        if (amount <= 0) return;
+        currentGrenades = Mathf.Clamp(currentGrenades + amount, 0, Mathf.Max(0, maxGrenades));
+        NotifyGrenadeCountChanged();
+    }
+
+    private void NotifyGrenadeCountChanged()
+    {
+        OnGrenadeCountChanged?.Invoke(currentGrenades, maxGrenades);
     }
 }

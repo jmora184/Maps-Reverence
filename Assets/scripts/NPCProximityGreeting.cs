@@ -1,15 +1,17 @@
+// 2026-03-05
+// NPCProximityGreeting.cs (UPDATED: optional auto-talk vs press-key)
+//
+// Behavior modes:
+// - Auto-talk (NPC style): if player is in range, dialog auto-opens; leaving range closes.
+// - Press-key (Ally style): if player is in range, shows prompt "Press P to talk"; press key toggles dialog.
+//
+// Uses:
+// - NPCDialogBoxUI for the dialog display.
+// - RecruitPromptUI for the on-screen prompt (singleton Show/Hide).
+
 using UnityEngine;
 
-/// Proximity greeting UI that works on BOTH NPCs and Allies.
-/// - Shows a dialog message while player is near (collider-aware distance + buffer)
-/// - Optionally drives a talk animation while visible:
-///     A) If an NPCController is present, it calls npcController.SetTalking(true/false)
-///     B) Otherwise, it can directly set an Animator bool (default: "Talking")
-///
-/// EXTRA RULES:
-/// - Prisoner/hostage allies can suppress talk and/or UI (via AllyPrisonerState.IsPrisoner)
-/// - If the character is RUNNING/WALKING (moving) or in a SHOOT state, we do NOT allow talk animation.
-///   (The greeting UI can still show, we just stop the talk animation.)
+[DisallowMultipleComponent]
 public class NPCProximityGreeting : MonoBehaviour
 {
     [Header("References")]
@@ -17,8 +19,22 @@ public class NPCProximityGreeting : MonoBehaviour
     [SerializeField] private Transform playerOverride;     // optional; drag Player
     [SerializeField] private string playerTag = "Player";
 
+    [Header("Mode")]
+    [Tooltip("If true: dialog auto-opens when in range (NPC style). If false: requires talkKey (Ally style).")]
+    public bool autoOpenDialogOnProximity = false;
+
+    [Header("Talk Input (Press-key mode)")]
+    [Tooltip("Press this key while in range to open/close the dialog box (when autoOpenDialogOnProximity=false).")]
+    public KeyCode talkKey = KeyCode.P;
+
+    [Tooltip("Prompt text shown while in range and dialog is closed (press-key mode).")]
+    public string talkPromptMessage = "Press P to talk";
+
+    [Tooltip("Use RecruitPromptUI for the prompt (recommended). If false, no prompt will show.")]
+    public bool useRecruitPromptUI = true;
+
     [Header("Optional: talk animation")]
-    [Tooltip("If present, we call npcController.SetTalking(...) while greeting is visible.")]
+    [Tooltip("If present, we call npcController.SetTalking(...) while dialog is open.")]
     [SerializeField] private NPCController npcController;
 
     [Tooltip("If npcController is not present, we can drive an Animator bool directly.")]
@@ -27,17 +43,17 @@ public class NPCProximityGreeting : MonoBehaviour
     [Tooltip("If present and IsPrisoner is true, we can suppress talk and/or UI (for Allies).")]
     [SerializeField] private AllyPrisonerState allyPrisonerState;
 
-    [Tooltip("Animator bool parameter to drive while greeting is visible.")]
+    [Tooltip("Animator bool parameter to drive while dialog is open.")]
     public string talkingBoolParam = "Talking";
 
-    [Tooltip("If true, sets Talking bool to true while visible and false when hidden.")]
+    [Tooltip("If true, sets Talking bool to true while dialog is open and false when closed.")]
     public bool driveTalkAnimation = true;
 
     [Header("Prisoner/Hostage Behavior (Allies)")]
     [Tooltip("If true, do NOT play talk animation while the ally is a prisoner.")]
     public bool suppressTalkWhenPrisoner = true;
 
-    [Tooltip("If true, do NOT show the dialog box / greeting text while the ally is a prisoner.")]
+    [Tooltip("If true, do NOT show the dialog box / prompt while the ally is a prisoner.")]
     public bool suppressUIWhenPrisoner = true;
 
     [Header("Movement / Combat suppression")]
@@ -60,8 +76,10 @@ public class NPCProximityGreeting : MonoBehaviour
     [Tooltip("Common: m_weapon_shoot. Add more if needed.")]
     public string[] stateNamesThatBlockTalk = new string[] { "m_weapon_shoot" };
 
-    [Header("Prompt")]
+    [Header("Dialog Message")]
     [TextArea] public string greeting = "Hello Captain";
+
+    [Header("Range")]
     public float range = 2.5f;
     public float rangeBuffer = 0.75f;
 
@@ -80,7 +98,9 @@ public class NPCProximityGreeting : MonoBehaviour
 
     private Transform _player;
     private Collider _selfCollider;
-    private bool _shown;
+
+    private bool _promptShown;
+    private bool _dialogOpen;
 
     // Animator param caches
     private int _talkingHash;
@@ -95,7 +115,7 @@ public class NPCProximityGreeting : MonoBehaviour
     private int _runHash;
     private bool _hasRunParam;
 
-    void Start()
+    private void Start()
     {
         _player = playerOverride ? playerOverride : FindPlayerByTag();
 
@@ -112,17 +132,17 @@ public class NPCProximityGreeting : MonoBehaviour
 
         _selfCollider = selfColliderOverride ? selfColliderOverride : GetComponentInChildren<Collider>();
 
+        // Ensure hidden at start
+        CloseDialog();
+        HidePrompt();
+
         if (debugLogs)
         {
-            Debug.Log($"[NPCProximityGreeting] player={(_player ? _player.name : "NULL")} dialogUI={(dialogUI ? dialogUI.name : "NULL")} " +
-                      $"npcController={(npcController ? npcController.name : "NULL")} allyPrisoner={(allyPrisonerState ? allyPrisonerState.IsPrisoner.ToString() : "NULL")} " +
-                      $"talkAnimator={(talkAnimator ? talkAnimator.name : "NULL")} hasTalkingParam={_hasTalkingParam} " +
-                      $"speedParam={_hasSpeedParam} walkParam={_hasWalkParam} runParam={_hasRunParam} collider={(_selfCollider ? _selfCollider.name : "NULL")}",
-                      this);
+            Debug.Log($"[NPCProximityGreeting] mode={(autoOpenDialogOnProximity ? "AUTO" : "PRESS")} player={(_player ? _player.name : "NULL")} dialogUI={(dialogUI ? dialogUI.name : "NULL")}", this);
         }
     }
 
-    void CacheAnimatorParams()
+    private void CacheAnimatorParams()
     {
         _talkingHash = Animator.StringToHash(talkingBoolParam);
         _speedHash = Animator.StringToHash(speedFloatParam);
@@ -142,20 +162,20 @@ public class NPCProximityGreeting : MonoBehaviour
         }
     }
 
-    Transform FindPlayerByTag()
+    private Transform FindPlayerByTag()
     {
         var go = GameObject.FindGameObjectWithTag(playerTag);
         return go ? go.transform : null;
     }
 
-    void Update()
+    private void Update()
     {
         if (!_player || !dialogUI) return;
 
         // Weapon-active hide (common for NPCs going hostile)
         if (hideWhenWeaponActive && weaponObject != null && weaponObject.activeInHierarchy)
         {
-            HideIfShown();
+            ForceHideAll();
             return;
         }
 
@@ -164,36 +184,65 @@ public class NPCProximityGreeting : MonoBehaviour
         // If prisoner and we suppress UI, keep everything hidden (no flicker)
         if (isPrisoner && suppressUIWhenPrisoner)
         {
-            HideIfShown();
+            ForceHideAll();
             return;
         }
 
         float d = ComputeDistance();
         bool inRange = d <= (range + rangeBuffer);
 
-        if (inRange && !_shown)
+        if (!inRange)
         {
-            dialogUI.Show(greeting);
-            _shown = true;
-            SetTalking(true);
-
-            if (debugLogs) Debug.Log($"[NPCProximityGreeting] SHOW '{greeting}' d={d:F2} thr={(range + rangeBuffer):F2}", this);
+            // Leaving range: close everything
+            if (_dialogOpen || _promptShown)
+                ForceHideAll();
+            return;
         }
-        else if (!inRange && _shown)
-        {
-            HideIfShown();
 
-            if (debugLogs) Debug.Log($"[NPCProximityGreeting] HIDE d={d:F2} thr={(range + rangeBuffer):F2}", this);
-        }
-        else if (_shown)
+        // In range
+        if (autoOpenDialogOnProximity)
         {
-            // While visible, enforce "no talk while prisoner/moving/shooting"
-            if (ShouldBlockTalkingNow())
+            // NPC-style: auto-open once, keep open while in range
+            if (!_dialogOpen)
+            {
+                OpenDialog();
+                HidePrompt();
+                if (debugLogs) Debug.Log($"[NPCProximityGreeting] AUTO OPEN d={d:F2}", this);
+            }
+
+            // While open, enforce "no talk animation while prisoner/moving/shooting"
+            if (_dialogOpen && ShouldBlockTalkingNow())
                 SetTalking(false);
+
+            return;
         }
+
+        // Ally-style: press key to toggle dialog. Show prompt while closed.
+        if (!_dialogOpen)
+            ShowPrompt();
+
+        if (Input.GetKeyDown(talkKey))
+        {
+            if (_dialogOpen)
+            {
+                CloseDialog();
+                ShowPrompt(); // still in range
+                if (debugLogs) Debug.Log($"[NPCProximityGreeting] CLOSE dialog (key) d={d:F2}", this);
+            }
+            else
+            {
+                OpenDialog();
+                HidePrompt();
+                if (debugLogs) Debug.Log($"[NPCProximityGreeting] OPEN dialog (key) d={d:F2}", this);
+            }
+        }
+
+        // While dialog is open, enforce "no talk animation while prisoner/moving/shooting"
+        if (_dialogOpen && ShouldBlockTalkingNow())
+            SetTalking(false);
     }
 
-    float ComputeDistance()
+    private float ComputeDistance()
     {
         Vector3 p = _player.position;
 
@@ -206,12 +255,54 @@ public class NPCProximityGreeting : MonoBehaviour
         return Vector3.Distance(p, transform.position);
     }
 
-    bool IsAllyPrisoner()
+    private bool IsAllyPrisoner()
     {
         return allyPrisonerState != null && allyPrisonerState.IsPrisoner;
     }
 
-    bool IsMoving()
+    private void ShowPrompt()
+    {
+        if (!_promptShown && useRecruitPromptUI)
+        {
+            RecruitPromptUI.Show(talkPromptMessage);
+            _promptShown = true;
+        }
+    }
+
+    private void HidePrompt()
+    {
+        if (_promptShown && useRecruitPromptUI)
+        {
+            RecruitPromptUI.Hide();
+            _promptShown = false;
+        }
+    }
+
+    private void OpenDialog()
+    {
+        dialogUI.Show(greeting);
+        _dialogOpen = true;
+        SetTalking(true);
+    }
+
+    private void CloseDialog()
+    {
+        if (dialogUI != null && dialogUI.IsVisible)
+            dialogUI.Hide();
+
+        _dialogOpen = false;
+
+        // Always stop talking when closing
+        if (driveTalkAnimation) SetTalking(false);
+    }
+
+    private void ForceHideAll()
+    {
+        CloseDialog();
+        HidePrompt();
+    }
+
+    private bool IsMoving()
     {
         if (talkAnimator == null) return false;
 
@@ -227,7 +318,7 @@ public class NPCProximityGreeting : MonoBehaviour
         return false;
     }
 
-    bool IsInBlockedState()
+    private bool IsInBlockedState()
     {
         if (!suppressTalkInStates) return false;
         if (talkAnimator == null) return false;
@@ -244,24 +335,21 @@ public class NPCProximityGreeting : MonoBehaviour
         return false;
     }
 
-    bool ShouldBlockTalkingNow()
+    private bool ShouldBlockTalkingNow()
     {
-        // Prisoner rule
         if (suppressTalkWhenPrisoner && IsAllyPrisoner())
             return true;
 
-        // Movement rule
         if (suppressTalkWhenMoving && IsMoving())
             return true;
 
-        // Shooting/state rule
         if (IsInBlockedState())
             return true;
 
         return false;
     }
 
-    void SetTalking(bool talking)
+    private void SetTalking(bool talking)
     {
         if (!driveTalkAnimation) return;
 
@@ -283,18 +371,8 @@ public class NPCProximityGreeting : MonoBehaviour
         }
     }
 
-    void HideIfShown()
+    private void OnDisable()
     {
-        if (!_shown) return;
-        dialogUI.Hide();
-        _shown = false;
-
-        // Always stop talking when hiding
-        if (driveTalkAnimation) SetTalking(false);
-    }
-
-    void OnDisable()
-    {
-        HideIfShown();
+        ForceHideAll();
     }
 }

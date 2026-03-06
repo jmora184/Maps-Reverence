@@ -6,7 +6,7 @@ using UnityEngine;
 /// <summary>
 /// Put this on your "Base" BoxCollider GameObject (the collider must have Is Trigger = ON).
 /// When something enters:
-/// - Player: refills health + ammo
+/// - Player: refills health + ammo + grenades
 /// - Allies: refills health (no AllyController edits required)
 ///
 /// IMPORTANT (Unity trigger rule):
@@ -25,6 +25,7 @@ public class BaseRefillZone : MonoBehaviour
     [Header("What to refill")]
     public bool refillHealth = true;
     public bool refillAmmo = true;
+    public bool refillGrenades = true;
 
     [Tooltip("If true, allies that enter this zone also get healed to full (no AllyController edits needed).")]
     public bool refillAllies = true;
@@ -75,11 +76,18 @@ public class BaseRefillZone : MonoBehaviour
 
         if (refillHealth) RefillPlayerHealth(player);
         if (refillAmmo) RefillPlayerAmmo(player);
+        if (refillGrenades) RefillPlayerGrenades(player);
 
         _nextAllowedTime = Time.time + Mathf.Max(0.05f, repeatCooldown);
 
         if (debugLogs)
-            Debug.Log($"[BaseRefillZone] Refilled {(refillHealth ? "health" : "")}{(refillHealth && refillAmmo ? " + " : "")}{(refillAmmo ? "ammo" : "")} for {player.name} ({(entering ? "enter" : "stay")}).", this);
+        {
+            List<string> parts = new List<string>();
+            if (refillHealth) parts.Add("health");
+            if (refillAmmo) parts.Add("ammo");
+            if (refillGrenades) parts.Add("grenades");
+            Debug.Log($"[BaseRefillZone] Refilled {string.Join(" + ", parts)} for {player.name} ({(entering ? "enter" : "stay")}).", this);
+        }
     }
 
     private GameObject ResolvePlayer(Collider other)
@@ -376,6 +384,111 @@ public class BaseRefillZone : MonoBehaviour
 
         if (debugLogs)
             Debug.Log($"[BaseRefillZone] Refilled ammo on {refilledCount}/{ammoComponents.Count} WeaponAmmo components.", this);
+    }
+
+    // --------------------
+    // PLAYER GRENADE REFILL
+    // --------------------
+    private void RefillPlayerGrenades(GameObject player)
+    {
+        var thrower = player.GetComponentInParent<PlayerThrowGrenadeOnG_Aim>();
+        if (thrower == null)
+            thrower = player.GetComponentInChildren<PlayerThrowGrenadeOnG_Aim>(true);
+
+        if (thrower != null)
+        {
+            thrower.RefillGrenadesToFull();
+
+            if (debugLogs)
+                Debug.Log($"[BaseRefillZone] Refilled grenades on {thrower.gameObject.name} to full.", this);
+            return;
+        }
+
+        // Fallback support in case the throw script moves or gets renamed later.
+        var monos = player.GetComponentsInChildren<MonoBehaviour>(true);
+        foreach (var mb in monos)
+        {
+            if (mb == null) continue;
+            if (TryRefillGrenadesViaReflection(mb))
+            {
+                if (debugLogs)
+                    Debug.Log($"[BaseRefillZone] Refilled grenades via reflection on {mb.gameObject.name} ({mb.GetType().Name}).", this);
+                return;
+            }
+        }
+
+        if (debugLogs)
+            Debug.LogWarning("[BaseRefillZone] No grenade throw script found to refill grenades.", this);
+    }
+
+    private bool TryRefillGrenadesViaReflection(MonoBehaviour mb)
+    {
+        var typeName = mb.GetType().Name.ToLowerInvariant();
+        if (!typeName.Contains("grenade")) return false;
+
+        var t = mb.GetType();
+
+        var refillMethod = t.GetMethod("RefillGrenadesToFull", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+        if (refillMethod != null)
+        {
+            refillMethod.Invoke(mb, null);
+            return true;
+        }
+
+        string[] currentNames = { "currentGrenades", "grenadeCount", "currentGrenadeCount" };
+        string[] maxNames = { "maxGrenades", "startingGrenades", "maxGrenadeCount" };
+
+        bool TryGetInt(string[] names, out int value)
+        {
+            foreach (var n in names)
+            {
+                var p = t.GetProperty(n, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (p != null && p.PropertyType == typeof(int) && p.CanRead)
+                {
+                    value = (int)p.GetValue(mb);
+                    return true;
+                }
+
+                var f = t.GetField(n, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (f != null && f.FieldType == typeof(int))
+                {
+                    value = (int)f.GetValue(mb);
+                    return true;
+                }
+            }
+
+            value = 0;
+            return false;
+        }
+
+        bool TrySetInt(string[] names, int value)
+        {
+            foreach (var n in names)
+            {
+                var p = t.GetProperty(n, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (p != null && p.PropertyType == typeof(int) && p.CanWrite)
+                {
+                    p.SetValue(mb, value);
+                    return true;
+                }
+
+                var f = t.GetField(n, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (f != null && f.FieldType == typeof(int))
+                {
+                    f.SetValue(mb, value);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        if (TryGetInt(maxNames, out int maxGrenades) && maxGrenades > 0)
+        {
+            if (TrySetInt(currentNames, maxGrenades))
+                return true;
+        }
+
+        return false;
     }
 
     private bool TryCallCommonRefillMethods(MonoBehaviour ammo)

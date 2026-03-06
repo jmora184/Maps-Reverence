@@ -700,7 +700,7 @@ public class EncounterDirectorPOC : MonoBehaviour
             go.AddComponent<EncounterDefendAgent>();
     }
 
-    
+
     private void EnsureObjectiveRouter(GameObject go, SpawnGroup group, Transform teamRoot, Vector3[] patrolWorld, Vector3 defendCenter, float defendRadius, bool isDefend)
     {
         if (go == null) return;
@@ -732,7 +732,7 @@ public class EncounterDirectorPOC : MonoBehaviour
         else if (patrolWorld != null && patrolWorld.Length > 0)
             router.SetPatrol(patrolWorld);
     }
-private bool HasAnyMovementController(GameObject go)
+    private bool HasAnyMovementController(GameObject go)
     {
         // If any of these exist, the prefab is already driving movement (we should NOT add built-in agents).
         if (go.GetComponentInChildren<Enemy2Controller>(true) != null) return true;
@@ -941,7 +941,7 @@ private bool HasAnyMovementController(GameObject go)
             data.iconRect.localScale = Vector3.one;
             ApplyEnemyTeamStarImageScale(data.iconRect, s);
             MaybeLogEnemyIconScale(data.teamRootName, liveCount, s, data.iconRect);
-// Keep above other UI elements that may be rebuilt/reordered.
+            // Keep above other UI elements that may be rebuilt/reordered.
             data.iconRect.SetAsLastSibling();
         }
     }
@@ -973,7 +973,7 @@ private bool HasAnyMovementController(GameObject go)
         return fallbackTeamRoot != null ? fallbackTeamRoot.position : transform.position;
     }
 
-    
+
 
     // --- Enemy Team Icon scaling helpers (StarImage-based) ---
     // Some UI scripts keep the icon root scale at (1,1,1). To ensure the visual skull/star scales,
@@ -1011,7 +1011,7 @@ private bool HasAnyMovementController(GameObject go)
         return null;
     }
 
-// ---------------- Data ----------------
+    // ---------------- Data ----------------
 
     [Serializable]
     public struct SpawnGroup
