@@ -1,22 +1,16 @@
 using System.Collections;
 using UnityEngine;
+using UnityEngine.AI;
 
 /// <summary>
-/// DroneEnemyController (v4)
-/// Adds:
-/// - "Return fire" aggro window like your Enemy2Controller (damage aggro hold time + lose-distance override)
-/// - Built-in health + TakeDamage + Die pipeline
-/// - On death: trigger die animation, rotate 90° on Z, and fall to ground (Rigidbody gravity if present)
-///
-/// Aiming:
-/// - Shoots at target AimPoint (child named "AimPoint") if present; otherwise collider center; otherwise target.position + offset.
-///
-/// NOTES:
-/// - For best results, give the DroneRoot a Rigidbody (gravity OFF, isKinematic ON while alive).
-///   On death we flip it to non-kinematic + gravity ON so it falls.
-/// - Give the DroneRoot a simple collider (Capsule/Box) so physics and bullets work.
+/// DroneEnemyController
+/// - Uses NavMeshAgent for patrol/combat pathing
+/// - Snaps to the nearest NavMesh on enable/start so floating drones can still move
+/// - Keeps hover via NavMeshAgent.baseOffset
+/// - Uses horizontal arrival checks for ground waypoints
 /// </summary>
 [DisallowMultipleComponent]
+[RequireComponent(typeof(NavMeshAgent))]
 public class DroneEnemyController : MonoBehaviour
 {
     public enum DroneState { Patrol, Combat, Disabled }
@@ -28,7 +22,6 @@ public class DroneEnemyController : MonoBehaviour
     [Header("Targeting")]
     public Transform combatTarget;
     public TargetingMode targetingMode = TargetingMode.PlayerAndAllies;
-
     public string playerTag = "Player";
     public string allyTag = "Ally";
 
@@ -48,26 +41,20 @@ public class DroneEnemyController : MonoBehaviour
     public bool allowRetargeting = true;
 
     [Header("Return Fire When Hit From Far")]
-    [Tooltip("If true, when hit, we keep aggro for a short time and are allowed to not drop chase until farther away.")]
     public bool returnFireWhenHitFromFar = true;
-
-    [Tooltip("How many seconds after taking damage we keep aggro even if the target is far beyond distanceToLose.")]
     public float damageAggroHoldSeconds = 8f;
-
-    [Tooltip("While within the damage aggro window, we won't drop chase until the target is at least this far. If 0, uses distanceToLose.")]
     public float damageAggroLoseOverrideDistance = 80f;
 
     [Header("Aim")]
     public string aimPointChildName = "AimPoint";
     public float fallbackAimYOffset = 1.2f;
-
-    [Tooltip("If projectilePrefab is used and this is > 0, applies basic leading based on target Rigidbody velocity.")]
     public float projectileLeadStrength = 0.6f;
 
     [Header("Flight / Hover")]
+    [Tooltip("Visual/base hover height above the baked NavMesh / ground.")]
     public float hoverHeight = 6f;
 
-    [Tooltip("If true, hover relative to target's Y (target.y + targetHeightOffset) instead of ground.")]
+    [Tooltip("If true, tries to hover relative to target's Y during combat by adjusting baseOffset.")]
     public bool hoverRelativeToTargetY = false;
 
     public float targetHeightOffset = 3f;
@@ -81,27 +68,17 @@ public class DroneEnemyController : MonoBehaviour
     [Header("Combat Movement")]
     public float standoffDistance = 10f;
     public float tooCloseDistance = 6f;
-
-    [Tooltip("Orbiting around target while in combat (0 disables).")]
     public float orbitStrength = 2.5f;
-
-    [Tooltip("1 = clockwise, -1 = counter-clockwise.")]
     public float orbitDirection = 1f;
-
     public bool randomizeOrbitOnAggro = true;
 
     [Header("Weapon")]
-    [Tooltip("FirePoint / Muzzle transform (where lasers/projectiles spawn from).")]
     public Transform muzzle;
-
-    [Tooltip("If assigned, projectile will be spawned here and given initial velocity.")]
     public GameObject projectilePrefab;
-
     public float projectileSpeed = 35f;
     public float hitscanRange = 60f;
     public float fireCooldown = 0.25f;
     public int damagePerShot = 5;
-
     public bool requireLineOfSight = true;
     public LayerMask losBlockLayers = ~0;
 
@@ -111,49 +88,76 @@ public class DroneEnemyController : MonoBehaviour
     public float arriveDistance = 1.2f;
     public float waitSecondsAtPoint = 0f;
 
+    [Header("NavMesh Attach")]
+    [Tooltip("When enabled, the drone will snap to the nearest NavMesh point on enable/start.")]
+    public bool snapToNavMeshOnEnable = true;
+
+    [Tooltip("Search radius for finding the nearest NavMesh point from the drone's spawn position.")]
+    public float navMeshSnapRadius = 80f;
+
+    [Tooltip("If the drone ever loses NavMesh binding during play, try snapping again.")]
+    public bool retrySnapWhenOffNavMesh = true;
+
+    [Tooltip("How often to retry NavMesh snapping when off-mesh.")]
+    public float retrySnapInterval = 0.5f;
+
     [Header("Health / Death")]
     public int maxHealth = 50;
     public int currentHealth = 50;
-
-    [Tooltip("Explosion VFX prefab to spawn when the drone dies (optional).")]
     public GameObject explosionPrefab;
-
-    
-    [Tooltip("Offset for where the explosion spawns (use Y to move it up).")]
     public Vector3 explosionOffset = new Vector3(0f, 1.2f, 0f);
-
-[Tooltip("Disable colliders on death so the wreck doesn't block anything or keep taking hits.")]
     public bool disableCollidersOnDeath = true;
-
-    [Tooltip("Destroy the drone GameObject after death.")]
     public bool destroyOnDeath = true;
-
-    [Tooltip("Seconds to wait before destroying the drone after death (lets explosion VFX play).")]
     public float destroyDelay = 2.5f;
 
-[Header("Debug")]
+    [Header("Debug")]
     public bool drawGizmos = true;
 
-    // Internals
     private Rigidbody _rb;
-    private Vector3 _velocity;
+    private NavMeshAgent _agent;
     private int _wpIndex = 0;
     private int _wpDir = 1;
     private float _nextFireTime = 0f;
     private float _lostTargetTimer = 0f;
     private bool _waiting = false;
-
     private float _nextAcquireTime = 0f;
     private float _damageAggroUntil = 0f;
-
     private bool _isDead = false;
+    private Vector3 _lastMoveDir = Vector3.forward;
+    private Vector3 _lastRequestedDestination;
+    private float _nextSnapRetryTime = 0f;
 
     private static readonly Collider[] _overlapBuffer = new Collider[64];
 
     private void Awake()
     {
         _rb = GetComponent<Rigidbody>();
-        if (currentHealth <= 0) currentHealth = maxHealth;
+        _agent = GetComponent<NavMeshAgent>();
+
+        if (currentHealth <= 0)
+            currentHealth = maxHealth;
+
+        if (_agent != null)
+        {
+            _agent.speed = moveSpeed;
+            _agent.acceleration = acceleration;
+            _agent.angularSpeed = 120f;
+            _agent.stoppingDistance = 0f;
+            _agent.updateRotation = false;
+            _agent.autoBraking = true;
+            _agent.baseOffset = hoverHeight;
+        }
+
+        if (_rb != null)
+        {
+            _rb.useGravity = false;
+            _rb.isKinematic = true;
+        }
+    }
+
+    private void Start()
+    {
+        TrySnapToNavMeshImmediate();
     }
 
     private void OnEnable()
@@ -163,18 +167,32 @@ public class DroneEnemyController : MonoBehaviour
         state = (combatTarget != null) ? DroneState.Combat : DroneState.Patrol;
         _lostTargetTimer = 0f;
         _waiting = false;
-        _nextFireTime = Time.time + Random.Range(0f, fireCooldown);
-        _nextAcquireTime = Time.time + Random.Range(0f, autoAcquireInterval);
+        _nextFireTime = Time.time + Random.Range(0f, Mathf.Max(0.05f, fireCooldown));
+        _nextAcquireTime = Time.time + Random.Range(0f, Mathf.Max(0.05f, autoAcquireInterval));
+        _nextSnapRetryTime = Time.time;
+
+        if (_agent != null)
+        {
+            _agent.isStopped = false;
+            _agent.ResetPath();
+            _agent.baseOffset = hoverHeight;
+        }
+
+        TrySnapToNavMeshImmediate();
     }
 
     private void Update()
     {
-        if (_isDead || state == DroneState.Disabled) return;
+        if (_isDead || state == DroneState.Disabled)
+            return;
 
-        // Auto-acquire targets periodically
+        SyncAgentSettings();
+        EnsureOnNavMeshIfNeeded();
+        UpdateHoverOffset();
+
         if (Time.time >= _nextAcquireTime)
         {
-            _nextAcquireTime = Time.time + autoAcquireInterval;
+            _nextAcquireTime = Time.time + Mathf.Max(0.05f, autoAcquireInterval);
 
             if (combatTarget == null)
             {
@@ -188,32 +206,34 @@ public class DroneEnemyController : MonoBehaviour
                 {
                     float curD = Vector3.Distance(transform.position, combatTarget.position);
                     float newD = Vector3.Distance(transform.position, better.position);
-                    if (newD + 1.0f < curD) combatTarget = better; // small hysteresis
+                    if (newD + 1.0f < curD)
+                        combatTarget = better;
                 }
             }
         }
 
         switch (state)
         {
-            case DroneState.Patrol: TickPatrol(); break;
-            case DroneState.Combat: TickCombat(); break;
+            case DroneState.Patrol:
+                TickPatrol();
+                break;
+            case DroneState.Combat:
+                TickCombat();
+                break;
         }
+
+        UpdateFacing();
     }
 
     #region Damage / Health
 
-    /// <summary>
-    /// Generic damage entrypoint (SendMessage-compatible).
-    /// You can call drone.SendMessage("TakeDamage", amount) or call directly.
-    /// </summary>
     public void TakeDamage(int amount)
     {
-        if (_isDead) return;
-        if (amount <= 0) return;
+        if (_isDead || amount <= 0)
+            return;
 
         currentHealth -= amount;
 
-        // Return-fire behavior
         if (returnFireWhenHitFromFar)
             _damageAggroUntil = Time.time + Mathf.Max(0f, damageAggroHoldSeconds);
 
@@ -228,15 +248,12 @@ public class DroneEnemyController : MonoBehaviour
 
     #region Public Aggro API
 
-    /// <summary>Call from your bullet/damage code to make the drone fight back.</summary>
     public void GetShot(GameObject attacker)
     {
-        if (_isDead) return;
-        if (attacker == null) return;
+        if (_isDead || attacker == null) return;
         GetShot(attacker.transform);
     }
 
-    /// <summary>Preferred overload: pass shooter transform.</summary>
     public void GetShot(Transform attacker)
     {
         if (_isDead) return;
@@ -255,8 +272,7 @@ public class DroneEnemyController : MonoBehaviour
 
     public void SetCombatTarget(Transform target)
     {
-        if (_isDead) return;
-        if (target == null) return;
+        if (_isDead || target == null) return;
 
         if (onlyAggroIfTargetInRange)
         {
@@ -279,6 +295,7 @@ public class DroneEnemyController : MonoBehaviour
         combatTarget = null;
         _lostTargetTimer = 0f;
         state = DroneState.Patrol;
+        StopAgent();
     }
 
     #endregion
@@ -323,15 +340,12 @@ public class DroneEnemyController : MonoBehaviour
         switch (targetingMode)
         {
             case TargetingMode.PlayerOnly:
-                return (!string.IsNullOrEmpty(playerTag) && t.CompareTag(playerTag));
-
+                return !string.IsNullOrEmpty(playerTag) && t.CompareTag(playerTag);
             case TargetingMode.AlliesOnly:
-                return (!string.IsNullOrEmpty(allyTag) && t.CompareTag(allyTag));
-
+                return !string.IsNullOrEmpty(allyTag) && t.CompareTag(allyTag);
             case TargetingMode.PlayerAndAllies:
-                return
-                    (!string.IsNullOrEmpty(playerTag) && t.CompareTag(playerTag)) ||
-                    (!string.IsNullOrEmpty(allyTag) && t.CompareTag(allyTag));
+                return (!string.IsNullOrEmpty(playerTag) && t.CompareTag(playerTag)) ||
+                       (!string.IsNullOrEmpty(allyTag) && t.CompareTag(allyTag));
         }
 
         return false;
@@ -343,33 +357,34 @@ public class DroneEnemyController : MonoBehaviour
 
     private void TickPatrol()
     {
-        if (_waiting) return;
-
-        Vector3 targetPos;
-        if (waypoints != null && waypoints.Length > 0 && waypoints[_wpIndex] != null)
-            targetPos = ComputeHoverPosition(waypoints[_wpIndex].position, null);
-        else
-            targetPos = ComputeHoverPosition(transform.position, null);
-
-        MoveTowards(targetPos);
-
-        if (waypoints != null && waypoints.Length > 0 && waypoints[_wpIndex] != null)
+        if (_waiting)
         {
-            float d = Vector3.Distance(transform.position, targetPos);
-            if (d <= arriveDistance)
-            {
-                AdvanceWaypoint();
-                if (waitSecondsAtPoint > 0f && gameObject.activeInHierarchy)
-                    StartCoroutine(PatrolWait());
-            }
+            StopAgent();
+            return;
         }
 
-        FaceDirection(_velocity.sqrMagnitude > 0.001f ? _velocity : transform.forward);
+        if (waypoints == null || waypoints.Length == 0 || _wpIndex < 0 || _wpIndex >= waypoints.Length || waypoints[_wpIndex] == null)
+        {
+            StopAgent();
+            return;
+        }
+
+        Vector3 rawWaypoint = waypoints[_wpIndex].position;
+        Vector3 navTarget = GetBestNavDestination(rawWaypoint);
+        MoveAgentTo(navTarget);
+
+        if (HasReachedAgentDestination(navTarget, arriveDistance))
+        {
+            AdvanceWaypoint();
+            if (waitSecondsAtPoint > 0f && gameObject.activeInHierarchy)
+                StartCoroutine(PatrolWait());
+        }
     }
 
     private IEnumerator PatrolWait()
     {
         _waiting = true;
+        StopAgent();
         yield return new WaitForSeconds(waitSecondsAtPoint);
         _waiting = false;
     }
@@ -381,22 +396,25 @@ public class DroneEnemyController : MonoBehaviour
         if (pingPong)
         {
             _wpIndex += _wpDir;
+
             if (_wpIndex >= waypoints.Length)
             {
-                _wpIndex = waypoints.Length - 2;
+                _wpIndex = Mathf.Max(0, waypoints.Length - 2);
                 _wpDir = -1;
             }
             else if (_wpIndex < 0)
             {
-                _wpIndex = 1;
+                _wpIndex = Mathf.Min(1, waypoints.Length - 1);
                 _wpDir = 1;
             }
+
             _wpIndex = Mathf.Clamp(_wpIndex, 0, waypoints.Length - 1);
         }
         else
         {
             _wpIndex++;
-            if (_wpIndex >= waypoints.Length) _wpIndex = 0;
+            if (_wpIndex >= waypoints.Length)
+                _wpIndex = 0;
         }
     }
 
@@ -409,50 +427,55 @@ public class DroneEnemyController : MonoBehaviour
         if (combatTarget == null)
         {
             Transform found = AcquireTarget();
-            if (found != null) combatTarget = found;
-            else { state = DroneState.Patrol; return; }
+            if (found != null)
+            {
+                combatTarget = found;
+            }
+            else
+            {
+                state = DroneState.Patrol;
+                return;
+            }
         }
 
         float dist = Vector3.Distance(transform.position, combatTarget.position);
 
-        // Lose-target logic (damage aggro can override lose distance)
         float loseDist = distanceToLose;
-        if (returnFireWhenHitFromFar && Time.time <= _damageAggroUntil)
-        {
-            if (damageAggroLoseOverrideDistance > 0f)
-                loseDist = Mathf.Max(loseDist, damageAggroLoseOverrideDistance);
-        }
+        if (returnFireWhenHitFromFar && Time.time <= _damageAggroUntil && damageAggroLoseOverrideDistance > 0f)
+            loseDist = Mathf.Max(loseDist, damageAggroLoseOverrideDistance);
 
         if (dist > loseDist)
         {
             _lostTargetTimer += Time.deltaTime;
-            if (_lostTargetTimer >= keepChasingTime) { ClearCombatTarget(); return; }
+            if (_lostTargetTimer >= keepChasingTime)
+            {
+                ClearCombatTarget();
+                return;
+            }
         }
-        else _lostTargetTimer = 0f;
+        else
+        {
+            _lostTargetTimer = 0f;
+        }
 
         Vector3 desiredPos = ComputeCombatDesiredPosition(combatTarget.position, dist);
-        MoveTowards(desiredPos);
-
-        Vector3 toTarget = GetAimPoint(combatTarget) - transform.position;
-        if (toTarget.sqrMagnitude > 0.001f) FaceDirection(toTarget);
+        Vector3 navTarget = GetBestNavDestination(desiredPos);
+        MoveAgentTo(navTarget);
 
         TryShoot(combatTarget, dist);
     }
 
     private Vector3 ComputeCombatDesiredPosition(Vector3 targetWorldPos, float distToTarget)
     {
-        Vector3 flatToTarget = (targetWorldPos - transform.position);
+        Vector3 flatToTarget = targetWorldPos - transform.position;
         flatToTarget.y = 0f;
         Vector3 flatDir = (flatToTarget.sqrMagnitude > 0.0001f) ? flatToTarget.normalized : transform.forward;
 
         Vector3 standoffPoint = targetWorldPos - flatDir * standoffDistance;
-        standoffPoint = ComputeHoverPosition(standoffPoint, combatTarget);
 
         if (distToTarget < tooCloseDistance)
         {
-            Vector3 backoff = targetWorldPos - flatDir * (standoffDistance + (tooCloseDistance - distToTarget) * 2f);
-            backoff = ComputeHoverPosition(backoff, combatTarget);
-            return backoff;
+            return targetWorldPos - flatDir * (standoffDistance + (tooCloseDistance - distToTarget) * 2f);
         }
 
         if (orbitStrength > 0.01f)
@@ -467,8 +490,7 @@ public class DroneEnemyController : MonoBehaviour
     private void TryShoot(Transform target, float dist)
     {
         if (Time.time < _nextFireTime) return;
-
-        if (muzzle == null) muzzle = transform; // fallback if you forgot to assign FirePoint
+        if (muzzle == null) muzzle = transform;
         if (dist > hitscanRange) return;
 
         Vector3 origin = muzzle.position;
@@ -476,7 +498,7 @@ public class DroneEnemyController : MonoBehaviour
 
         if (requireLineOfSight)
         {
-            Vector3 dir = (aimPoint - origin);
+            Vector3 dir = aimPoint - origin;
             float len = dir.magnitude;
             if (len < 0.001f) return;
             dir /= len;
@@ -488,7 +510,7 @@ public class DroneEnemyController : MonoBehaviour
         }
 
         FireOnce(target, origin, aimPoint);
-        _nextFireTime = Time.time + fireCooldown;
+        _nextFireTime = Time.time + Mathf.Max(0.01f, fireCooldown);
     }
 
     private void FireOnce(Transform target, Vector3 origin, Vector3 aimPoint)
@@ -497,7 +519,6 @@ public class DroneEnemyController : MonoBehaviour
         {
             Vector3 finalAim = aimPoint;
 
-            // Optional: lead aim for moving targets
             if (projectileLeadStrength > 0f)
             {
                 Rigidbody trgRb = target.GetComponentInChildren<Rigidbody>();
@@ -510,7 +531,6 @@ public class DroneEnemyController : MonoBehaviour
             }
 
             Vector3 aimDir = (finalAim - origin).normalized;
-
             Quaternion rot = Quaternion.LookRotation(aimDir, Vector3.up);
             GameObject proj = Instantiate(projectilePrefab, origin, rot);
 
@@ -525,9 +545,7 @@ public class DroneEnemyController : MonoBehaviour
         }
         else
         {
-            // Hitscan fallback
             Vector3 dir = (aimPoint - origin).normalized;
-
             if (Physics.Raycast(origin, dir, out RaycastHit hit, hitscanRange, ~0, QueryTriggerInteraction.Ignore))
             {
                 hit.transform.SendMessage("TakeDamage", damagePerShot, SendMessageOptions.DontRequireReceiver);
@@ -540,18 +558,15 @@ public class DroneEnemyController : MonoBehaviour
     {
         if (target == null) return transform.position + transform.forward * 10f;
 
-        // 1) Prefer explicit AimPoint child (deep search)
         if (!string.IsNullOrEmpty(aimPointChildName))
         {
             Transform ap = FindChildByName(target, aimPointChildName);
             if (ap != null) return ap.position;
         }
 
-        // 2) Collider bounds center
         Collider c = target.GetComponentInChildren<Collider>();
         if (c != null) return c.bounds.center;
 
-        // 3) Fallback
         return target.position + Vector3.up * fallbackAimYOffset;
     }
 
@@ -569,86 +584,211 @@ public class DroneEnemyController : MonoBehaviour
     private bool IsHitTarget(Transform hit, Transform target)
     {
         if (hit == null || target == null) return false;
-        if (hit == target) return true;
-        return hit.IsChildOf(target);
+        return hit == target || hit.IsChildOf(target);
     }
 
     #endregion
 
-    #region Movement
+    #region NavMesh Movement
 
-    private void MoveTowards(Vector3 worldPos)
+    private void SyncAgentSettings()
     {
-        Vector3 to = worldPos - transform.position;
-        Vector3 desiredVel = (to.sqrMagnitude > 0.0001f) ? to.normalized * moveSpeed : Vector3.zero;
+        if (_agent == null) return;
 
-        float dist = to.magnitude;
-        if (dist < 2f)
-        {
-            float t = Mathf.InverseLerp(0f, 2f, dist);
-            desiredVel *= t;
-        }
-
-        _velocity = Vector3.Lerp(_velocity, desiredVel, 1f - Mathf.Exp(-acceleration * Time.deltaTime));
-
-        if (maxVerticalSpeed > 0f)
-            _velocity.y = Mathf.Clamp(_velocity.y, -maxVerticalSpeed, maxVerticalSpeed);
-
-        Vector3 nextPos = transform.position + _velocity * Time.deltaTime;
-
-        if (_rb != null && !_rb.isKinematic)
-            _rb.MovePosition(nextPos);
-        else
-            transform.position = nextPos;
+        _agent.speed = moveSpeed;
+        _agent.acceleration = acceleration;
+        _agent.updateRotation = false;
+        _agent.baseOffset = hoverHeight;
     }
 
-    private void FaceDirection(Vector3 dir)
+    private void EnsureOnNavMeshIfNeeded()
     {
-        dir.y = 0f; // yaw-only to keep drone level. Remove this line if you want pitch/tilt.
-        if (dir.sqrMagnitude < 0.0001f) return;
+        if (_agent == null || !_agent.enabled)
+            return;
 
-        Quaternion targetRot = Quaternion.LookRotation(dir.normalized, Vector3.up);
+        if (_agent.isOnNavMesh)
+            return;
+
+        if (!retrySnapWhenOffNavMesh)
+            return;
+
+        if (Time.time < _nextSnapRetryTime)
+            return;
+
+        _nextSnapRetryTime = Time.time + Mathf.Max(0.05f, retrySnapInterval);
+        TrySnapToNavMeshImmediate();
+    }
+
+    private bool TrySnapToNavMeshImmediate()
+    {
+        if (_agent == null || !_agent.enabled)
+            return false;
+
+        if (_agent.isOnNavMesh)
+            return true;
+
+        if (!snapToNavMeshOnEnable)
+            return false;
+
+        float radius = Mathf.Max(0.5f, navMeshSnapRadius);
+        Vector3 searchOrigin = transform.position;
+
+        if (NavMesh.SamplePosition(searchOrigin, out NavMeshHit hit, radius, _agent.areaMask))
+        {
+            transform.position = hit.position;
+            _agent.Warp(hit.position);
+            _agent.baseOffset = hoverHeight;
+            _lastRequestedDestination = hit.position;
+            return _agent.isOnNavMesh;
+        }
+
+        return false;
+    }
+
+    private void UpdateHoverOffset()
+    {
+        if (_agent == null) return;
+
+        float desiredOffset = hoverHeight;
+
+        if (hoverRelativeToTargetY && combatTarget != null)
+        {
+            float groundY = GetGroundYNearPosition(transform.position, out bool foundGround);
+            if (foundGround)
+                desiredOffset = Mathf.Max(0f, (combatTarget.position.y + targetHeightOffset) - groundY);
+        }
+
+        _agent.baseOffset = desiredOffset;
+    }
+
+    private void MoveAgentTo(Vector3 worldPos)
+    {
+        if (_agent == null || !_agent.enabled)
+            return;
+
+        if (!_agent.isOnNavMesh)
+            return;
+
+        _agent.isStopped = false;
+
+        if ((_lastRequestedDestination - worldPos).sqrMagnitude > 0.04f)
+        {
+            _agent.SetDestination(worldPos);
+            _lastRequestedDestination = worldPos;
+        }
+    }
+
+    private void StopAgent()
+    {
+        if (_agent == null || !_agent.enabled || !_agent.isOnNavMesh)
+            return;
+
+        _agent.isStopped = true;
+        _agent.ResetPath();
+    }
+
+    private bool HasReachedAgentDestination(Vector3 worldPos, float threshold)
+    {
+        float finalThreshold = Mathf.Max(0.05f, threshold);
+
+        if (_agent != null && _agent.enabled && _agent.isOnNavMesh)
+        {
+            if (_agent.pathPending)
+                return false;
+
+            if (_agent.hasPath)
+            {
+                if (_agent.remainingDistance > finalThreshold)
+                    return false;
+
+                Vector3 flatAgent = _agent.nextPosition;
+                Vector3 flatTarget = worldPos;
+                flatAgent.y = 0f;
+                flatTarget.y = 0f;
+                return Vector3.Distance(flatAgent, flatTarget) <= finalThreshold + 0.25f;
+            }
+        }
+
+        Vector3 a = transform.position;
+        Vector3 b = worldPos;
+        a.y = 0f;
+        b.y = 0f;
+        return Vector3.Distance(a, b) <= finalThreshold;
+    }
+
+    private Vector3 GetBestNavDestination(Vector3 desiredWorldPos)
+    {
+        if (_agent != null && _agent.enabled)
+        {
+            float sampleRadius = Mathf.Max(2f, _agent.radius * 6f);
+            if (NavMesh.SamplePosition(desiredWorldPos, out NavMeshHit hit, sampleRadius, _agent.areaMask))
+                return hit.position;
+        }
+
+        return desiredWorldPos;
+    }
+
+    private void UpdateFacing()
+    {
+        Vector3 dir = Vector3.zero;
+
+        if (_agent != null && _agent.enabled)
+            dir = _agent.desiredVelocity;
+
+        if (dir.sqrMagnitude < 0.001f && combatTarget != null)
+            dir = GetAimPoint(combatTarget) - transform.position;
+
+        dir.y = 0f;
+        if (dir.sqrMagnitude < 0.001f)
+            return;
+
+        _lastMoveDir = dir.normalized;
+        Quaternion targetRot = Quaternion.LookRotation(_lastMoveDir, Vector3.up);
         transform.rotation = Quaternion.Slerp(transform.rotation, targetRot, 1f - Mathf.Exp(-turnSpeed * Time.deltaTime));
     }
 
-    private Vector3 ComputeHoverPosition(Vector3 referencePos, Transform target)
+    private float GetGroundYNearPosition(Vector3 pos, out bool found)
     {
-        float desiredY = referencePos.y;
+        found = false;
 
-        if (hoverRelativeToTargetY && target != null)
+        if (groundLayers.value != 0)
         {
-            desiredY = target.position.y + targetHeightOffset;
-        }
-        else if (groundLayers.value != 0)
-        {
-            Vector3 origin = new Vector3(referencePos.x, referencePos.y + 50f, referencePos.z);
+            Vector3 origin = new Vector3(pos.x, pos.y + 50f, pos.z);
             if (Physics.Raycast(origin, Vector3.down, out RaycastHit hit, 200f, groundLayers, QueryTriggerInteraction.Ignore))
-                desiredY = hit.point.y + hoverHeight;
-            else
-                desiredY = transform.position.y;
-        }
-        else
-        {
-            desiredY = transform.position.y;
+            {
+                found = true;
+                return hit.point.y;
+            }
         }
 
-        return new Vector3(referencePos.x, desiredY, referencePos.z);
+        if (_agent != null && _agent.enabled && _agent.isOnNavMesh)
+        {
+            found = true;
+            return _agent.nextPosition.y;
+        }
+
+        return pos.y;
     }
 
     #endregion
 
     #region Death
 
-        private void Die()
+    private void Die()
     {
         if (_isDead) return;
         _isDead = true;
 
         state = DroneState.Disabled;
         combatTarget = null;
-        _velocity = Vector3.zero;
 
-        // Stop any remaining motion/physics.
+        if (_agent != null)
+        {
+            if (_agent.enabled && _agent.isOnNavMesh)
+                _agent.ResetPath();
+            _agent.enabled = false;
+        }
+
         if (_rb != null)
         {
             _rb.linearVelocity = Vector3.zero;
@@ -656,28 +796,22 @@ public class DroneEnemyController : MonoBehaviour
             _rb.isKinematic = true;
         }
 
-        // Disable colliders so it can't be hit / block anything after "death".
         if (disableCollidersOnDeath)
         {
-            foreach (var col in GetComponentsInChildren<Collider>())
+            foreach (Collider col in GetComponentsInChildren<Collider>())
                 col.enabled = false;
         }
 
-        // Spawn explosion VFX (optional).
         if (explosionPrefab != null)
-        {
             Instantiate(explosionPrefab, transform.position + explosionOffset, Quaternion.identity);
-        }
 
-        // Disable this script so it stops thinking.
         enabled = false;
 
         if (destroyOnDeath)
             Destroy(gameObject, Mathf.Max(0.05f, destroyDelay));
     }
 
-
-#endregion
+    #endregion
 
     #region Gizmos
 
@@ -703,6 +837,18 @@ public class DroneEnemyController : MonoBehaviour
             Gizmos.DrawSphere(muzzle.position, 0.08f);
             Vector3 a = (combatTarget != null) ? GetAimPoint(combatTarget) : (muzzle.position + muzzle.forward * 1.5f);
             Gizmos.DrawLine(muzzle.position, a);
+        }
+
+        if (waypoints != null)
+        {
+            Gizmos.color = Color.green;
+            for (int i = 0; i < waypoints.Length; i++)
+            {
+                if (waypoints[i] == null) continue;
+                Gizmos.DrawSphere(waypoints[i].position, 0.25f);
+                if (i + 1 < waypoints.Length && waypoints[i + 1] != null)
+                    Gizmos.DrawLine(waypoints[i].position, waypoints[i + 1].position);
+            }
         }
     }
 

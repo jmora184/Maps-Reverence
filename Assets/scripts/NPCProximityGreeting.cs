@@ -1,13 +1,14 @@
-// 2026-03-05
-// NPCProximityGreeting.cs (UPDATED: optional auto-talk vs press-key)
+// 2026-03-07
+// NPCProximityGreeting.cs
 //
 // Behavior modes:
 // - Auto-talk (NPC style): if player is in range, dialog auto-opens; leaving range closes.
 // - Press-key (Ally style): if player is in range, shows prompt "Press P to talk"; press key toggles dialog.
 //
-// Uses:
-// - NPCDialogBoxUI for the dialog display.
-// - RecruitPromptUI for the on-screen prompt (singleton Show/Hide).
+// Added one-time intro behavior for allies:
+// - If an ally changes from prisoner -> freed, dialog auto-opens ONE time.
+// - If another script activates/recruits the ally, call TriggerOneTimeIntroDialog().
+// - After that first auto-open, normal behavior resumes (press P unless auto-show mode is enabled).
 
 using UnityEngine;
 
@@ -32,6 +33,13 @@ public class NPCProximityGreeting : MonoBehaviour
 
     [Tooltip("Use RecruitPromptUI for the prompt (recommended). If false, no prompt will show.")]
     public bool useRecruitPromptUI = true;
+
+    [Header("One-Time Intro (Ally Recruit / Free)")]
+    [Tooltip("If true, the dialog box auto-opens one time when this ally is first freed from prisoner mode.")]
+    public bool autoOpenOnceWhenFreed = true;
+
+    [Tooltip("If true, closing after the one-time auto-open will fall back to normal behavior (Press P unless auto-show mode is enabled).")]
+    public bool oneTimeIntroOnlyOnce = true;
 
     [Header("Optional: talk animation")]
     [Tooltip("If present, we call npcController.SetTalking(...) while dialog is open.")]
@@ -101,6 +109,8 @@ public class NPCProximityGreeting : MonoBehaviour
 
     private bool _promptShown;
     private bool _dialogOpen;
+    private bool _oneTimeIntroShown;
+    private bool _wasPrisoner;
 
     // Animator param caches
     private int _talkingHash;
@@ -131,6 +141,7 @@ public class NPCProximityGreeting : MonoBehaviour
         CacheAnimatorParams();
 
         _selfCollider = selfColliderOverride ? selfColliderOverride : GetComponentInChildren<Collider>();
+        _wasPrisoner = IsAllyPrisoner();
 
         // Ensure hidden at start
         CloseDialog();
@@ -138,7 +149,7 @@ public class NPCProximityGreeting : MonoBehaviour
 
         if (debugLogs)
         {
-            Debug.Log($"[NPCProximityGreeting] mode={(autoOpenDialogOnProximity ? "AUTO" : "PRESS")} player={(_player ? _player.name : "NULL")} dialogUI={(dialogUI ? dialogUI.name : "NULL")}", this);
+            Debug.Log($"[NPCProximityGreeting] mode={(autoOpenDialogOnProximity ? "AUTO" : "PRESS")} player={(_player ? _player.name : "NULL")} dialogUI={(dialogUI ? dialogUI.name : "NULL")} prisoner={_wasPrisoner}", this);
         }
     }
 
@@ -180,6 +191,13 @@ public class NPCProximityGreeting : MonoBehaviour
         }
 
         bool isPrisoner = IsAllyPrisoner();
+
+        // One-time auto-open when prisoner becomes freed.
+        if (autoOpenOnceWhenFreed && !_oneTimeIntroShown && _wasPrisoner && !isPrisoner)
+        {
+            TriggerOneTimeIntroDialog();
+        }
+        _wasPrisoner = isPrisoner;
 
         // If prisoner and we suppress UI, keep everything hidden (no flicker)
         if (isPrisoner && suppressUIWhenPrisoner)
@@ -287,7 +305,8 @@ public class NPCProximityGreeting : MonoBehaviour
 
     private void CloseDialog()
     {
-        if (dialogUI != null && dialogUI.IsVisible)
+        // Only hide the shared dialog UI if THIS NPC actually opened it.
+        if (_dialogOpen && dialogUI != null)
             dialogUI.Hide();
 
         _dialogOpen = false;
@@ -369,6 +388,19 @@ public class NPCProximityGreeting : MonoBehaviour
         {
             talkAnimator.SetBool(_talkingHash, talking);
         }
+    }
+
+    public void TriggerOneTimeIntroDialog()
+    {
+        if (_oneTimeIntroShown && oneTimeIntroOnlyOnce)
+            return;
+
+        _oneTimeIntroShown = true;
+        OpenDialog();
+        HidePrompt();
+
+        if (debugLogs)
+            Debug.Log("[NPCProximityGreeting] ONE-TIME INTRO OPEN", this);
     }
 
     private void OnDisable()

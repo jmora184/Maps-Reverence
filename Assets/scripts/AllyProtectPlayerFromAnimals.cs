@@ -51,8 +51,9 @@ public class AllyProtectPlayerFromAnimals : MonoBehaviour
     [Tooltip("Tag used for bosses (AlienBoss root).")]
     public string bossTag = "Boss";
 
-    [Tooltip("Which layers are considered bosses for scanning. If unsure, leave Everything.")] 
+    [Tooltip("Which layers are considered bosses for scanning. If unsure, leave Everything.")]
     public LayerMask bossScanMask = ~0;
+
     [Header("Engagement Rules")]
     [Tooltip("If true, the ally will switch targets to protect the player even if currently fighting something else.")]
     public bool overrideExistingTarget = true;
@@ -74,11 +75,11 @@ public class AllyProtectPlayerFromAnimals : MonoBehaviour
     private static FieldInfo _animalTargetField;
     private static bool _animalReflectionReady;
 
-
     // Cached reflection for AlienBossController.CurrentTarget (property) or _target (field)
     private static PropertyInfo _bossCurrentTargetProp;
     private static FieldInfo _bossTargetField;
     private static bool _bossReflectionReady;
+
     private readonly Collider[] _hits = new Collider[32];
 
     private void Awake()
@@ -112,7 +113,7 @@ public class AllyProtectPlayerFromAnimals : MonoBehaviour
     private Transform FindPlayer()
     {
         if (string.IsNullOrEmpty(playerTag)) return null;
-        var go = GameObject.FindGameObjectWithTag(playerTag);
+        var go = FindWithTagSafe(playerTag);
         return go ? go.transform : null;
     }
 
@@ -121,12 +122,9 @@ public class AllyProtectPlayerFromAnimals : MonoBehaviour
         if (_animalReflectionReady) return;
         _animalReflectionReady = true;
 
-        // Find AnimalController type by name (no hard dependency on the file name/path).
-        // Assumes class name is AnimalController.
         var t = Type.GetType("AnimalController");
         if (t == null)
         {
-            // Unity assemblies: try searching loaded assemblies
             foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
             {
                 t = asm.GetType("AnimalController");
@@ -135,9 +133,7 @@ public class AllyProtectPlayerFromAnimals : MonoBehaviour
         }
 
         if (t != null)
-        {
             _animalTargetField = t.GetField("_target", BindingFlags.Instance | BindingFlags.NonPublic);
-        }
     }
 
     private void PrepareBossReflection()
@@ -201,22 +197,17 @@ public class AllyProtectPlayerFromAnimals : MonoBehaviour
         return null;
     }
 
-
     private void TryProtectPlayer()
     {
         if (!player) return;
 
-        // If we shouldn't override and we're already fighting, do nothing.
         if (!overrideExistingTarget && ally.CurrentEnemy != null)
             return;
 
         Transform bestAnimal = FindBestThreateningAnimalOrBoss();
         if (!bestAnimal) return;
 
-        // Avoid spamming ForceCombatTarget.
         if (Time.time < _nextRetargetTime) return;
-
-        // If we're already targeting this animal, skip.
         if (ally.CurrentEnemy == bestAnimal) return;
 
         _nextRetargetTime = Time.time + Mathf.Max(0.05f, retargetCooldown);
@@ -230,7 +221,6 @@ public class AllyProtectPlayerFromAnimals : MonoBehaviour
     {
         Vector3 origin = transform.position;
 
-        // Scan using combined masks (animals + bosses) so you can tune them separately.
         LayerMask mask = animalScanMask;
         if (protectFromBosses) mask |= bossScanMask;
         int count = Physics.OverlapSphereNonAlloc(origin, scanRadius, _hits, mask, QueryTriggerInteraction.Ignore);
@@ -245,13 +235,11 @@ public class AllyProtectPlayerFromAnimals : MonoBehaviour
 
             Transform root = c.transform.root != null ? c.transform.root : c.transform;
 
-            // Skip self
-            if (root == transform || root.IsChildOf(transform)) continue;
+            if (root == transform || root.IsChildOf(transform))
+                continue;
 
-            // Check for AnimalController (Animal threat)
             var animalController = root.GetComponentInParent(Type.GetType("AnimalController") ?? GetAnimalControllerType());
 
-            // Check for AlienBossController (Boss threat)
             Component bossController = null;
             if (protectFromBosses)
                 bossController = root.GetComponentInParent(Type.GetType("AlienBossController") ?? GetBossControllerType());
@@ -262,18 +250,6 @@ public class AllyProtectPlayerFromAnimals : MonoBehaviour
             if (!isAnimalCandidate && !isBossCandidate)
                 continue;
 
-            // If tag fallback is enabled, still enforce tag when present.
-            if (useTagFallback && !string.IsNullOrEmpty(animalTag))
-            {
-                // If your animals are not tagged, leave animalTag empty or disable tag fallback.
-                if (!string.IsNullOrEmpty(animalTag) && root.tag != animalTag)
-                {
-                    // don't hard-fail if animalTag isn't defined in Tag Manager (Unity throws); so we keep it soft:
-                    // only compare when it looks valid.
-                }
-            }
-
-            // Determine current target (animal or boss).
             Transform threatTarget = null;
 
             if (isBossCandidate && bossController != null)
@@ -282,14 +258,11 @@ public class AllyProtectPlayerFromAnimals : MonoBehaviour
             if (threatTarget == null && isAnimalCandidate && animalController != null)
                 threatTarget = GetAnimalTarget(animalController);
 
-            // If we only matched by tag and have no controller, we cannot know target.
             if (threatTarget == null) continue;
 
-            // Must be targeting the player
             if (threatTarget != player && !SafeCompareTag(threatTarget, playerTag))
                 continue;
 
-            // Optional: only if animal is near player too
             if (requireAnimalNearPlayerDistance > 0f)
             {
                 float dp = Vector3.Distance(root.position, player.position);
@@ -305,13 +278,9 @@ public class AllyProtectPlayerFromAnimals : MonoBehaviour
             }
         }
 
-        // Tag fallback if layer scan missed everything (common if mask excludes animals)
         if (!best && useTagFallback && !string.IsNullOrEmpty(animalTag))
         {
-            GameObject[] tagged = null;
-            try { tagged = GameObject.FindGameObjectsWithTag(animalTag); }
-            catch { /* tag might not exist */ }
-
+            GameObject[] tagged = FindGameObjectsWithTagSafe(animalTag);
             if (tagged != null)
             {
                 foreach (var go in tagged)
@@ -326,7 +295,7 @@ public class AllyProtectPlayerFromAnimals : MonoBehaviour
                     Transform animalTarget = GetAnimalTarget(animalController);
 
                     if (animalTarget == null) continue;
-                    if (animalTarget != player && !animalTarget.CompareTag(playerTag)) continue;
+                    if (animalTarget != player && !SafeCompareTag(animalTarget, playerTag)) continue;
 
                     if (requireAnimalNearPlayerDistance > 0f)
                     {
@@ -344,14 +313,9 @@ public class AllyProtectPlayerFromAnimals : MonoBehaviour
             }
         }
 
-
-        // Boss tag fallback (if layer scan missed everything)
         if (!best && protectFromBosses && !string.IsNullOrEmpty(bossTag))
         {
-            GameObject[] tagged = null;
-            try { tagged = GameObject.FindGameObjectsWithTag(bossTag); }
-            catch { /* tag might not exist */ }
-
+            GameObject[] tagged = FindGameObjectsWithTagSafe(bossTag);
             if (tagged != null)
             {
                 foreach (var go in tagged)
@@ -389,7 +353,6 @@ public class AllyProtectPlayerFromAnimals : MonoBehaviour
 
     private static Type GetAnimalControllerType()
     {
-        // Try locate by scanning assemblies once.
         foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
         {
             var t = asm.GetType("AnimalController");
@@ -402,11 +365,9 @@ public class AllyProtectPlayerFromAnimals : MonoBehaviour
     {
         if (animalController == null) return null;
 
-        // Use cached FieldInfo if we found it
         if (_animalTargetField == null)
         {
             PrepareAnimalReflection();
-        PrepareBossReflection();
             if (_animalTargetField == null) return null;
         }
 
@@ -421,13 +382,33 @@ public class AllyProtectPlayerFromAnimals : MonoBehaviour
         }
     }
 
-
-
-    private bool SafeCompareTag(Transform t, string tag)
+    private bool SafeCompareTag(Transform t, string tagToCheck)
     {
-        if (!t || string.IsNullOrEmpty(tag)) return false;
-        try { return t.CompareTag(tag); }
-        catch { return false; }
+        if (!t || string.IsNullOrEmpty(tagToCheck)) return false;
+
+        try
+        {
+            string currentTag = t.tag;
+            return string.Equals(currentTag, tagToCheck, StringComparison.Ordinal);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static GameObject FindWithTagSafe(string tagToFind)
+    {
+        if (string.IsNullOrEmpty(tagToFind)) return null;
+        try { return GameObject.FindGameObjectWithTag(tagToFind); }
+        catch { return null; }
+    }
+
+    private static GameObject[] FindGameObjectsWithTagSafe(string tagToFind)
+    {
+        if (string.IsNullOrEmpty(tagToFind)) return null;
+        try { return GameObject.FindGameObjectsWithTag(tagToFind); }
+        catch { return null; }
     }
 
     private void OnDrawGizmosSelected()

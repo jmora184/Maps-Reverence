@@ -593,11 +593,16 @@ private void SpawnLegacy(TeamSpawnPlan plan, Transform parent, List<GameObject> 
         // Cached UI sub-refs (optional)
         public RectTransform starRect;
         public RectTransform arrowRect;
+        public RectTransform flankTextRect;
         public MonoBehaviour arrowUi;
 
         // Cached sizing
         public Vector2 baseStarSize;
         public Vector2 baseArrowSize;
+        public Vector3 baseFlankTextLocalScale;
+        public Vector2 baseFlankTextAnchoredPosition;
+        public bool baseFlankTextScaleCaptured;
+        public bool baseFlankTextPositionCaptured;
         public bool baseSizesCaptured;
 
         // Cached arrow orbit radius (EnemyTeamDirectionArrowUI.orbitRadiusPixels)
@@ -643,6 +648,18 @@ private void SpawnLegacy(TeamSpawnPlan plan, Transform parent, List<GameObject> 
                         ?? icon.transform.Find("OrbitalAnchor/StarImage")?.GetComponent<RectTransform>();
 
         data.arrowRect = icon.transform.Find("OrbitalAnchor/ArrowImage")?.GetComponent<RectTransform>();
+        data.flankTextRect = icon.transform.Find("FlankText")?.GetComponent<RectTransform>();
+        if (!data.flankTextRect)
+        {
+            foreach (var rt in icon.GetComponentsInChildren<RectTransform>(true))
+            {
+                if (rt != null && string.Equals(rt.name, "FlankText", StringComparison.Ordinal))
+                {
+                    data.flankTextRect = rt;
+                    break;
+                }
+            }
+        }
 
         // Cache base sizes so scaling is stable
         if (data.starRect)
@@ -654,6 +671,13 @@ private void SpawnLegacy(TeamSpawnPlan plan, Transform parent, List<GameObject> 
         {
             data.baseArrowSize = data.arrowRect.sizeDelta;
             data.baseSizesCaptured = true;
+        }
+        if (data.flankTextRect)
+        {
+            data.baseFlankTextLocalScale = data.flankTextRect.localScale;
+            data.baseFlankTextAnchoredPosition = data.flankTextRect.anchoredPosition;
+            data.baseFlankTextScaleCaptured = true;
+            data.baseFlankTextPositionCaptured = true;
         }
 
         // Bind arrow UI script if present
@@ -1342,6 +1366,26 @@ private void SpawnLegacy(TeamSpawnPlan plan, Transform parent, List<GameObject> 
                 if (data.baseArrowSize.sqrMagnitude > 0.001f)
                     data.arrowRect.sizeDelta = data.baseArrowSize * s;
             }
+        }
+
+        if (data.flankTextRect)
+        {
+            if (!data.baseFlankTextScaleCaptured)
+            {
+                data.baseFlankTextLocalScale = data.flankTextRect.localScale;
+                data.baseFlankTextScaleCaptured = true;
+            }
+
+            if (!data.baseFlankTextPositionCaptured)
+            {
+                data.baseFlankTextAnchoredPosition = data.flankTextRect.anchoredPosition;
+                data.baseFlankTextPositionCaptured = true;
+            }
+
+            Vector3 baseScale = data.baseFlankTextScaleCaptured ? data.baseFlankTextLocalScale : Vector3.one;
+            Vector2 basePos = data.baseFlankTextPositionCaptured ? data.baseFlankTextAnchoredPosition : data.flankTextRect.anchoredPosition;
+            data.flankTextRect.localScale = new Vector3(baseScale.x * s, baseScale.y * s, baseScale.z);
+            data.flankTextRect.anchoredPosition = basePos * s;
         }
     }
 
