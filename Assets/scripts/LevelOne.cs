@@ -306,7 +306,7 @@ public class LevelOne : MonoBehaviour
     public void SpawnTeam3() => SpawnTeam(3);
     public void SpawnTeam4() => SpawnTeam(4);
 
-    
+
     private void ApplyEnemyIconScale(EncounterTeamAnchor anchor, TeamSpawnPlan plan)
     {
         if (anchor == null || plan == null) return;
@@ -354,7 +354,7 @@ public class LevelOne : MonoBehaviour
         return false;
     }
 
-private void SpawnLegacy(TeamSpawnPlan plan, Transform parent, List<GameObject> spawned)
+    private void SpawnLegacy(TeamSpawnPlan plan, Transform parent, List<GameObject> spawned)
     {
         int count = Mathf.Max(0, plan.enemyCount);
         for (int i = 0; i < count; i++)
@@ -509,7 +509,7 @@ private void SpawnLegacy(TeamSpawnPlan plan, Transform parent, List<GameObject> 
         [HideInInspector] public int spawnSequence = 0;
     }
 
-[Serializable]
+    [Serializable]
     public class TeamSpawnPlan
     {
         [Header("Team Identity")]
@@ -608,7 +608,7 @@ private void SpawnLegacy(TeamSpawnPlan plan, Transform parent, List<GameObject> 
         // Cached arrow orbit radius (EnemyTeamDirectionArrowUI.orbitRadiusPixels)
         public float baseOrbitRadiusPixels;
         public bool baseOrbitRadiusCaptured;
-   
+
         // Member tracking (optional)
         public List<Transform> members;
 
@@ -1743,7 +1743,7 @@ public class MeleeObjectiveMarchOverride : MonoBehaviour
             _proxyGO.transform.SetParent(null, true);
 
             UpdateProxyPosition();
-            ForceMeleeChaseProxy(force:true);
+            ForceMeleeChaseProxy(force: true);
         }
     }
 
@@ -1786,7 +1786,7 @@ public class MeleeObjectiveMarchOverride : MonoBehaviour
             return;
         }
 
-        ForceMeleeChaseProxy(force:false);
+        ForceMeleeChaseProxy(force: false);
     }
 
     private void ForceMeleeChaseProxy(bool force)
@@ -1915,7 +1915,7 @@ public class DroneObjectiveMarchOverride : MonoBehaviour
             _proxyGO.transform.SetParent(null, true);
 
             UpdateProxyPosition();
-            ForceDronePatrolToProxy(force:true);
+            ForceDronePatrolToProxy(force: true);
         }
     }
 
@@ -1959,7 +1959,7 @@ public class DroneObjectiveMarchOverride : MonoBehaviour
             return;
         }
 
-        ForceDronePatrolToProxy(force:false);
+        ForceDronePatrolToProxy(force: false);
     }
 
     private void ForceDronePatrolToProxy(bool force)

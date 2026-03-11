@@ -171,14 +171,20 @@ public class DroneEnemyController : MonoBehaviour
         _nextAcquireTime = Time.time + Random.Range(0f, Mathf.Max(0.05f, autoAcquireInterval));
         _nextSnapRetryTime = Time.time;
 
-        if (_agent != null)
+        if (_agent != null && _agent.enabled)
         {
-            _agent.isStopped = false;
-            _agent.ResetPath();
             _agent.baseOffset = hoverHeight;
-        }
 
-        TrySnapToNavMeshImmediate();
+            // Snap first so we do not call NavMeshAgent movement APIs while the agent
+            // is still unbound from the NavMesh.
+            TrySnapToNavMeshImmediate();
+
+            if (_agent.isOnNavMesh)
+            {
+                _agent.isStopped = false;
+                _agent.ResetPath();
+            }
+        }
     }
 
     private void Update()
