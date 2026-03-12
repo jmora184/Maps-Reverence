@@ -39,6 +39,13 @@ public class BaseCaptureController : MonoBehaviour
     [Tooltip("Log helpful debug info while wiring/testing.")]
     public bool debugLogs = false;
 
+    [Header("Enemy Inbound Warning UI")]
+    [Tooltip("Optional warning UI to show when this BaseCaptureController spawns enemy teams.")]
+    public GameObject enemyInboundWarningUI;
+
+    [Tooltip("How long to show the enemy inbound warning UI.")]
+    public float enemyInboundWarningDuration = 2f;
+
     [Header("Base Icon Swap (MiniUI)")]
     [Tooltip("Current icon object already placed over the base in your MiniUI.")]
     public RectTransform currentBaseIcon;
@@ -59,7 +66,11 @@ public class BaseCaptureController : MonoBehaviour
     public AllyTeamConfig allyTeam = new AllyTeamConfig();
 
     [Header("Enemy Team Counterattack")]
+    [Tooltip("Optional legacy single counterattack team. Used only if Enemy Teams list is empty.")]
     public EnemyTeamConfig enemyTeam = new EnemyTeamConfig();
+
+    [Tooltip("Spawn multiple enemy counterattack teams after the base is captured. If this list has entries, it is used instead of the legacy single Enemy Team field above.")]
+    public List<EnemyTeamConfig> enemyTeams = new List<EnemyTeamConfig>();
 
     [SerializeField, Tooltip("Runtime only: true after this base has been captured once.")]
     private bool hasCaptured = false;
@@ -67,6 +78,7 @@ public class BaseCaptureController : MonoBehaviour
     private UnityAction _cachedActivationListener;
     private UnityEvent _hookedActivationEvent;
     private bool _isSubscribed;
+    private Coroutine _enemyInboundWarningRoutine;
 
     [Serializable]
     public class AllyTeamConfig
@@ -107,6 +119,13 @@ public class BaseCaptureController : MonoBehaviour
         [Header("Identity")]
         public string teamName = "";
         public string teamNamePrefix = "CapturedBaseEnemy_";
+
+        [Header("Hover Hint")]
+        [Tooltip("Hover title shown when this spawned enemy team star/icon is hovered.")]
+        public string hoverHintTitle = "Enemy Team";
+
+        [Tooltip("Optional strength grade shown under the hover title, e.g. A+, B, C-. Leave blank to show only the title.")]
+        public string strengthGrade = "";
 
         [Header("Spawn")]
         public Transform spawnPoint;
@@ -292,7 +311,7 @@ public class BaseCaptureController : MonoBehaviour
         if (delay > 0f)
             yield return new WaitForSeconds(delay);
 
-        SpawnEnemyCounterattack();
+        SpawnEnemyCounterattacks();
     }
 
     private void EnableRefillZone()
@@ -389,85 +408,145 @@ public class BaseCaptureController : MonoBehaviour
         levelOne.SpawnAllyTeam(index);
     }
 
-    private void SpawnEnemyCounterattack()
+    private void SpawnEnemyCounterattacks()
     {
-        bool usingEntries = enemyTeam.spawnEntries != null && enemyTeam.spawnEntries.Count > 0;
+        bool spawnedAnyEnemyTeam = false;
+        var configs = new List<EnemyTeamConfig>();
 
-        if (enemyTeam.spawnPoint == null)
+        if (enemyTeams != null)
         {
-            Debug.LogWarning("[BaseCaptureController] Enemy spawn skipped because Enemy Spawn Point is not assigned.", this);
-            return;
+            for (int i = 0; i < enemyTeams.Count; i++)
+            {
+                if (enemyTeams[i] != null)
+                    configs.Add(enemyTeams[i]);
+            }
         }
 
-        if (!usingEntries && enemyTeam.enemyPrefab == null)
-        {
-            Debug.LogWarning("[BaseCaptureController] Enemy spawn skipped because neither Enemy Prefab nor Spawn Entries are assigned.", this);
-            return;
-        }
+        if (configs.Count == 0 && enemyTeam != null)
+            configs.Add(enemyTeam);
 
-        if (!usingEntries && enemyTeam.enemyCount <= 0)
+        if (configs.Count == 0)
         {
             if (debugLogs)
-                Debug.Log("[BaseCaptureController] Enemy count is 0, so no counterattack team will be spawned.", this);
+                Debug.Log("[BaseCaptureController] No enemy counterattack teams configured.", this);
             return;
-        }
-
-        var plan = new LevelOne.TeamSpawnPlan
-        {
-            teamName = enemyTeam.teamName,
-            teamNamePrefix = string.IsNullOrWhiteSpace(enemyTeam.teamNamePrefix) ? "CapturedBaseEnemy_" : enemyTeam.teamNamePrefix,
-            spawnPoint = enemyTeam.spawnPoint,
-            spawnSpreadRadius = Mathf.Max(0f, enemyTeam.spawnSpreadRadius),
-            snapToNavMesh = enemyTeam.snapToNavMesh,
-            navMeshSampleRadius = Mathf.Max(0.1f, enemyTeam.navMeshSampleRadius),
-            anchorSmoothSpeed = Mathf.Max(0.01f, enemyTeam.anchorSmoothSpeed),
-            useFixedEnemyIconScale = enemyTeam.useFixedEnemyIconScale,
-            fixedEnemyIconScale = Mathf.Max(0.01f, enemyTeam.fixedEnemyIconScale),
-            enemyIconScaleMultiplier = Mathf.Max(0.01f, enemyTeam.enemyIconScaleMultiplier),
-            debugEnemyIconScale = enemyTeam.debugEnemyIconScale,
-            moveTargetMode = enemyTeam.moveTargetMode,
-            playerTag = string.IsNullOrWhiteSpace(enemyTeam.playerTag) ? "Player" : enemyTeam.playerTag,
-            targetTransform = enemyTeam.targetTransform,
-            fixedWorldPosition = enemyTeam.fixedWorldPosition,
-            updatePlannedTargetEvery = Mathf.Max(0.05f, enemyTeam.updatePlannedTargetEvery),
-            updatePlannedTargetContinuously = enemyTeam.updatePlannedTargetContinuously,
-            enemyPrefab = enemyTeam.enemyPrefab,
-            enemyCount = Mathf.Max(1, enemyTeam.enemyCount),
-            objectiveArriveDistance = Mathf.Max(0.1f, enemyTeam.objectiveArriveDistance),
-            objectiveMaxSeconds = Mathf.Max(0.1f, enemyTeam.objectiveMaxSeconds),
-            objectiveUpdateInterval = Mathf.Max(0.05f, enemyTeam.objectiveUpdateInterval),
-            aggroHoldSeconds = Mathf.Max(0f, enemyTeam.aggroHoldSeconds),
-            debugMarch = enemyTeam.debugMarch,
-            enableEnemy2HardMarch = enemyTeam.enableEnemy2HardMarch,
-            disableEnemy2TeamLeashWhileMarching = enemyTeam.disableEnemy2TeamLeashWhileMarching,
-            enableMeleeMarch = enemyTeam.enableMeleeMarch,
-            enableDroneMarch = enemyTeam.enableDroneMarch,
-            enableFallbackNavAgentMarch = enemyTeam.enableFallbackNavAgentMarch,
-            spawnEntries = new List<LevelOne.SpawnEntry>()
-        };
-
-        if (usingEntries)
-        {
-            for (int i = 0; i < enemyTeam.spawnEntries.Count; i++)
-            {
-                var src = enemyTeam.spawnEntries[i];
-                if (src == null || src.prefab == null || src.count <= 0)
-                    continue;
-
-                plan.spawnEntries.Add(new LevelOne.SpawnEntry
-                {
-                    prefab = src.prefab,
-                    count = Mathf.Max(0, src.count),
-                    yOffset = src.yOffset
-                });
-            }
         }
 
         if (levelOne.teams == null)
             levelOne.teams = new List<LevelOne.TeamSpawnPlan>();
 
-        int index = levelOne.teams.Count;
-        levelOne.teams.Add(plan);
-        levelOne.SpawnTeam(index);
+        for (int cfgIndex = 0; cfgIndex < configs.Count; cfgIndex++)
+        {
+            EnemyTeamConfig cfg = configs[cfgIndex];
+            if (cfg == null)
+                continue;
+
+            bool usingEntries = cfg.spawnEntries != null && cfg.spawnEntries.Count > 0;
+
+            if (cfg.spawnPoint == null)
+            {
+                Debug.LogWarning($"[BaseCaptureController] Enemy spawn skipped for team {cfgIndex + 1} because Enemy Spawn Point is not assigned.", this);
+                continue;
+            }
+
+            if (!usingEntries && cfg.enemyPrefab == null)
+            {
+                Debug.LogWarning($"[BaseCaptureController] Enemy spawn skipped for team {cfgIndex + 1} because neither Enemy Prefab nor Spawn Entries are assigned.", this);
+                continue;
+            }
+
+            if (!usingEntries && cfg.enemyCount <= 0)
+            {
+                if (debugLogs)
+                    Debug.Log($"[BaseCaptureController] Enemy count is 0 for team {cfgIndex + 1}, so that counterattack team will not be spawned.", this);
+                continue;
+            }
+
+            var plan = new LevelOne.TeamSpawnPlan
+            {
+                teamName = cfg.teamName,
+                teamNamePrefix = string.IsNullOrWhiteSpace(cfg.teamNamePrefix) ? "CapturedBaseEnemy_" : cfg.teamNamePrefix,
+                hoverHintTitle = string.IsNullOrWhiteSpace(cfg.hoverHintTitle) ? "Enemy Team" : cfg.hoverHintTitle,
+                strengthGrade = string.IsNullOrWhiteSpace(cfg.strengthGrade) ? "" : cfg.strengthGrade,
+                spawnPoint = cfg.spawnPoint,
+                spawnSpreadRadius = Mathf.Max(0f, cfg.spawnSpreadRadius),
+                snapToNavMesh = cfg.snapToNavMesh,
+                navMeshSampleRadius = Mathf.Max(0.1f, cfg.navMeshSampleRadius),
+                anchorSmoothSpeed = Mathf.Max(0.01f, cfg.anchorSmoothSpeed),
+                useFixedEnemyIconScale = cfg.useFixedEnemyIconScale,
+                fixedEnemyIconScale = Mathf.Max(0.01f, cfg.fixedEnemyIconScale),
+                enemyIconScaleMultiplier = Mathf.Max(0.01f, cfg.enemyIconScaleMultiplier),
+                debugEnemyIconScale = cfg.debugEnemyIconScale,
+                moveTargetMode = cfg.moveTargetMode,
+                playerTag = string.IsNullOrWhiteSpace(cfg.playerTag) ? "Player" : cfg.playerTag,
+                targetTransform = cfg.targetTransform,
+                fixedWorldPosition = cfg.fixedWorldPosition,
+                updatePlannedTargetEvery = Mathf.Max(0.05f, cfg.updatePlannedTargetEvery),
+                updatePlannedTargetContinuously = cfg.updatePlannedTargetContinuously,
+                enemyPrefab = cfg.enemyPrefab,
+                enemyCount = Mathf.Max(1, cfg.enemyCount),
+                objectiveArriveDistance = Mathf.Max(0.1f, cfg.objectiveArriveDistance),
+                objectiveMaxSeconds = Mathf.Max(0.1f, cfg.objectiveMaxSeconds),
+                objectiveUpdateInterval = Mathf.Max(0.05f, cfg.objectiveUpdateInterval),
+                aggroHoldSeconds = Mathf.Max(0f, cfg.aggroHoldSeconds),
+                debugMarch = cfg.debugMarch,
+                enableEnemy2HardMarch = cfg.enableEnemy2HardMarch,
+                disableEnemy2TeamLeashWhileMarching = cfg.disableEnemy2TeamLeashWhileMarching,
+                enableMeleeMarch = cfg.enableMeleeMarch,
+                enableDroneMarch = cfg.enableDroneMarch,
+                enableFallbackNavAgentMarch = cfg.enableFallbackNavAgentMarch,
+                spawnEntries = new List<LevelOne.SpawnEntry>()
+            };
+
+            if (usingEntries)
+            {
+                for (int i = 0; i < cfg.spawnEntries.Count; i++)
+                {
+                    var src = cfg.spawnEntries[i];
+                    if (src == null || src.prefab == null || src.count <= 0)
+                        continue;
+
+                    plan.spawnEntries.Add(new LevelOne.SpawnEntry
+                    {
+                        prefab = src.prefab,
+                        count = Mathf.Max(0, src.count),
+                        yOffset = src.yOffset
+                    });
+                }
+            }
+
+            int index = levelOne.teams.Count;
+            levelOne.teams.Add(plan);
+            levelOne.SpawnTeam(index);
+            spawnedAnyEnemyTeam = true;
+        }
+
+        if (spawnedAnyEnemyTeam)
+            ShowEnemyInboundWarningUI();
+    }
+
+    private void ShowEnemyInboundWarningUI()
+    {
+        if (!hasCaptured)
+            return;
+
+        if (enemyInboundWarningUI == null)
+            return;
+
+        if (_enemyInboundWarningRoutine != null)
+            StopCoroutine(_enemyInboundWarningRoutine);
+
+        _enemyInboundWarningRoutine = StartCoroutine(ShowEnemyInboundWarningRoutine());
+    }
+
+    private IEnumerator ShowEnemyInboundWarningRoutine()
+    {
+        enemyInboundWarningUI.SetActive(true);
+        yield return new WaitForSeconds(Mathf.Max(0.01f, enemyInboundWarningDuration));
+
+        if (enemyInboundWarningUI != null)
+            enemyInboundWarningUI.SetActive(false);
+
+        _enemyInboundWarningRoutine = null;
     }
 }

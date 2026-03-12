@@ -1,3 +1,4 @@
+using System.Collections;
 using UnityEngine;
 using UnityEngine.Events;
 
@@ -5,6 +6,8 @@ using UnityEngine.Events;
 /// Base/terminal activator that behaves like RecruitPromptUI.
 /// Shows a prompt when the player is within range.
 /// If enemies are active nearby, shows a warning and blocks activation.
+/// After the first successful activation, the ready prompt will never show again.
+/// Enemy scanning continues forever, and can trigger a separate 2-second warning UI after activation.
 /// </summary>
 public class BaseActivator : MonoBehaviour
 {
@@ -26,6 +29,11 @@ public class BaseActivator : MonoBehaviour
     [SerializeField] private string[] enemyTags = new string[] { "Enemy" };
     [SerializeField] private bool drawDebugGizmos = true;
 
+    [Header("Post-Activation Warning UI")]
+    [Tooltip("Optional UI object to show for 2 seconds after the base has already been activated and an enemy is detected in range.")]
+    [SerializeField] private GameObject enemyDetectedWarningUI;
+    [SerializeField] private float enemyDetectedWarningDuration = 2f;
+
     [Header("Events")]
     [SerializeField] private UnityEvent onPlayerEnteredRange;
     [SerializeField] private UnityEvent onPlayerExitedRange;
@@ -35,18 +43,22 @@ public class BaseActivator : MonoBehaviour
     private Transform player;
     private bool playerInRange;
     private bool hasActivated;
+    private bool enemyWasDetectedAfterActivation;
     private string lastShownMessage = string.Empty;
+    private Coroutine enemyWarningRoutine;
     private readonly Collider[] overlapResults = new Collider[128];
 
     private void Awake()
     {
         FindPlayer();
+        SetEnemyWarningUIVisible(false);
     }
 
     private void OnEnable()
     {
         FindPlayer();
-        RefreshPrompt();
+        SetEnemyWarningUIVisible(false);
+        RefreshPrompt(false);
     }
 
     private void OnDisable()
@@ -54,8 +66,16 @@ public class BaseActivator : MonoBehaviour
         if (playerInRange)
             RecruitPromptUI.Hide();
 
+        if (enemyWarningRoutine != null)
+        {
+            StopCoroutine(enemyWarningRoutine);
+            enemyWarningRoutine = null;
+        }
+
+        SetEnemyWarningUIVisible(false);
         playerInRange = false;
         lastShownMessage = string.Empty;
+        enemyWasDetectedAfterActivation = false;
     }
 
     private void Update()
@@ -66,6 +86,7 @@ public class BaseActivator : MonoBehaviour
             if (player == null)
             {
                 ClearPromptIfNeeded();
+                HandlePostActivationEnemyWarning(false);
                 return;
             }
         }
@@ -82,7 +103,10 @@ public class BaseActivator : MonoBehaviour
                 onPlayerExitedRange?.Invoke();
         }
 
-        RefreshPrompt();
+        bool enemiesActive = AreEnemiesActiveInArea();
+
+        RefreshPrompt(enemiesActive);
+        HandlePostActivationEnemyWarning(enemiesActive);
 
         if (!playerInRange)
             return;
@@ -93,7 +117,7 @@ public class BaseActivator : MonoBehaviour
         if (!Input.GetKeyDown(activateKey))
             return;
 
-        if (AreEnemiesActiveInArea())
+        if (enemiesActive)
         {
             ShowPrompt(blockedPromptMessage);
             onActivationBlockedByEnemies?.Invoke();
@@ -116,6 +140,7 @@ public class BaseActivator : MonoBehaviour
         }
 
         hasActivated = true;
+        enemyWasDetectedAfterActivation = false;
         RecruitPromptUI.Hide();
         lastShownMessage = string.Empty;
         onActivated?.Invoke();
@@ -126,22 +151,24 @@ public class BaseActivator : MonoBehaviour
         if (!string.IsNullOrWhiteSpace(message))
             readyPromptMessage = message;
 
-        RefreshPrompt();
+        RefreshPrompt(AreEnemiesActiveInArea());
     }
 
     public void SetPromptRange(float newRange)
     {
         promptRange = Mathf.Max(0.1f, newRange);
-        RefreshPrompt();
+        RefreshPrompt(AreEnemiesActiveInArea());
     }
 
     public void SetEnemyDetectionRadius(float newRadius)
     {
         enemyDetectionRadius = Mathf.Max(0f, newRadius);
-        RefreshPrompt();
+        bool enemiesActive = AreEnemiesActiveInArea();
+        RefreshPrompt(enemiesActive);
+        HandlePostActivationEnemyWarning(enemiesActive);
     }
 
-    private void RefreshPrompt()
+    private void RefreshPrompt(bool enemiesActive)
     {
         if (!playerInRange)
         {
@@ -149,13 +176,63 @@ public class BaseActivator : MonoBehaviour
             return;
         }
 
-        if (oneTimeUse && hasActivated)
+        // After the first successful activation, never show the ready prompt again.
+        // But the enemy scanner stays active for the separate warning UI.
+        if (hasActivated)
         {
             ClearPromptIfNeeded();
             return;
         }
 
-        ShowPrompt(AreEnemiesActiveInArea() ? blockedPromptMessage : readyPromptMessage);
+        ShowPrompt(enemiesActive ? blockedPromptMessage : readyPromptMessage);
+    }
+
+    private void HandlePostActivationEnemyWarning(bool enemiesActive)
+    {
+        if (!hasActivated)
+        {
+            enemyWasDetectedAfterActivation = false;
+            SetEnemyWarningUIVisible(false);
+            return;
+        }
+
+        if (!enemiesActive)
+        {
+            enemyWasDetectedAfterActivation = false;
+            SetEnemyWarningUIVisible(false);
+            return;
+        }
+
+        if (enemyWasDetectedAfterActivation)
+            return;
+
+        enemyWasDetectedAfterActivation = true;
+        ShowEnemyWarningForDuration();
+    }
+
+    private void ShowEnemyWarningForDuration()
+    {
+        if (enemyDetectedWarningUI == null)
+            return;
+
+        if (enemyWarningRoutine != null)
+            StopCoroutine(enemyWarningRoutine);
+
+        enemyWarningRoutine = StartCoroutine(EnemyWarningRoutine());
+    }
+
+    private IEnumerator EnemyWarningRoutine()
+    {
+        SetEnemyWarningUIVisible(true);
+        yield return new WaitForSeconds(Mathf.Max(0.01f, enemyDetectedWarningDuration));
+        SetEnemyWarningUIVisible(false);
+        enemyWarningRoutine = null;
+    }
+
+    private void SetEnemyWarningUIVisible(bool visible)
+    {
+        if (enemyDetectedWarningUI != null)
+            enemyDetectedWarningUI.SetActive(visible);
     }
 
     private void ShowPrompt(string message)

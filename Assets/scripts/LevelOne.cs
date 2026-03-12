@@ -515,6 +515,14 @@ public class LevelOne : MonoBehaviour
         [Header("Team Identity")]
         public string teamName = "";
         public string teamNamePrefix = "EnemyTeam_";
+
+        [Header("Hover Hint")]
+        [Tooltip("Title shown when hovering this enemy team icon.")]
+        public string hoverHintTitle = "Enemy Team";
+
+        [Tooltip("Optional manual strength grade shown under the title, e.g. A+, B, C-, D-.")]
+        public string strengthGrade = "";
+
         [HideInInspector] public int spawnSequence = 0;
 
         [Header("Spawn Location")]
@@ -698,7 +706,7 @@ public class LevelOne : MonoBehaviour
             BindArrowUi(data.arrowUi, anchor);
 
         // Bind the click/targeting bridge (so clicking the enemy team star behaves like EncounterPOC).
-        BindEnemyIconTargetingBridge(icon, anchor, teamRoot);
+        BindEnemyIconTargetingBridge(icon, anchor, teamRoot, plan);
 
         // Cache base orbit radius so scaling stays consistent
         if (data.arrowUi != null)
@@ -1281,7 +1289,22 @@ public class LevelOne : MonoBehaviour
         // so leaving MoveTargetProvider null is OK (velocity fallback / direction may still work).
     }
 
-    private void BindEnemyIconTargetingBridge(RectTransform iconRoot, EncounterTeamAnchor anchor, Transform teamRoot)
+    private string BuildEnemyTeamHoverHint(TeamSpawnPlan plan)
+    {
+        string title = (plan != null && !string.IsNullOrWhiteSpace(plan.hoverHintTitle))
+            ? plan.hoverHintTitle.Trim()
+            : "Enemy Team";
+
+        string grade = (plan != null && !string.IsNullOrWhiteSpace(plan.strengthGrade))
+            ? plan.strengthGrade.Trim()
+            : string.Empty;
+
+        return string.IsNullOrWhiteSpace(grade)
+            ? title
+            : $"{title}\nStrength: {grade}";
+    }
+
+    private void BindEnemyIconTargetingBridge(RectTransform iconRoot, EncounterTeamAnchor anchor, Transform teamRoot, TeamSpawnPlan plan)
     {
         if (iconRoot == null) return;
 
@@ -1320,6 +1343,12 @@ public class LevelOne : MonoBehaviour
         TrySetFieldOrProperty(t, bridge, "TeamRoot", teamRoot);
         TrySetFieldOrProperty(t, bridge, "teamTransform", teamRoot);
         TrySetFieldOrProperty(t, bridge, "TeamTransform", teamRoot);
+
+        string hoverHint = BuildEnemyTeamHoverHint(plan);
+        TrySetFieldOrProperty(t, bridge, "hoverHintMessage", hoverHint);
+        TrySetFieldOrProperty(t, bridge, "HoverHintMessage", hoverHint);
+        TrySetFieldOrProperty(t, bridge, "message", hoverHint);
+        TrySetFieldOrProperty(t, bridge, "Message", hoverHint);
 
         // If the bridge needs a faction flag
         TrySetFieldOrProperty(t, bridge, "faction", EncounterDirectorPOC.Faction.Enemy);

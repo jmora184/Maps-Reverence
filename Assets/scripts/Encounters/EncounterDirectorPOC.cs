@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
@@ -783,6 +783,9 @@ public class EncounterDirectorPOC : MonoBehaviour
         var bridge = iconGO.GetComponent<EnemyTeamIconTargetingBridge>();
         if (bridge == null)
             bridge = iconGO.gameObject.AddComponent<EnemyTeamIconTargetingBridge>();
+
+        string hoverHint = BuildEnemyTeamHoverHint(teamRootName);
+        bridge.hoverHintMessage = hoverHint;
         bridge.Bind(teamRoot);
 
         // --- Direction arrow (UI-only) ---
@@ -813,6 +816,36 @@ public class EncounterDirectorPOC : MonoBehaviour
     }
 
 
+
+    private string BuildEnemyTeamHoverHint(string teamRootName)
+    {
+        if (enemyGroups != null)
+        {
+            for (int i = 0; i < enemyGroups.Length; i++)
+            {
+                var group = enemyGroups[i];
+                if (!group.enabled || group.teamIndex <= 0) continue;
+
+                string expectedRoot = $"{enemyTeamRootPrefix}{group.teamIndex}";
+                if (!string.Equals(expectedRoot, teamRootName, StringComparison.Ordinal))
+                    continue;
+
+                string title = !string.IsNullOrWhiteSpace(group.hoverHintTitle)
+                    ? group.hoverHintTitle.Trim()
+                    : "Enemy Team";
+
+                string grade = !string.IsNullOrWhiteSpace(group.strengthGrade)
+                    ? group.strengthGrade.Trim()
+                    : string.Empty;
+
+                return string.IsNullOrWhiteSpace(grade)
+                    ? title
+                    : $"{title}\nStrength: {grade}";
+            }
+        }
+
+        return "Enemy Team";
+    }
 
     private EnemyTeamDirectionArrowUI GetOrCreateEnemyTeamArrow(RectTransform iconRoot)
     {
@@ -1061,6 +1094,13 @@ public class EncounterDirectorPOC : MonoBehaviour
 
         [Tooltip("Optional. If this group is an Enemy team (teamIndex > 0), you can override the icon prefab used for that team.")]
         public RectTransform teamIconPrefabOverride;
+
+        [Header("Enemy Team Hover Hint")]
+        [Tooltip("Main hover title shown when hovering this enemy team icon.")]
+        public string hoverHintTitle;
+
+        [Tooltip("Optional manual strength grade, for example A+, A, B-, C, D-. Leave blank to omit the second line.")]
+        public string strengthGrade;
 
         [Tooltip("If enabled (Enemy only), this group will set a manual scale for that enemy team's star/icon (per teamIndex).")]
         public bool overrideEnemyTeamIconScale;
