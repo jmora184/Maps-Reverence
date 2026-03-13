@@ -156,30 +156,35 @@ public class LevelOne : MonoBehaviour
 
     public void SpawnTeam(int teamIndex)
     {
+        SpawnTeamAndGetRuntime(teamIndex);
+    }
+
+    public SpawnedTeamRuntimeInfo SpawnTeamAndGetRuntime(int teamIndex)
+    {
         if (teams == null || teamIndex < 0 || teamIndex >= teams.Count)
         {
             Debug.LogError($"[LevelOne] Invalid team index {teamIndex}.", this);
-            return;
+            return null;
         }
 
         TeamSpawnPlan plan = teams[teamIndex];
         if (plan == null)
         {
             Debug.LogError($"[LevelOne] Team plan at index {teamIndex} is null.", this);
-            return;
+            return null;
         }
 
         if (plan.spawnPoint == null)
         {
             Debug.LogError($"[LevelOne] Team plan {teamIndex} spawnPoint is not assigned.", this);
-            return;
+            return null;
         }
 
         bool usingEntries = plan.spawnEntries != null && plan.spawnEntries.Count > 0;
         if (!usingEntries && plan.enemyPrefab == null)
         {
             Debug.LogError($"[LevelOne] Team plan {teamIndex} has no spawnEntries and no enemyPrefab assigned.", this);
-            return;
+            return null;
         }
 
         plan.spawnSequence++;
@@ -194,7 +199,6 @@ public class LevelOne : MonoBehaviour
         var teamRootGO = new GameObject(teamRootName);
         teamRootGO.transform.position = plan.spawnPoint.position;
 
-        // UI centroid anchor
         var anchor = teamRootGO.AddComponent<EncounterTeamAnchor>();
         anchor.faction = EncounterDirectorPOC.Faction.Enemy;
         anchor.updateContinuously = true;
@@ -202,12 +206,9 @@ public class LevelOne : MonoBehaviour
         anchor.smoothSpeed = plan.anchorSmoothSpeed;
         anchor.driveTransformPosition = false;
 
-
         ApplyEnemyIconScale(anchor, plan);
-
         EnsureIconForTeam(teamRootGO.transform, anchor, plan);
 
-        // UI arrow target
         if (plan.moveTargetMode != MoveTargetMode.None)
         {
             var uiFeeder = teamRootGO.AddComponent<PlannedTargetFeeder>();
@@ -220,83 +221,91 @@ public class LevelOne : MonoBehaviour
             uiFeeder.SetOnceNow();
         }
 
-        // Spawn units
         var spawned = new List<GameObject>(32);
         if (usingEntries) SpawnFromEntries(plan, teamRootGO.transform, spawned);
         else SpawnLegacy(plan, teamRootGO.transform, spawned);
 
-        if (plan.moveTargetMode == MoveTargetMode.None) return;
-
-        // Attach per-controller march overrides
-        foreach (var unit in spawned)
+        if (plan.moveTargetMode != MoveTargetMode.None)
         {
-            if (unit == null) continue;
-
-            if (plan.enableEnemy2HardMarch && HasMonoByName(unit, "Enemy2Controller"))
+            foreach (var unit in spawned)
             {
-                var hard = unit.AddComponent<Enemy2HardMarchOverride>();
-                hard.mode = plan.moveTargetMode;
-                hard.playerTag = plan.playerTag;
-                hard.targetTransform = plan.targetTransform;
-                hard.fixedWorldPosition = plan.fixedWorldPosition;
+                if (unit == null) continue;
 
-                hard.arriveDistance = Mathf.Max(0.1f, plan.objectiveArriveDistance);
-                hard.maxSeconds = Mathf.Max(0.1f, plan.objectiveMaxSeconds);
-                hard.updateInterval = Mathf.Max(0.05f, plan.objectiveUpdateInterval);
+                if (plan.enableEnemy2HardMarch && HasMonoByName(unit, "Enemy2Controller"))
+                {
+                    var hard = unit.AddComponent<Enemy2HardMarchOverride>();
+                    hard.mode = plan.moveTargetMode;
+                    hard.playerTag = plan.playerTag;
+                    hard.targetTransform = plan.targetTransform;
+                    hard.fixedWorldPosition = plan.fixedWorldPosition;
 
-                hard.disableTeamLeashWhileMarching = plan.disableEnemy2TeamLeashWhileMarching;
-                hard.debug = plan.debugMarch;
-                continue;
-            }
+                    hard.arriveDistance = Mathf.Max(0.1f, plan.objectiveArriveDistance);
+                    hard.maxSeconds = Mathf.Max(0.1f, plan.objectiveMaxSeconds);
+                    hard.updateInterval = Mathf.Max(0.05f, plan.objectiveUpdateInterval);
 
-            if (plan.enableMeleeMarch && HasMonoByName(unit, "MeleeEnemy2Controller"))
-            {
-                var mm = unit.AddComponent<MeleeObjectiveMarchOverride>();
-                mm.mode = plan.moveTargetMode;
-                mm.playerTag = plan.playerTag;
-                mm.targetTransform = plan.targetTransform;
-                mm.fixedWorldPosition = plan.fixedWorldPosition;
+                    hard.disableTeamLeashWhileMarching = plan.disableEnemy2TeamLeashWhileMarching;
+                    hard.debug = plan.debugMarch;
+                    continue;
+                }
 
-                mm.arriveDistance = Mathf.Max(0.1f, plan.objectiveArriveDistance);
-                mm.maxSeconds = Mathf.Max(0.1f, plan.objectiveMaxSeconds);
-                mm.updateInterval = Mathf.Max(0.05f, plan.objectiveUpdateInterval);
+                if (plan.enableMeleeMarch && HasMonoByName(unit, "MeleeEnemy2Controller"))
+                {
+                    var mm = unit.AddComponent<MeleeObjectiveMarchOverride>();
+                    mm.mode = plan.moveTargetMode;
+                    mm.playerTag = plan.playerTag;
+                    mm.targetTransform = plan.targetTransform;
+                    mm.fixedWorldPosition = plan.fixedWorldPosition;
 
-                mm.debug = plan.debugMarch;
-                continue;
-            }
+                    mm.arriveDistance = Mathf.Max(0.1f, plan.objectiveArriveDistance);
+                    mm.maxSeconds = Mathf.Max(0.1f, plan.objectiveMaxSeconds);
+                    mm.updateInterval = Mathf.Max(0.05f, plan.objectiveUpdateInterval);
 
-            if (plan.enableDroneMarch && HasMonoByName(unit, "DroneEnemyController"))
-            {
-                var dm = unit.AddComponent<DroneObjectiveMarchOverride>();
-                dm.mode = plan.moveTargetMode;
-                dm.playerTag = plan.playerTag;
-                dm.targetTransform = plan.targetTransform;
-                dm.fixedWorldPosition = plan.fixedWorldPosition;
+                    mm.debug = plan.debugMarch;
+                    continue;
+                }
 
-                dm.arriveDistance = Mathf.Max(0.1f, plan.objectiveArriveDistance);
-                dm.maxSeconds = Mathf.Max(0.1f, plan.objectiveMaxSeconds);
-                dm.updateInterval = Mathf.Max(0.05f, plan.objectiveUpdateInterval);
+                if (plan.enableDroneMarch && HasMonoByName(unit, "DroneEnemyController"))
+                {
+                    var dm = unit.AddComponent<DroneObjectiveMarchOverride>();
+                    dm.mode = plan.moveTargetMode;
+                    dm.playerTag = plan.playerTag;
+                    dm.targetTransform = plan.targetTransform;
+                    dm.fixedWorldPosition = plan.fixedWorldPosition;
 
-                dm.debug = plan.debugMarch;
-                continue;
-            }
+                    dm.arriveDistance = Mathf.Max(0.1f, plan.objectiveArriveDistance);
+                    dm.maxSeconds = Mathf.Max(0.1f, plan.objectiveMaxSeconds);
+                    dm.updateInterval = Mathf.Max(0.05f, plan.objectiveUpdateInterval);
 
-            if (plan.enableFallbackNavAgentMarch)
-            {
-                var nm = unit.AddComponent<NavAgentMarchToObjective>();
-                nm.mode = plan.moveTargetMode;
-                nm.playerTag = plan.playerTag;
-                nm.targetTransform = plan.targetTransform;
-                nm.fixedWorldPosition = plan.fixedWorldPosition;
+                    dm.debug = plan.debugMarch;
+                    continue;
+                }
 
-                nm.arriveDistance = Mathf.Max(0.1f, plan.objectiveArriveDistance);
-                nm.maxSeconds = Mathf.Max(0.1f, plan.objectiveMaxSeconds);
-                nm.updateInterval = Mathf.Max(0.05f, plan.objectiveUpdateInterval);
+                if (plan.enableFallbackNavAgentMarch)
+                {
+                    var nm = unit.AddComponent<NavAgentMarchToObjective>();
+                    nm.mode = plan.moveTargetMode;
+                    nm.playerTag = plan.playerTag;
+                    nm.targetTransform = plan.targetTransform;
+                    nm.fixedWorldPosition = plan.fixedWorldPosition;
 
-                nm.aggroHoldSeconds = Mathf.Max(0f, plan.aggroHoldSeconds);
-                nm.debug = plan.debugMarch;
+                    nm.arriveDistance = Mathf.Max(0.1f, plan.objectiveArriveDistance);
+                    nm.maxSeconds = Mathf.Max(0.1f, plan.objectiveMaxSeconds);
+                    nm.updateInterval = Mathf.Max(0.05f, plan.objectiveUpdateInterval);
+
+                    nm.aggroHoldSeconds = Mathf.Max(0f, plan.aggroHoldSeconds);
+                    nm.debug = plan.debugMarch;
+                }
             }
         }
+
+        return new SpawnedTeamRuntimeInfo
+        {
+            teamIndex = teamIndex,
+            plan = plan,
+            teamRoot = teamRootGO.transform,
+            spawnedUnits = spawned,
+            anchor = anchor
+        };
     }
 
     // UnityEvent-friendly wrappers
@@ -478,6 +487,16 @@ public class LevelOne : MonoBehaviour
     }
 
     public enum MoveTargetMode { None = 0, Player = 1, Transform = 2, FixedPosition = 3 }
+
+    [Serializable]
+    public class SpawnedTeamRuntimeInfo
+    {
+        public int teamIndex = -1;
+        public TeamSpawnPlan plan;
+        public Transform teamRoot;
+        public List<GameObject> spawnedUnits = new List<GameObject>();
+        public EncounterTeamAnchor anchor;
+    }
 
     [Serializable]
     public class AllySpawnPlan

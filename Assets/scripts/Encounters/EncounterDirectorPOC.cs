@@ -136,6 +136,20 @@ public class EncounterDirectorPOC : MonoBehaviour
 
     private RectTransform _resolvedEnemyTeamIconsParent;
 
+    private class EncounterReinforcementRuntime
+    {
+        public Transform watchedTeamRoot;
+        public readonly HashSet<EnemyHealthController> watchedMembers = new HashSet<EnemyHealthController>();
+        public int backupGroupIndex = -1;
+        public int deathsRequired = 3;
+        public int deathCount = 0;
+        public bool triggered = false;
+        public Transform backupSpawnPointOverride;
+        public bool debugLogs = false;
+    }
+
+    private readonly List<EncounterReinforcementRuntime> _reinforcementRuntimes = new List<EncounterReinforcementRuntime>();
+
     private RectTransform ResolveEnemyTeamIconsParent()
     {
         if (enemyTeamIconsParent != null)
@@ -161,6 +175,18 @@ public class EncounterDirectorPOC : MonoBehaviour
         return null;
     }
 
+    private void OnEnable()
+    {
+        EnemyHealthController.OnAnyEnemyDied += HandleAnyEnemyDied;
+        DroneEnemyController.OnAnyDroneDied += HandleAnyDroneDied;
+    }
+
+    private void OnDisable()
+    {
+        EnemyHealthController.OnAnyEnemyDied -= HandleAnyEnemyDied;
+        DroneEnemyController.OnAnyDroneDied -= HandleAnyDroneDied;
+    }
+
     private void Start()
     {
         if (!spawnOnStart) return;
@@ -176,6 +202,7 @@ public class EncounterDirectorPOC : MonoBehaviour
     {
         // Clear cached members so repeat spawns don't accumulate old references (POC convenience)
         _enemyTeamMembers.Clear();
+        _reinforcementRuntimes.Clear();
 
         _allyTeamLeaders.Clear();
         _allyTeams.Clear();
@@ -342,75 +369,199 @@ public class EncounterDirectorPOC : MonoBehaviour
         for (int g = 0; g < groups.Length; g++)
         {
             var group = groups[g];
-            if (!group.enabled) continue;
-            Transform teamRoot = null;
-            string teamRootName = null;
+            if (faction == Faction.Enemy && group.spawnOnlyAsReinforcement)
+                continue;
 
-            if (createTeamRoots && group.teamIndex > 0)
+            SpawnGroupByIndex(groups, g, teamPrefix, faction, null, null);
+        }
+    }
+
+    private Transform SpawnGroupByIndex(SpawnGroup[] groups, int groupIndex, string teamPrefix, Faction faction, Vector3? runtimeObjectivePosition, Transform forcedSpawnPoint)
+    {
+        if (groups == null || groupIndex < 0 || groupIndex >= groups.Length) return null;
+
+        var group = groups[groupIndex];
+        if (!group.enabled) return null;
+
+        Transform teamRoot = null;
+        string teamRootName = null;
+
+        if (createTeamRoots && group.teamIndex > 0)
+        {
+            teamRootName = $"{teamPrefix}{group.teamIndex}";
+            teamRoot = GetOrCreateTeamRoot(teamRootName, faction);
+
+            if (faction == Faction.Enemy && group.overrideEnemyTeamIconScale && !string.IsNullOrEmpty(teamRootName))
             {
-                teamRootName = $"{teamPrefix}{group.teamIndex}";
-                teamRoot = GetOrCreateTeamRoot(teamRootName, faction);
-
-                // Per-team manual enemy icon scale override (applies to this teamIndex only)
-                if (faction == Faction.Enemy && group.overrideEnemyTeamIconScale && !string.IsNullOrEmpty(teamRootName))
+                var ov = new EnemyIconScaleOverride
                 {
-                    var ov = new EnemyIconScaleOverride
-                    {
-                        enabled = true,
-                        scale = (group.manualEnemyTeamIconScale > 0f) ? group.manualEnemyTeamIconScale : 1f,
-                        multiplier = (group.manualEnemyTeamIconScaleMultiplier > 0f) ? group.manualEnemyTeamIconScaleMultiplier : 1f
-                    };
-                    _enemyIconScaleOverrides[teamRootName] = ov;
-                    // Also push to EnemyTeamIconSystem (if present) so per-team scaling works even when EncounterDirectorPOC is not spawning icons.
-                    if (EnemyTeamIconSystem.Instance != null)
-                        EnemyTeamIconSystem.Instance.SetTeamScaleOverride(teamRootName, ov.scale, ov.multiplier, true);
-                }
-
+                    enabled = true,
+                    scale = (group.manualEnemyTeamIconScale > 0f) ? group.manualEnemyTeamIconScale : 1f,
+                    multiplier = (group.manualEnemyTeamIconScaleMultiplier > 0f) ? group.manualEnemyTeamIconScaleMultiplier : 1f
+                };
+                _enemyIconScaleOverrides[teamRootName] = ov;
+                if (EnemyTeamIconSystem.Instance != null)
+                    EnemyTeamIconSystem.Instance.SetTeamScaleOverride(teamRootName, ov.scale, ov.multiplier, true);
             }
+        }
 
-            var prefabSequence = BuildPrefabSequenceForGroup(group);
+        if (forcedSpawnPoint != null)
+        {
+            group.spawnPoints = new Transform[] { forcedSpawnPoint };
+            group.spawnAreaCenter = null;
+            group.spawnAreaRadius = 0f;
+        }
 
-            if (prefabSequence == null || prefabSequence.Length == 0)
+        var prefabSequence = BuildPrefabSequenceForGroup(group);
+        if (prefabSequence == null || prefabSequence.Length == 0)
+        {
+            Debug.LogWarning($"[{nameof(EncounterDirectorPOC)}] SpawnGroup {groupIndex} has no prefab(s) assigned or count is 0.", this);
+            return teamRoot;
+        }
+
+        List<GameObject> spawnedMembers = faction == Faction.Enemy ? new List<GameObject>(prefabSequence.Length) : null;
+
+        int count = prefabSequence.Length;
+        for (int i = 0; i < count; i++)
+        {
+            var spawnPose = ResolveSpawnPoseWithSeparation(group, i);
+            var chosenPrefab = prefabSequence[i];
+            if (chosenPrefab == null)
             {
-                Debug.LogWarning($"[{nameof(EncounterDirectorPOC)}] SpawnGroup {g} has no prefab(s) assigned or count is 0.", this);
+                Debug.LogWarning($"[{nameof(EncounterDirectorPOC)}] Group {groupIndex} has a null prefab in its sequence.", this);
                 continue;
             }
 
-            int count = prefabSequence.Length;
-            for (int i = 0; i < count; i++)
+            var spawnPos = spawnPose.position;
+            if (raiseDroneSpawns && PrefabIsDrone(chosenPrefab))
+                spawnPos += Vector3.up * droneSpawnYOffset;
+
+            var go = Instantiate(chosenPrefab, spawnPos, spawnPose.rotation);
+
+            if (teamRoot != null)
             {
-                var spawnPose = ResolveSpawnPoseWithSeparation(group, i);
-                var chosenPrefab = prefabSequence[i];
-                if (chosenPrefab == null)
-                {
-                    Debug.LogWarning($"[{nameof(EncounterDirectorPOC)}] Group {g} has a null prefab in its sequence.", this);
-                    continue;
-                }
-                var spawnPos = spawnPose.position;
-                if (raiseDroneSpawns && PrefabIsDrone(chosenPrefab))
-                    spawnPos += Vector3.up * droneSpawnYOffset;
+                go.transform.SetParent(teamRoot, true);
 
-                var go = Instantiate(chosenPrefab, spawnPos, spawnPose.rotation);
+                if (faction == Faction.Enemy && !string.IsNullOrEmpty(teamRootName))
+                    RegisterEnemyTeamMember(teamRootName, go.transform);
+            }
 
-                if (teamRoot != null)
-                {
-                    go.transform.SetParent(teamRoot, true);
+            if (faction == Faction.Enemy)
+                spawnedMembers?.Add(go);
 
-                    // Track live enemy members so the icon follows their centroid.
-                    if (faction == Faction.Enemy && !string.IsNullOrEmpty(teamRootName))
-                        RegisterEnemyTeamMember(teamRootName, go.transform);
-                }
+            if (faction == Faction.Ally && group.teamIndex > 0)
+                RegisterSpawnedAllyTeamMember(group.teamIndex, go.transform);
 
+            ApplyFactionTag(go, group);
+            BroadcastBehavior(go, group, teamRoot, runtimeObjectivePosition);
+        }
 
-                // Register spawned ALLY groups into TeamManager so the ally team icon/star
-                // can follow a leader (first spawned) and keep working with your existing command UI.
-                if (faction == Faction.Ally && group.teamIndex > 0)
-                    RegisterSpawnedAllyTeamMember(group.teamIndex, go.transform);
+        if (faction == Faction.Enemy && group.enableReinforcementTrigger)
+            RegisterEncounterReinforcement(group, teamRoot, spawnedMembers, groupIndex);
 
-                ApplyFactionTag(go, group);
-                BroadcastBehavior(go, group, teamRoot);
+        return teamRoot;
+    }
+
+    private void RegisterEncounterReinforcement(SpawnGroup group, Transform watchedTeamRoot, List<GameObject> spawnedMembers, int sourceGroupIndex)
+    {
+        if (watchedTeamRoot == null)
+        {
+            if (group.reinforcementDebugLogs)
+                Debug.LogWarning($"[{nameof(EncounterDirectorPOC)}] Reinforcement trigger on enemy group {sourceGroupIndex} needs a team root (teamIndex > 0).", this);
+            return;
+        }
+
+        int backupIndex = group.reinforcementEnemyGroupIndex;
+        if (enemyGroups == null || backupIndex < 0 || backupIndex >= enemyGroups.Length)
+        {
+            if (group.reinforcementDebugLogs)
+                Debug.LogWarning($"[{nameof(EncounterDirectorPOC)}] Reinforcement backup group index {backupIndex} is out of range for source enemy group {sourceGroupIndex}.", this);
+            return;
+        }
+
+        var rt = new EncounterReinforcementRuntime
+        {
+            watchedTeamRoot = watchedTeamRoot,
+            backupGroupIndex = backupIndex,
+            deathsRequired = Mathf.Max(1, group.reinforcementDeathsRequired),
+            backupSpawnPointOverride = group.reinforcementSpawnPointOverride,
+            debugLogs = group.reinforcementDebugLogs
+        };
+
+        if (spawnedMembers != null)
+        {
+            for (int i = 0; i < spawnedMembers.Count; i++)
+            {
+                var go = spawnedMembers[i];
+                if (go == null) continue;
+                var hp = go.GetComponent<EnemyHealthController>();
+                if (hp != null) rt.watchedMembers.Add(hp);
             }
         }
+
+        _reinforcementRuntimes.Add(rt);
+
+        if (rt.debugLogs)
+            Debug.Log($"[{nameof(EncounterDirectorPOC)}] Watching enemy group {sourceGroupIndex} team '{watchedTeamRoot.name}' for {rt.deathsRequired} deaths. Backup group index = {rt.backupGroupIndex}.", this);
+    }
+
+    private void HandleAnyEnemyDied(EnemyHealthController dead)
+    {
+        if (dead == null || _reinforcementRuntimes.Count == 0) return;
+
+        for (int i = _reinforcementRuntimes.Count - 1; i >= 0; i--)
+        {
+            var rt = _reinforcementRuntimes[i];
+            if (rt == null || rt.triggered) continue;
+
+            bool belongs = rt.watchedMembers.Contains(dead);
+            if (!belongs && rt.watchedTeamRoot != null)
+                belongs = dead.transform.IsChildOf(rt.watchedTeamRoot);
+
+            if (!belongs) continue;
+
+            rt.deathCount++;
+            if (rt.debugLogs)
+                Debug.Log($"[{nameof(EncounterDirectorPOC)}] Counted enemy death {rt.deathCount}/{rt.deathsRequired} for watched team '{(rt.watchedTeamRoot != null ? rt.watchedTeamRoot.name : "<null>")}'.", this);
+
+            if (rt.deathCount >= rt.deathsRequired)
+                TriggerEncounterReinforcement(rt);
+        }
+    }
+
+    private void HandleAnyDroneDied(DroneEnemyController dead)
+    {
+        if (dead == null || _reinforcementRuntimes.Count == 0) return;
+
+        for (int i = _reinforcementRuntimes.Count - 1; i >= 0; i--)
+        {
+            var rt = _reinforcementRuntimes[i];
+            if (rt == null || rt.triggered) continue;
+
+            bool belongs = rt.watchedTeamRoot != null && dead.transform.IsChildOf(rt.watchedTeamRoot);
+            if (!belongs) continue;
+
+            rt.deathCount++;
+            if (rt.debugLogs)
+                Debug.Log($"[{nameof(EncounterDirectorPOC)}] Counted drone death {rt.deathCount}/{rt.deathsRequired} for watched team '{(rt.watchedTeamRoot != null ? rt.watchedTeamRoot.name : "<null>")}'.", this);
+
+            if (rt.deathCount >= rt.deathsRequired)
+                TriggerEncounterReinforcement(rt);
+        }
+    }
+
+    private void TriggerEncounterReinforcement(EncounterReinforcementRuntime rt)
+    {
+        if (rt == null || rt.triggered) return;
+        rt.triggered = true;
+
+        Vector3 objective = rt.watchedTeamRoot != null ? rt.watchedTeamRoot.position : transform.position;
+        Transform spawned = SpawnGroupByIndex(enemyGroups, rt.backupGroupIndex, enemyTeamRootPrefix, Faction.Enemy, objective, rt.backupSpawnPointOverride);
+
+        if (rt.debugLogs)
+            Debug.Log(spawned != null
+                ? $"[{nameof(EncounterDirectorPOC)}] Spawned reinforcement enemy group {rt.backupGroupIndex} toward {objective}."
+                : $"[{nameof(EncounterDirectorPOC)}] Failed to spawn reinforcement enemy group {rt.backupGroupIndex}.", this);
     }
 
     private void RegisterEnemyTeamMember(string teamRootName, Transform member)
@@ -609,17 +760,18 @@ public class EncounterDirectorPOC : MonoBehaviour
         catch (Exception) { /* Tag not defined in Tag Manager; ignore */ }
     }
 
-    private void BroadcastBehavior(GameObject go, SpawnGroup group, Transform teamRoot)
+    private void BroadcastBehavior(GameObject go, SpawnGroup group, Transform teamRoot, Vector3? runtimeDefendCenterOverride = null)
     {
         if (go == null) return;
 
         // Always broadcast behavior enum (existing hooks in EncounterPatrolAgent / EncounterDefendAgent)
-        go.SendMessage("Encounter_SetBehavior", group.initialBehavior, SendMessageOptions.DontRequireReceiver);
+        EncounterBehavior effectiveBehavior = runtimeDefendCenterOverride.HasValue ? EncounterBehavior.Defend : group.initialBehavior;
+        go.SendMessage("Encounter_SetBehavior", effectiveBehavior, SendMessageOptions.DontRequireReceiver);
 
         // --- Patrol route points ---
         // If patrolPoints are provided, broadcast them so any script (including EncounterPatrolAgent) can consume them.
         var patrolWorld = ResolvePatrolPointsWorld(group);
-        if (patrolWorld != null && patrolWorld.Length > 0)
+        if (!runtimeDefendCenterOverride.HasValue && patrolWorld != null && patrolWorld.Length > 0)
         {
             go.SendMessage("Encounter_SetPatrolPoints", patrolWorld, SendMessageOptions.DontRequireReceiver);
 
@@ -645,16 +797,21 @@ public class EncounterDirectorPOC : MonoBehaviour
         // --- Hold / Defend center ---
         // For quick POC, we drive hold/defend by broadcasting a DefendPayload.
         // If you don't assign defendCenter, we fall back to spawnAreaCenter/teamRoot/EncounterDirector position.
-        if (group.initialBehavior == EncounterBehavior.Hold || group.initialBehavior == EncounterBehavior.Defend)
+        if (runtimeDefendCenterOverride.HasValue || group.initialBehavior == EncounterBehavior.Hold || group.initialBehavior == EncounterBehavior.Defend)
         {
-            Vector3 center = transform.position;
-
-            if (group.defendCenter != null) center = group.defendCenter.position;
+            Vector3 center;
+            if (runtimeDefendCenterOverride.HasValue)
+            {
+                center = runtimeDefendCenterOverride.Value;
+            }
+            else if (group.defendCenter != null) center = group.defendCenter.position;
             else if (group.spawnAreaCenter != null) center = group.spawnAreaCenter.position;
             else if (group.spawnPoints != null && group.spawnPoints.Length > 0 && group.spawnPoints[0] != null) center = group.spawnPoints[0].position;
             else if (teamRoot != null) center = teamRoot.position;
+            else center = transform.position;
 
-            float radius = (group.initialBehavior == EncounterBehavior.Defend) ? Mathf.Max(0f, group.defendRadius) : 0f;
+            bool treatAsDefend = runtimeDefendCenterOverride.HasValue || group.initialBehavior == EncounterBehavior.Defend;
+            float radius = treatAsDefend ? Mathf.Max(0f, group.defendRadius) : 0f;
 
             go.SendMessage("Encounter_SetDefend", new DefendPayload(center, radius), SendMessageOptions.DontRequireReceiver);
 
@@ -662,7 +819,7 @@ public class EncounterDirectorPOC : MonoBehaviour
             if (group.enableControllerAwareRouting)
                 EnsureObjectiveRouter(go, group, teamRoot, null, center, radius, true);
 
-            if (group.addBuiltInDefendAgentIfMissing && (group.initialBehavior == EncounterBehavior.Hold || group.initialBehavior == EncounterBehavior.Defend))
+            if (group.addBuiltInDefendAgentIfMissing && (runtimeDefendCenterOverride.HasValue || group.initialBehavior == EncounterBehavior.Hold || group.initialBehavior == EncounterBehavior.Defend))
             {
                 EnsureBuiltInDefend(go);
             }
@@ -1157,6 +1314,26 @@ public class EncounterDirectorPOC : MonoBehaviour
         [Tooltip("Safety timeout: stop routing after this many seconds (0 means never).")]
         public float routerMaxSeconds;
 
+
+        [Header("Encounter Spawn Control")]
+        [Tooltip("If enabled, this enemy group will NOT spawn during SpawnAll/SpawnOnStart. It can still be spawned later as a reinforcement backup group.")]
+        public bool spawnOnlyAsReinforcement;
+
+        [Header("Reinforcement Trigger (Enemy Only)")]
+        [Tooltip("If enabled, this spawned enemy group is watched. After enough deaths from this exact group, a backup enemy group is spawned.")]
+        public bool enableReinforcementTrigger;
+
+        [Tooltip("How many deaths from this exact spawned group are required before the backup group spawns.")]
+        public int reinforcementDeathsRequired;
+
+        [Tooltip("Index into Enemy Groups for the backup group that should spawn when the threshold is reached.")]
+        public int reinforcementEnemyGroupIndex;
+
+        [Tooltip("Optional: override spawn point for the backup group. Leave empty to use the backup group's own spawn settings.")]
+        public Transform reinforcementSpawnPointOverride;
+
+        [Tooltip("Enable logs for this group's reinforcement trigger.")]
+        public bool reinforcementDebugLogs;
 
         [Header("Tagging (Optional)")]
         public string overrideUnityTag;

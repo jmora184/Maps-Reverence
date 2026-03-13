@@ -53,6 +53,9 @@ public bool clearLocomotionParamsOnDeath = true;
     // UI can subscribe to this
     public event Action<float> OnHealth01Changed;
 
+    // Global death hook for reinforcement / encounter systems.
+    public static event Action<EnemyHealthController> OnAnyEnemyDied;
+
     public bool IsDead => _isDead;
 
     private bool _isDead;
@@ -164,6 +167,7 @@ public void DamageEnemy(int damageAmount)
 
         currentHealth = 0;
         RaiseHealthChanged();
+        OnAnyEnemyDied?.Invoke(this);
 
         // 1) Preferred: MnR.DeathController (plays anim, disables AI/nav, cleans up)
         var deathController = GetComponent<MnR.DeathController>();

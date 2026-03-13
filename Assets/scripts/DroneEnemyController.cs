@@ -1,3 +1,4 @@
+using System;
 using System.Collections;
 using UnityEngine;
 using UnityEngine.AI;
@@ -129,6 +130,8 @@ public class DroneEnemyController : MonoBehaviour
 
     private static readonly Collider[] _overlapBuffer = new Collider[64];
 
+    public static event Action<DroneEnemyController> OnAnyDroneDied;
+
     private void Awake()
     {
         _rb = GetComponent<Rigidbody>();
@@ -167,8 +170,8 @@ public class DroneEnemyController : MonoBehaviour
         state = (combatTarget != null) ? DroneState.Combat : DroneState.Patrol;
         _lostTargetTimer = 0f;
         _waiting = false;
-        _nextFireTime = Time.time + Random.Range(0f, Mathf.Max(0.05f, fireCooldown));
-        _nextAcquireTime = Time.time + Random.Range(0f, Mathf.Max(0.05f, autoAcquireInterval));
+        _nextFireTime = Time.time + UnityEngine.Random.Range(0f, Mathf.Max(0.05f, fireCooldown));
+        _nextAcquireTime = Time.time + UnityEngine.Random.Range(0f, Mathf.Max(0.05f, autoAcquireInterval));
         _nextSnapRetryTime = Time.time;
 
         if (_agent != null && _agent.enabled)
@@ -293,7 +296,7 @@ public class DroneEnemyController : MonoBehaviour
         _waiting = false;
 
         if (randomizeOrbitOnAggro)
-            orbitDirection = (Random.value < 0.5f) ? -1f : 1f;
+            orbitDirection = (UnityEngine.Random.value < 0.5f) ? -1f : 1f;
     }
 
     public void ClearCombatTarget()
@@ -810,6 +813,8 @@ public class DroneEnemyController : MonoBehaviour
 
         if (explosionPrefab != null)
             Instantiate(explosionPrefab, transform.position + explosionOffset, Quaternion.identity);
+
+        OnAnyDroneDied?.Invoke(this);
 
         enabled = false;
 

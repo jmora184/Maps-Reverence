@@ -128,6 +128,9 @@ public class BaseCaptureController : MonoBehaviour
         public string strengthGrade = "";
 
         [Header("Spawn")]
+        [Tooltip("If true, this team spawns during the normal post-capture wave after enemySpawnDelay. If false, it stays dormant until a reinforcement trigger spawns it.")]
+        public bool spawnAfterCaptureDelay = true;
+
         public Transform spawnPoint;
         public float spawnSpreadRadius = 6f;
         public bool snapToNavMesh = true;
@@ -162,6 +165,19 @@ public class BaseCaptureController : MonoBehaviour
         public float objectiveUpdateInterval = 0.25f;
         public float aggroHoldSeconds = 2f;
         public bool debugMarch = false;
+
+        [Header("Reinforcements")]
+        [Tooltip("If true, deaths from this spawned team can trigger a linked backup team.")]
+        public bool enableReinforcementTrigger = false;
+
+        [Min(1), Tooltip("How many deaths from this exact spawned team are required before its backup team spawns.")]
+        public int reinforcementDeathsRequired = 3;
+
+        [Tooltip("Index inside the Enemy Teams list of the backup team to spawn when the death threshold is reached. Use -1 to disable.")]
+        public int reinforcementEnemyTeamListIndex = -1;
+
+        [Tooltip("Optional override spawn point for the backup team. If empty, the backup team's own spawn point is used.")]
+        public Transform reinforcementSpawnPointOverride;
 
         [Header("Enable Overrides")]
         public bool enableEnemy2HardMarch = true;
@@ -435,23 +451,29 @@ public class BaseCaptureController : MonoBehaviour
         if (levelOne.teams == null)
             levelOne.teams = new List<LevelOne.TeamSpawnPlan>();
 
+        var levelPlanIndices = new List<int>(configs.Count);
         for (int cfgIndex = 0; cfgIndex < configs.Count; cfgIndex++)
         {
             EnemyTeamConfig cfg = configs[cfgIndex];
             if (cfg == null)
+            {
+                levelPlanIndices.Add(-1);
                 continue;
+            }
 
             bool usingEntries = cfg.spawnEntries != null && cfg.spawnEntries.Count > 0;
 
             if (cfg.spawnPoint == null)
             {
                 Debug.LogWarning($"[BaseCaptureController] Enemy spawn skipped for team {cfgIndex + 1} because Enemy Spawn Point is not assigned.", this);
+                levelPlanIndices.Add(-1);
                 continue;
             }
 
             if (!usingEntries && cfg.enemyPrefab == null)
             {
                 Debug.LogWarning($"[BaseCaptureController] Enemy spawn skipped for team {cfgIndex + 1} because neither Enemy Prefab nor Spawn Entries are assigned.", this);
+                levelPlanIndices.Add(-1);
                 continue;
             }
 
@@ -459,6 +481,7 @@ public class BaseCaptureController : MonoBehaviour
             {
                 if (debugLogs)
                     Debug.Log($"[BaseCaptureController] Enemy count is 0 for team {cfgIndex + 1}, so that counterattack team will not be spawned.", this);
+                levelPlanIndices.Add(-1);
                 continue;
             }
 
@@ -517,12 +540,51 @@ public class BaseCaptureController : MonoBehaviour
 
             int index = levelOne.teams.Count;
             levelOne.teams.Add(plan);
-            levelOne.SpawnTeam(index);
+            levelPlanIndices.Add(index);
+        }
+
+        for (int cfgIndex = 0; cfgIndex < configs.Count; cfgIndex++)
+        {
+            EnemyTeamConfig cfg = configs[cfgIndex];
+            if (cfg == null)
+                continue;
+
+            int planIndex = cfgIndex < levelPlanIndices.Count ? levelPlanIndices[cfgIndex] : -1;
+            if (planIndex < 0)
+                continue;
+
+            if (!cfg.spawnAfterCaptureDelay)
+                continue;
+
+            var runtime = levelOne.SpawnTeamAndGetRuntime(planIndex);
+            if (runtime == null)
+                continue;
+
             spawnedAnyEnemyTeam = true;
+
+            if (cfg.enableReinforcementTrigger && cfg.reinforcementEnemyTeamListIndex >= 0)
+            {
+                int backupCfgIndex = cfg.reinforcementEnemyTeamListIndex;
+                int backupPlanIndex = (backupCfgIndex >= 0 && backupCfgIndex < levelPlanIndices.Count) ? levelPlanIndices[backupCfgIndex] : -1;
+                if (backupPlanIndex >= 0)
+                {
+                    Transform backupSpawn = cfg.reinforcementSpawnPointOverride != null ? cfg.reinforcementSpawnPointOverride : null;
+                    ReinforcementTriggerController.Create(gameObject, runtime.teamRoot, runtime.spawnedUnits, levelOne, backupPlanIndex, Mathf.Max(1, cfg.reinforcementDeathsRequired), backupSpawn, debugLogs, this);
+                }
+                else if (debugLogs)
+                {
+                    Debug.LogWarning($"[BaseCaptureController] Reinforcement backup index {cfg.reinforcementEnemyTeamListIndex} is invalid for trigger team '{cfg.teamName}'.", this);
+                }
+            }
         }
 
         if (spawnedAnyEnemyTeam)
             ShowEnemyInboundWarningUI();
+    }
+
+    public void ShowEnemyInboundWarning()
+    {
+        ShowEnemyInboundWarningUI();
     }
 
     private void ShowEnemyInboundWarningUI()
