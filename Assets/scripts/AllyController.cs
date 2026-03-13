@@ -402,6 +402,35 @@ public class AllyController : MonoBehaviour
 
     public bool HasManualHoldPoint => _hasManualHold;
     public Vector3 ManualHoldPoint => _manualHoldPoint;
+
+    /// <summary>
+    /// Returns true once the ally has actually reached / settled into its player-issued move hold area.
+    /// While still traveling toward that hold point, we allow normal retaliation so move orders do not make
+    /// the ally ignore enemies encountered along the route.
+    /// </summary>
+    private bool IsSettledAtManualHoldPoint()
+    {
+        if (!enableManualHoldZone || !_hasManualHold)
+            return false;
+
+        float settleRadius = Mathf.Max(0.5f, manualHoldRadius);
+
+        if (agent == null)
+            return Vector3.Distance(transform.position, _manualHoldPoint) <= settleRadius;
+
+        if (agent.pathPending)
+            return false;
+
+        float distToHold = Vector3.Distance(transform.position, _manualHoldPoint);
+        if (distToHold > settleRadius)
+            return false;
+
+        // Require that we've largely finished the travel order too, so we don't count brief pass-throughs.
+        if (agent.hasPath && agent.remainingDistance > agent.stoppingDistance + markerArrivalBuffer + 0.1f)
+            return false;
+
+        return true;
+    }
     // -------------------- COMBAT STATE (read-only) --------------------
     // Exposed so CommandExecutor can avoid overriding movement while this unit is actively fighting,
     // and to allow "attack" orders to force a specific combat target.
@@ -554,7 +583,7 @@ public class AllyController : MonoBehaviour
                 float dist = Vector3.Distance(transform.position, currentEnemy.position);
 
                 // If we're in a manual hold zone (player-issued Move), never chase outside the leash.
-                if (enableManualHoldZone && _hasManualHold)
+                if (enableManualHoldZone && _hasManualHold && IsSettledAtManualHoldPoint())
                 {
                     float leash = Mathf.Max(0.1f, manualChaseLeashRadius);
                     float dSelf = Vector3.Distance(transform.position, _manualHoldPoint);
@@ -681,7 +710,7 @@ public class AllyController : MonoBehaviour
     private void TryAcquireEnemy()
     {
         // If we're holding a player-issued move position and auto-aggro is disabled, do nothing.
-        if (enableManualHoldZone && _hasManualHold && !manualHoldAllowsAutoAggro)
+        if (enableManualHoldZone && _hasManualHold && !manualHoldAllowsAutoAggro && IsSettledAtManualHoldPoint())
             return;
 
         Transform best = null;
@@ -713,7 +742,7 @@ public class AllyController : MonoBehaviour
                     if (d >= bestDist) continue;
 
                     // Manual-hold leash filter (don't focus-fire something outside our hold zone leash).
-                    if (enableManualHoldZone && _hasManualHold)
+                    if (enableManualHoldZone && _hasManualHold && IsSettledAtManualHoldPoint())
                     {
                         float leash = Mathf.Max(0.1f, manualChaseLeashRadius);
                         float dEnemyToHold = Vector3.Distance(enemy.position, _manualHoldPoint);
@@ -745,7 +774,7 @@ public class AllyController : MonoBehaviour
                 if (d >= distanceToChase) continue;
                 if (d >= bestDist) continue;
 
-                if (enableManualHoldZone && _hasManualHold)
+                if (enableManualHoldZone && _hasManualHold && IsSettledAtManualHoldPoint())
                 {
                     float leash = Mathf.Max(0.1f, manualChaseLeashRadius);
                     float dEnemyToHold = Vector3.Distance(t.position, _manualHoldPoint);
@@ -795,6 +824,31 @@ public class AllyController : MonoBehaviour
         }
 
         if (agent == null) { hasResumeDestination = false; return; }
+
+        // FIRST: if this unit still has a player-issued move destination, resume that before any team-anchor regroup logic.
+        // This is important for non-leader team members: otherwise the team-anchor fallback below can swallow the resume
+        // and leave only the leader continuing after combat.
+        if (enableManualHoldZone && _hasManualHold)
+        {
+            target = null;
+            agent.isStopped = false;
+            agent.SetDestination(_manualHoldPoint);
+            hasResumeDestination = false;
+            resumeWasFollowing = false;
+            return;
+        }
+
+        // Prefer the latest team/unit pinned destination next.
+        // This keeps team move orders authoritative even after a mid-route combat interruption.
+        if (TryGetLatestPinnedDestinationForTeamOrUnit(out Vector3 pinnedDest))
+        {
+            target = null;
+            agent.isStopped = false;
+            agent.SetDestination(pinnedDest);
+            hasResumeDestination = false;
+            resumeWasFollowing = false;
+            return;
+        }
 
         // ✅ TEAM RESUME FIX (updated):
         // If the team has an active pinned destination (player moved the team star / rally point),
@@ -897,26 +951,6 @@ public class AllyController : MonoBehaviour
                     return;
                 }
             }
-        }
-
-        // If we have a manual hold point (player Move order), always return to it after combat.
-        if (enableManualHoldZone && _hasManualHold && target == null)
-        {
-            agent.isStopped = false;
-            agent.SetDestination(_manualHoldPoint);
-            hasResumeDestination = false;
-            return;
-        }
-
-        // ✅ KEY FIX:
-        // If this unit has a pinned move destination (team/ally move pins), resume to the LATEST pinned destination.
-        // This solves: "ally resumes to original team spot after combat even if team destination was updated".
-        if (TryGetLatestPinnedDestinationForTeamOrUnit(out Vector3 pinnedDest))
-        {
-            agent.isStopped = false;
-            agent.SetDestination(pinnedDest);
-            hasResumeDestination = false;
-            return;
         }
 
         // Otherwise, resume the previously commanded destination (e.g., move-to-point).

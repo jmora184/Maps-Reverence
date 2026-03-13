@@ -48,6 +48,9 @@ public class BaseActivator : MonoBehaviour
     private Coroutine enemyWarningRoutine;
     private readonly Collider[] overlapResults = new Collider[128];
 
+    public bool IsActivated => hasActivated;
+    public bool AreEnemiesDetectedInArea => AreEnemiesActiveInArea();
+
     private void Awake()
     {
         FindPlayer();

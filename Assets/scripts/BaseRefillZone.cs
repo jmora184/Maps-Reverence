@@ -15,6 +15,16 @@ using UnityEngine;
 /// </summary>
 public class BaseRefillZone : MonoBehaviour
 {
+    [Header("Activation Gate")]
+    [Tooltip("If enabled, this refill zone only works after the linked/parent base has been activated.")]
+    public bool requireBaseActivation = true;
+
+    [Tooltip("Optional explicit reference. If left empty, the script will try to find a BaseActivator on this object or in parents.")]
+    public BaseActivator linkedBaseActivator;
+
+    [Tooltip("If enabled, refill is blocked while the linked/parent base detects enemies in the area.")]
+    public bool blockRefillWhenEnemiesDetected = true;
+
     [Header("Who triggers the refill")]
     [Tooltip("Optional. If set, only colliders with this tag will trigger player refill.")]
     public string playerTag = "Player";
@@ -42,6 +52,70 @@ public class BaseRefillZone : MonoBehaviour
 
     private float _nextAllowedTime = 0f;
 
+    private BaseActivator ResolveBaseActivator()
+    {
+        if (linkedBaseActivator != null) return linkedBaseActivator;
+
+        linkedBaseActivator = GetComponent<BaseActivator>();
+        if (linkedBaseActivator != null) return linkedBaseActivator;
+
+        linkedBaseActivator = GetComponentInParent<BaseActivator>();
+        return linkedBaseActivator;
+    }
+
+    private bool IsBaseActivated()
+    {
+        if (!requireBaseActivation) return true;
+
+        var activator = ResolveBaseActivator();
+        if (activator == null)
+        {
+            if (debugLogs)
+                Debug.LogWarning("[BaseRefillZone] Require Base Activation is enabled, but no BaseActivator was found. Refill blocked.", this);
+            return false;
+        }
+
+        // Prefer a public/property route if present.
+        var t = activator.GetType();
+        var prop = t.GetProperty("IsActivated", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        if (prop != null && prop.PropertyType == typeof(bool) && prop.CanRead)
+            return (bool)prop.GetValue(activator);
+
+        // Fallback to the private field used in your current BaseActivator implementation.
+        var field = t.GetField("hasActivated", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        if (field != null && field.FieldType == typeof(bool))
+            return (bool)field.GetValue(activator);
+
+        if (debugLogs)
+            Debug.LogWarning("[BaseRefillZone] Found BaseActivator, but could not read activation state. Refill blocked.", this);
+        return false;
+    }
+
+
+    private bool AreEnemiesBlockingRefill()
+    {
+        if (!blockRefillWhenEnemiesDetected) return false;
+
+        var activator = ResolveBaseActivator();
+        if (activator == null)
+            return false;
+
+        var t = activator.GetType();
+
+        var prop = t.GetProperty("AreEnemiesDetectedInArea", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        if (prop != null && prop.PropertyType == typeof(bool) && prop.CanRead)
+            return (bool)prop.GetValue(activator);
+
+        var method = t.GetMethod("AreEnemiesActiveInArea", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        if (method != null && method.ReturnType == typeof(bool) && method.GetParameters().Length == 0)
+            return (bool)method.Invoke(activator, null);
+
+        if (debugLogs)
+            Debug.LogWarning("[BaseRefillZone] Enemy blocking is enabled, but no readable enemy-detection state was found on BaseActivator. Refill will stay allowed.", this);
+
+        return false;
+    }
+
     private void Reset()
     {
         var bc = GetComponent<BoxCollider>();
@@ -59,6 +133,20 @@ public class BaseRefillZone : MonoBehaviour
     private void TryRefill(Collider other, bool entering)
     {
         if (Time.time < _nextAllowedTime) return;
+
+        if (!IsBaseActivated())
+        {
+            if (debugLogs)
+                Debug.Log($"[BaseRefillZone] Refill blocked because base is not activated yet. Triggered by {other.name}.", this);
+            return;
+        }
+
+        if (AreEnemiesBlockingRefill())
+        {
+            if (debugLogs)
+                Debug.Log($"[BaseRefillZone] Refill blocked because enemies are active in the area. Triggered by {other.name}.", this);
+            return;
+        }
 
         // ---- 1) Allies first (so allies don't get filtered out by playerTag) ----
         if (refillAllies)
