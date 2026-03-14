@@ -59,11 +59,21 @@ public class BaseCaptureController : MonoBehaviour
     [Tooltip("If true, the replacement icon copies anchored position / rotation / scale from the old icon.")]
     public bool preserveBaseIconLayout = true;
 
+    [Tooltip("Optional UI transform to copy placement from instead of using the old enemy icon. Useful when you want to manually place the captured ally icon.")]
+    public Transform capturedBaseIconPlacementTarget;
+
+    [Tooltip("If true and a placement target is assigned, the captured icon copies that target's anchors / position / size / rotation / scale.")]
+    public bool useCapturedIconPlacementTarget = false;
+
     [Tooltip("If true, the old icon is destroyed after replacement.")]
     public bool destroyOldBaseIcon = true;
 
     [Header("Ally Team Spawn")]
     public AllyTeamConfig allyTeam = new AllyTeamConfig();
+
+    [Header("Turret Ownership Switch")]
+    [Tooltip("Optional helper that disables enemy turrets and enables ally turrets when this base is captured.")]
+    public BaseTurretSwitcher baseTurretSwitcher;
 
     [Header("Enemy Team Counterattack")]
     [Tooltip("Optional legacy single counterattack team. Used only if Enemy Teams list is empty.")]
@@ -321,6 +331,7 @@ public class BaseCaptureController : MonoBehaviour
 
         SwapBaseIcon();
         EnableRefillZone();
+        SwitchBaseTurrets();
         SpawnAllyTeamImmediate();
 
         float delay = Mathf.Max(0f, enemySpawnDelay);
@@ -345,7 +356,11 @@ public class BaseCaptureController : MonoBehaviour
     private void SwapBaseIcon()
     {
         if (capturedBaseIconPrefab == null)
+        {
+            if (debugLogs)
+                Debug.LogWarning("[BaseCaptureController] Captured Base Icon Prefab is not assigned, so no ally base icon can be spawned.", this);
             return;
+        }
 
         RectTransform parent = replacementIconParent;
         if (parent == null && currentBaseIcon != null)
@@ -358,25 +373,96 @@ public class BaseCaptureController : MonoBehaviour
             return;
         }
 
+        int siblingIndex = parent.childCount;
+        Vector2 anchoredPosition = Vector2.zero;
+        Vector2 sizeDelta = Vector2.zero;
+        Vector2 anchorMin = new Vector2(0.5f, 0.5f);
+        Vector2 anchorMax = new Vector2(0.5f, 0.5f);
+        Vector2 pivot = new Vector2(0.5f, 0.5f);
+        Quaternion localRotation = Quaternion.identity;
+        Vector3 localScale = Vector3.one;
+
+        RectTransform layoutSource = null;
+        Transform placementTransform = null;
+
+        if (useCapturedIconPlacementTarget && capturedBaseIconPlacementTarget != null)
+        {
+            placementTransform = capturedBaseIconPlacementTarget;
+            layoutSource = capturedBaseIconPlacementTarget as RectTransform;
+        }
+        else if (currentBaseIcon != null)
+        {
+            placementTransform = currentBaseIcon;
+            layoutSource = currentBaseIcon;
+        }
+
+        if (placementTransform != null)
+        {
+            siblingIndex = placementTransform.GetSiblingIndex();
+            localRotation = placementTransform.localRotation;
+            localScale = placementTransform.localScale;
+        }
+
+        if (layoutSource != null)
+        {
+            anchoredPosition = layoutSource.anchoredPosition;
+            sizeDelta = layoutSource.sizeDelta;
+            anchorMin = layoutSource.anchorMin;
+            anchorMax = layoutSource.anchorMax;
+            pivot = layoutSource.pivot;
+        }
+
         RectTransform newIcon = Instantiate(capturedBaseIconPrefab, parent);
         newIcon.name = capturedBaseIconPrefab.name;
+        newIcon.gameObject.SetActive(true);
 
-        if (currentBaseIcon != null && preserveBaseIconLayout)
+        if (preserveBaseIconLayout && layoutSource != null)
         {
-            newIcon.anchorMin = currentBaseIcon.anchorMin;
-            newIcon.anchorMax = currentBaseIcon.anchorMax;
-            newIcon.pivot = currentBaseIcon.pivot;
-            newIcon.anchoredPosition = currentBaseIcon.anchoredPosition;
-            newIcon.sizeDelta = currentBaseIcon.sizeDelta;
-            newIcon.localRotation = currentBaseIcon.localRotation;
-            newIcon.localScale = currentBaseIcon.localScale;
-            newIcon.SetSiblingIndex(currentBaseIcon.GetSiblingIndex());
+            newIcon.anchorMin = anchorMin;
+            newIcon.anchorMax = anchorMax;
+            newIcon.pivot = pivot;
+            newIcon.anchoredPosition = anchoredPosition;
+            newIcon.sizeDelta = sizeDelta;
+            newIcon.localRotation = localRotation;
+            newIcon.localScale = localScale;
+            newIcon.SetSiblingIndex(Mathf.Clamp(siblingIndex, 0, Mathf.Max(0, parent.childCount - 1)));
+        }
+        else
+        {
+            newIcon.anchoredPosition3D = Vector3.zero;
+            newIcon.localRotation = Quaternion.identity;
+            newIcon.localScale = Vector3.one;
+        }
+
+        // Make sure the UI graphic on the spawned icon is actually enabled/visible.
+        var graphic = newIcon.GetComponent<Graphic>() ?? newIcon.GetComponentInChildren<Graphic>(true);
+        if (graphic != null)
+        {
+            graphic.enabled = true;
+            graphic.gameObject.SetActive(true);
         }
 
         if (currentBaseIcon != null && destroyOldBaseIcon)
             Destroy(currentBaseIcon.gameObject);
 
         currentBaseIcon = newIcon;
+
+        if (debugLogs)
+        {
+            string layoutSourceName = placementTransform != null ? placementTransform.name : "none";
+            Debug.Log($"[BaseCaptureController] Swapped base icon to '{currentBaseIcon.name}' under parent '{parent.name}' using layout source '{layoutSourceName}'.", this);
+        }
+    }
+
+    private void SwitchBaseTurrets()
+    {
+        if (baseTurretSwitcher == null)
+            return;
+
+        baseTurretSwitcher.SwitchToAlly();
+
+        if (debugLogs)
+            Debug.Log("[BaseCaptureController] Switched base turrets from enemy to ally.", this);
     }
 
     private void SpawnAllyTeamImmediate()

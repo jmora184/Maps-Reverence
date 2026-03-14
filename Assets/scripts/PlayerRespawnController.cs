@@ -1,0 +1,244 @@
+using System.Collections;
+using System.Collections.Generic;
+using System.Reflection;
+using UnityEngine;
+
+/// <summary>
+/// Simple player respawn handler.
+/// 
+/// Put this on the Player (or a manager object), assign a respawn point,
+/// and it will listen for PlayerVitals death events.
+///
+/// On death:
+/// - teleports player to the chosen respawn point
+/// - restores full health
+/// - refills ammo on the player's weapons
+///
+/// This tries to avoid editing your existing Player2Controller / turret / base logic.
+/// </summary>
+public class PlayerRespawnController : MonoBehaviour
+{
+    [Header("References")]
+    [SerializeField] private PlayerVitals playerVitals;
+    [SerializeField] private Player2Controller playerController;
+    [SerializeField] private CharacterController characterController;
+
+    [Header("Respawn")]
+    [Tooltip("Where the player should respawn after death.")]
+    [SerializeField] private Transform respawnPoint;
+
+    [Tooltip("Delay before respawn. 0 = instant.")]
+    [SerializeField] private float respawnDelay = 0f;
+
+    [Tooltip("If true, match the respawn point rotation too.")]
+    [SerializeField] private bool applyRespawnRotation = true;
+
+    [Header("Ammo Restore")]
+    [Tooltip("If true, tries to refill ammo on every weapon found in Player2Controller.guns.")]
+    [SerializeField] private bool restoreAmmoOnRespawn = true;
+
+    [Tooltip("Write debug logs when respawning/refilling.")]
+    [SerializeField] private bool debugLogs = false;
+
+    private bool isRespawning = false;
+
+    private void Reset()
+    {
+        if (playerVitals == null)
+            playerVitals = GetComponent<PlayerVitals>();
+
+        if (playerController == null)
+            playerController = GetComponent<Player2Controller>();
+
+        if (characterController == null)
+            characterController = GetComponent<CharacterController>();
+    }
+
+    private void Awake()
+    {
+        if (playerVitals == null)
+            playerVitals = GetComponent<PlayerVitals>();
+
+        if (playerController == null)
+            playerController = GetComponent<Player2Controller>();
+
+        if (characterController == null)
+            characterController = GetComponent<CharacterController>();
+    }
+
+    private void OnEnable()
+    {
+        if (playerVitals != null)
+            playerVitals.OnDied += HandlePlayerDied;
+    }
+
+    private void OnDisable()
+    {
+        if (playerVitals != null)
+            playerVitals.OnDied -= HandlePlayerDied;
+    }
+
+    private void HandlePlayerDied()
+    {
+        if (!isRespawning)
+            StartCoroutine(RespawnRoutine());
+    }
+
+    private IEnumerator RespawnRoutine()
+    {
+        isRespawning = true;
+
+        if (respawnDelay > 0f)
+            yield return new WaitForSeconds(respawnDelay);
+
+        RespawnNow();
+
+        isRespawning = false;
+    }
+
+    [ContextMenu("Respawn Now")]
+    public void RespawnNow()
+    {
+        if (respawnPoint == null)
+        {
+            Debug.LogWarning("[PlayerRespawnController] No respawn point assigned.", this);
+            return;
+        }
+
+        // Teleport safely with CharacterController disabled.
+        bool hadCC = characterController != null;
+        if (hadCC)
+            characterController.enabled = false;
+
+        Transform t = transform;
+        t.position = respawnPoint.position;
+
+        if (applyRespawnRotation)
+            t.rotation = respawnPoint.rotation;
+
+        if (hadCC)
+            characterController.enabled = true;
+
+        RestoreFullHealth();
+        if (restoreAmmoOnRespawn)
+            RestoreAmmo();
+
+        if (debugLogs)
+            Debug.Log("[PlayerRespawnController] Player respawned at chosen point with restored health/ammo.", this);
+    }
+
+    private void RestoreFullHealth()
+    {
+        if (playerVitals == null)
+            return;
+
+        playerVitals.SetHealth(playerVitals.MaxHealth, playerVitals.MaxHealth);
+    }
+
+    private void RestoreAmmo()
+    {
+        // First try weapons listed on Player2Controller.guns
+        if (playerController != null && playerController.guns != null)
+        {
+            for (int i = 0; i < playerController.guns.Count; i++)
+            {
+                var gun = playerController.guns[i];
+                if (gun == null) continue;
+
+                Component ammo = gun.GetComponent("WeaponAmmo");
+                if (ammo == null)
+                    ammo = gun.GetComponentInChildren(System.Type.GetType("WeaponAmmo"), true);
+
+                if (ammo != null)
+                    TryRefillAmmoComponent(ammo);
+            }
+        }
+
+        // Also try currently active ammo reference if present
+        if (playerController != null && playerController.activeWeaponAmmo != null)
+            TryRefillAmmoComponent(playerController.activeWeaponAmmo);
+    }
+
+    private void TryRefillAmmoComponent(object ammoObj)
+    {
+        if (ammoObj == null)
+            return;
+
+        System.Type type = ammoObj.GetType();
+
+        // Common field/property name pairs used in Unity weapon scripts.
+        // We try to set current values from their matching max values.
+        TrySetFromMatchingMax(type, ammoObj, "currentAmmo", "maxAmmo");
+        TrySetFromMatchingMax(type, ammoObj, "ammoInMag", "magazineSize");
+        TrySetFromMatchingMax(type, ammoObj, "ammoInClip", "clipSize");
+        TrySetFromMatchingMax(type, ammoObj, "currentMagazine", "maxMagazine");
+        TrySetFromMatchingMax(type, ammoObj, "currentClip", "maxClip");
+        TrySetFromMatchingMax(type, ammoObj, "reserveAmmo", "maxReserveAmmo");
+        TrySetFromMatchingMax(type, ammoObj, "currentReserve", "maxReserve");
+        TrySetFromMatchingMax(type, ammoObj, "storedAmmo", "maxStoredAmmo");
+        TrySetFromMatchingMax(type, ammoObj, "totalAmmo", "maxTotalAmmo");
+
+        // Some projects use a single "Refill"/"ReloadFull"/"FillAmmo" style method.
+        InvokeIfExists(type, ammoObj, "Refill");
+        InvokeIfExists(type, ammoObj, "RefillAmmo");
+        InvokeIfExists(type, ammoObj, "RestoreAmmo");
+        InvokeIfExists(type, ammoObj, "FillAmmo");
+        InvokeIfExists(type, ammoObj, "ReloadFull");
+        InvokeIfExists(type, ammoObj, "ResetAmmo");
+
+        if (debugLogs)
+            Debug.Log("[PlayerRespawnController] Tried to refill ammo on " + type.Name, this);
+    }
+
+    private void TrySetFromMatchingMax(System.Type type, object target, string currentName, string maxName)
+    {
+        object maxValue = GetMemberValue(type, target, maxName);
+        if (maxValue == null)
+            return;
+
+        if (maxValue is int maxInt)
+        {
+            SetMemberValue(type, target, currentName, maxInt);
+        }
+        else if (maxValue is float maxFloat)
+        {
+            SetMemberValue(type, target, currentName, maxFloat);
+        }
+    }
+
+    private object GetMemberValue(System.Type type, object target, string name)
+    {
+        FieldInfo field = type.GetField(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        if (field != null)
+            return field.GetValue(target);
+
+        PropertyInfo prop = type.GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        if (prop != null && prop.CanRead)
+            return prop.GetValue(target);
+
+        return null;
+    }
+
+    private void SetMemberValue(System.Type type, object target, string name, object value)
+    {
+        FieldInfo field = type.GetField(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        if (field != null)
+        {
+            field.SetValue(target, value);
+            return;
+        }
+
+        PropertyInfo prop = type.GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        if (prop != null && prop.CanWrite)
+        {
+            prop.SetValue(target, value);
+        }
+    }
+
+    private void InvokeIfExists(System.Type type, object target, string methodName)
+    {
+        MethodInfo method = type.GetMethod(methodName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, System.Type.EmptyTypes, null);
+        if (method != null)
+            method.Invoke(target, null);
+    }
+}

@@ -169,6 +169,32 @@ public class CommandOverlayUI : MonoBehaviour
         return false;
     }
 
+    private static void ApplyAllyGunIconSelection(Transform allyTransform, AllyHealthIcon allyUI)
+    {
+        if (allyTransform == null || allyUI == null) return;
+
+        var allyController = allyTransform.GetComponentInParent<AllyController>();
+        if (allyController == null) allyController = allyTransform.GetComponentInChildren<AllyController>();
+        if (allyController == null) allyController = allyTransform.GetComponent<AllyController>();
+        if (allyController == null) return;
+
+        switch (allyController.GetCommandModeGunIcon())
+        {
+            case AllyController.CommandModeGunIconType.Shotgun:
+                allyUI.SetGunVisual(AllyHealthIcon.GunVisualType.Shotgun);
+                break;
+
+            case AllyController.CommandModeGunIconType.Sniper:
+                allyUI.SetGunVisual(AllyHealthIcon.GunVisualType.Sniper);
+                break;
+
+            case AllyController.CommandModeGunIconType.Rifle:
+            default:
+                allyUI.SetGunVisual(AllyHealthIcon.GunVisualType.Rifle);
+                break;
+        }
+    }
+
 
     private void Awake()
     {
@@ -561,7 +587,11 @@ public class CommandOverlayUI : MonoBehaviour
 
             // Bind ally UI helpers (health bar, team tag, etc.)
             var allyUI = icon.GetComponent<AllyHealthIcon>();
-            if (allyUI != null) allyUI.Bind(go.transform);
+            if (allyUI != null)
+            {
+                allyUI.Bind(go.transform);
+                ApplyAllyGunIconSelection(go.transform, allyUI);
+            }
 
             var btn = icon.GetComponent<Button>();
             if (btn != null)

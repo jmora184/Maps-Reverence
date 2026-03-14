@@ -10,6 +10,17 @@ using Random = UnityEngine.Random;
 
 public class AllyController : MonoBehaviour
 {
+    public enum CommandModeGunIconType
+    {
+        Rifle,
+        Shotgun,
+        Sniper
+    }
+
+    [Header("Command Mode Icon")]
+    [Tooltip("Choose which weapon icon this ally should show in command mode. This is a manual per-ally setting.")]
+    public CommandModeGunIconType commandModeGunIcon = CommandModeGunIconType.Rifle;
+
     [Header("Movement")]
     public float moveSpeed;
 
@@ -258,6 +269,11 @@ public class AllyController : MonoBehaviour
 
     /// <summary>The enemy this ally is currently chasing (null when idle).</summary>
     public Transform CurrentEnemy => currentEnemy;
+
+    public CommandModeGunIconType GetCommandModeGunIcon()
+    {
+        return commandModeGunIcon;
+    }
 
     // Manual hold runtime
     private bool _hasManualHold;

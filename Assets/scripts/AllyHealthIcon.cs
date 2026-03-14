@@ -5,9 +5,18 @@
 /// - Health bar fill scaling (barFill pivot X must be 0)
 /// - Icon bob animation (unscaled time)
 /// - TeamTag (small star) visibility: only shows when the bound ally is part of a team
+/// - Gun visual switching so each ally icon can show a different weapon image
 /// </summary>
 public class AllyHealthIcon : MonoBehaviour
 {
+    public enum GunVisualType
+    {
+        None,
+        Rifle,
+        Shotgun,
+        Sniper
+    }
+
     [Header("Health Bar")]
     [SerializeField] private RectTransform barFill;   // drag HealthBar_Green here (pivot X must be 0)
 
@@ -22,6 +31,13 @@ public class AllyHealthIcon : MonoBehaviour
     [SerializeField] private float bobAmount = 6f;    // pixels up/down
     [SerializeField] private float bobSpeed = 2f;     // speed
 
+    [Header("Gun Visuals")]
+    [Tooltip("Pick which gun image this UI icon should show. You can set this manually per ally icon in the Inspector.")]
+    [SerializeField] private GunVisualType gunVisual = GunVisualType.Rifle;
+    [SerializeField] private GameObject rifleRoot;    // child named Rifle
+    [SerializeField] private GameObject shotgunRoot;  // child named Shotgun
+    [SerializeField] private GameObject sniperRoot;   // child named Sniper
+
     private Vector3 bobBaseLocalPos;
     private float bobSeed;
 
@@ -33,12 +49,7 @@ public class AllyHealthIcon : MonoBehaviour
 
     private void Awake()
     {
-        if (teamTagRoot == null)
-        {
-            // common child name; safe to ignore if not found
-            var t = transform.Find("TeamTag");
-            if (t != null) teamTagRoot = t.gameObject;
-        }
+        AutoAssignOptionalRefs();
 
         if (bobTarget != null)
         {
@@ -48,6 +59,7 @@ public class AllyHealthIcon : MonoBehaviour
 
         // Default: hidden unless forced or teamed
         SetTeamTagVisible(forceTeamTagVisible);
+        ApplyGunVisual();
     }
 
     private void OnEnable()
@@ -57,7 +69,16 @@ public class AllyHealthIcon : MonoBehaviour
 
         // Re-evaluate immediately when enabled
         nextTeamCheckTimeUnscaled = 0f;
+        ApplyGunVisual();
     }
+
+#if UNITY_EDITOR
+    private void OnValidate()
+    {
+        AutoAssignOptionalRefs();
+        ApplyGunVisual();
+    }
+#endif
 
     private void LateUpdate()
     {
@@ -109,6 +130,17 @@ public class AllyHealthIcon : MonoBehaviour
         nextTeamCheckTimeUnscaled = 0f;
     }
 
+    public void SetGunVisual(GunVisualType newGunVisual)
+    {
+        gunVisual = newGunVisual;
+        ApplyGunVisual();
+    }
+
+    public GunVisualType GetGunVisual()
+    {
+        return gunVisual;
+    }
+
     private void OnDestroy()
     {
         if (health != null)
@@ -130,6 +162,46 @@ public class AllyHealthIcon : MonoBehaviour
         lastTeamVisible = on;
         if (teamTagRoot != null)
             teamTagRoot.SetActive(on);
+    }
+
+    private void ApplyGunVisual()
+    {
+        SetActiveSafe(rifleRoot, gunVisual == GunVisualType.Rifle);
+        SetActiveSafe(shotgunRoot, gunVisual == GunVisualType.Shotgun);
+        SetActiveSafe(sniperRoot, gunVisual == GunVisualType.Sniper);
+    }
+
+    private void AutoAssignOptionalRefs()
+    {
+        if (teamTagRoot == null)
+        {
+            Transform t = FindDeepChild(transform, "TeamTag");
+            if (t != null) teamTagRoot = t.gameObject;
+        }
+
+        if (rifleRoot == null)
+        {
+            Transform t = FindDeepChild(transform, "Rifle");
+            if (t != null) rifleRoot = t.gameObject;
+        }
+
+        if (shotgunRoot == null)
+        {
+            Transform t = FindDeepChild(transform, "Shotgun");
+            if (t != null) shotgunRoot = t.gameObject;
+        }
+
+        if (sniperRoot == null)
+        {
+            Transform t = FindDeepChild(transform, "Sniper");
+            if (t != null) sniperRoot = t.gameObject;
+        }
+    }
+
+    private static void SetActiveSafe(GameObject go, bool active)
+    {
+        if (go != null && go.activeSelf != active)
+            go.SetActive(active);
     }
 
     private bool IsBoundAllyInATeam()
@@ -171,5 +243,24 @@ public class AllyHealthIcon : MonoBehaviour
 
         // Otherwise: return the original
         return t;
+    }
+
+    private static Transform FindDeepChild(Transform parent, string childName)
+    {
+        if (parent == null || string.IsNullOrEmpty(childName))
+            return null;
+
+        for (int i = 0; i < parent.childCount; i++)
+        {
+            Transform child = parent.GetChild(i);
+            if (child.name == childName)
+                return child;
+
+            Transform found = FindDeepChild(child, childName);
+            if (found != null)
+                return found;
+        }
+
+        return null;
     }
 }
