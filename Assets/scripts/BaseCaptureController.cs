@@ -5,6 +5,7 @@ using System.Reflection;
 using UnityEngine;
 using UnityEngine.Events;
 using UnityEngine.UI;
+using TMPro;
 
 /// <summary>
 /// Hooks into BaseActivator.onActivated and turns a captured base into:
@@ -655,7 +656,7 @@ public class BaseCaptureController : MonoBehaviour
                 if (backupPlanIndex >= 0)
                 {
                     Transform backupSpawn = cfg.reinforcementSpawnPointOverride != null ? cfg.reinforcementSpawnPointOverride : null;
-                    ReinforcementTriggerController.Create(gameObject, runtime.teamRoot, runtime.spawnedUnits, levelOne, backupPlanIndex, Mathf.Max(1, cfg.reinforcementDeathsRequired), backupSpawn, debugLogs, this);
+                    CreateReinforcementWatcher(runtime.teamRoot, runtime.spawnedUnits, backupPlanIndex, Mathf.Max(1, cfg.reinforcementDeathsRequired), backupSpawn);
                 }
                 else if (debugLogs)
                 {
@@ -689,12 +690,224 @@ public class BaseCaptureController : MonoBehaviour
 
     private IEnumerator ShowEnemyInboundWarningRoutine()
     {
-        enemyInboundWarningUI.SetActive(true);
-        yield return new WaitForSeconds(Mathf.Max(0.01f, enemyInboundWarningDuration));
+        SetEnemyInboundWarningVisible(true);
+        yield return new WaitForSecondsRealtime(Mathf.Max(0.01f, enemyInboundWarningDuration));
 
-        if (enemyInboundWarningUI != null)
-            enemyInboundWarningUI.SetActive(false);
-
+        SetEnemyInboundWarningVisible(false);
         _enemyInboundWarningRoutine = null;
+    }
+
+    private void CreateReinforcementWatcher(Transform watchedTeamRoot, List<GameObject> watchedUnits, int backupPlanIndex, int deathsRequired, Transform backupSpawnOverride)
+    {
+        var watcher = gameObject.AddComponent<BaseCaptureReinforcementWatcher>();
+        watcher.Initialize(this, watchedTeamRoot, watchedUnits, levelOne, backupPlanIndex, Mathf.Max(1, deathsRequired), backupSpawnOverride, debugLogs);
+    }
+
+    private sealed class BaseCaptureReinforcementWatcher : MonoBehaviour
+    {
+        private BaseCaptureController _owner;
+        private Transform _watchedTeamRoot;
+        private List<GameObject> _watchedUnits;
+        private LevelOne _levelOne;
+        private int _backupPlanIndex = -1;
+        private int _deathsRequired = 1;
+        private Transform _backupSpawnOverride;
+        private bool _debugLogs;
+        private bool _triggered;
+        private int _initialAliveCount;
+        private float _nextCheckTime;
+
+        public void Initialize(BaseCaptureController owner, Transform watchedTeamRoot, List<GameObject> watchedUnits, LevelOne levelOne, int backupPlanIndex, int deathsRequired, Transform backupSpawnOverride, bool debugLogs)
+        {
+            _owner = owner;
+            _watchedTeamRoot = watchedTeamRoot;
+            _watchedUnits = watchedUnits ?? new List<GameObject>();
+            _levelOne = levelOne;
+            _backupPlanIndex = backupPlanIndex;
+            _deathsRequired = Mathf.Max(1, deathsRequired);
+            _backupSpawnOverride = backupSpawnOverride;
+            _debugLogs = debugLogs;
+            _initialAliveCount = CountAlive(_watchedUnits);
+            _nextCheckTime = Time.time + 0.1f;
+
+            if (_debugLogs)
+                Debug.Log($"[BaseCaptureController] Watching reinforcement trigger for team '{(_watchedTeamRoot != null ? _watchedTeamRoot.name : "<null>")}'. Need {_deathsRequired} deaths. Backup plan index = {_backupPlanIndex}.", owner);
+        }
+
+        private void Update()
+        {
+            if (_triggered || _owner == null || _levelOne == null)
+            {
+                if (_triggered) Destroy(this);
+                return;
+            }
+
+            if (Time.time < _nextCheckTime)
+                return;
+
+            _nextCheckTime = Time.time + 0.15f;
+
+            int aliveNow = CountAlive(_watchedUnits);
+            int deaths = Mathf.Max(0, _initialAliveCount - aliveNow);
+
+            if (_debugLogs)
+            {
+                // Log only near threshold to avoid spam.
+                if (deaths > 0 && deaths >= _deathsRequired - 1)
+                    Debug.Log($"[BaseCaptureController] Reinforcement deaths counted {deaths}/{_deathsRequired} for watched team '{(_watchedTeamRoot != null ? _watchedTeamRoot.name : "<null>")}'.", _owner);
+            }
+
+            if (deaths >= _deathsRequired)
+                Trigger();
+        }
+
+        private void Trigger()
+        {
+            if (_triggered) return;
+            _triggered = true;
+
+            if (_backupPlanIndex < 0 || _backupPlanIndex >= _levelOne.teams.Count)
+            {
+                if (_debugLogs)
+                    Debug.LogWarning($"[BaseCaptureController] Reinforcement backup plan index {_backupPlanIndex} is out of range.", _owner);
+                Destroy(this);
+                return;
+            }
+
+            Vector3 objective = _owner != null ? _owner.transform.position : Vector3.zero;
+            if (_watchedTeamRoot != null)
+            {
+                var watchedAnchor = _watchedTeamRoot.GetComponent<EncounterTeamAnchor>();
+                if (watchedAnchor != null && watchedAnchor.HasMoveTarget)
+                    objective = watchedAnchor.MoveTarget;
+                else
+                    objective = _watchedTeamRoot.position;
+            }
+
+            var plan = _levelOne.teams[_backupPlanIndex];
+            if (plan == null)
+            {
+                if (_debugLogs)
+                    Debug.LogWarning($"[BaseCaptureController] Reinforcement backup plan {_backupPlanIndex} is null.", _owner);
+                Destroy(this);
+                return;
+            }
+
+            var savedSpawnPoint = plan.spawnPoint;
+            var savedMode = plan.moveTargetMode;
+            var savedPlayerTag = plan.playerTag;
+            var savedTargetTransform = plan.targetTransform;
+            var savedFixedWorldPosition = plan.fixedWorldPosition;
+            var savedUpdateEvery = plan.updatePlannedTargetEvery;
+            var savedContinuous = plan.updatePlannedTargetContinuously;
+
+            try
+            {
+                if (_backupSpawnOverride != null)
+                    plan.spawnPoint = _backupSpawnOverride;
+
+                plan.moveTargetMode = LevelOne.MoveTargetMode.FixedPosition;
+                plan.playerTag = string.IsNullOrWhiteSpace(plan.playerTag) ? "Player" : plan.playerTag;
+                plan.targetTransform = null;
+                plan.fixedWorldPosition = objective;
+                plan.updatePlannedTargetEvery = 0.25f;
+                plan.updatePlannedTargetContinuously = false;
+
+                var runtime = _levelOne.SpawnTeamAndGetRuntime(_backupPlanIndex);
+                if (runtime != null && runtime.anchor != null)
+                    runtime.anchor.SetMoveTarget(objective);
+
+                if (runtime != null && _owner != null)
+                    _owner.ShowEnemyInboundWarning();
+
+                if (_debugLogs)
+                    Debug.Log(runtime != null
+                        ? $"[BaseCaptureController] Spawned reinforcement backup plan {_backupPlanIndex} toward {objective}."
+                        : $"[BaseCaptureController] Failed to spawn reinforcement backup plan {_backupPlanIndex}.", _owner);
+            }
+            finally
+            {
+                plan.spawnPoint = savedSpawnPoint;
+                plan.moveTargetMode = savedMode;
+                plan.playerTag = savedPlayerTag;
+                plan.targetTransform = savedTargetTransform;
+                plan.fixedWorldPosition = savedFixedWorldPosition;
+                plan.updatePlannedTargetEvery = savedUpdateEvery;
+                plan.updatePlannedTargetContinuously = savedContinuous;
+            }
+
+            Destroy(this);
+        }
+
+        private static int CountAlive(List<GameObject> units)
+        {
+            if (units == null || units.Count == 0) return 0;
+
+            int alive = 0;
+            for (int i = 0; i < units.Count; i++)
+            {
+                var go = units[i];
+                if (go == null)
+                    continue;
+
+                if (go.activeInHierarchy)
+                    alive++;
+            }
+            return alive;
+        }
+    }
+
+    private void SetEnemyInboundWarningVisible(bool visible)
+    {
+        if (enemyInboundWarningUI == null)
+            return;
+
+        if (visible)
+        {
+            enemyInboundWarningUI.SetActive(true);
+
+            var rect = enemyInboundWarningUI.transform as RectTransform;
+            if (rect != null)
+                rect.SetAsLastSibling();
+
+            var groups = enemyInboundWarningUI.GetComponentsInChildren<CanvasGroup>(true);
+            foreach (var group in groups)
+            {
+                if (group == null)
+                    continue;
+
+                group.alpha = 1f;
+                group.interactable = false;
+                group.blocksRaycasts = false;
+            }
+
+            var graphics = enemyInboundWarningUI.GetComponentsInChildren<Graphic>(true);
+            foreach (var graphic in graphics)
+            {
+                if (graphic == null)
+                    continue;
+
+                graphic.enabled = true;
+                var c = graphic.color;
+                c.a = 1f;
+                graphic.color = c;
+            }
+
+            var tmpTexts = enemyInboundWarningUI.GetComponentsInChildren<TextMeshProUGUI>(true);
+            foreach (var tmp in tmpTexts)
+            {
+                if (tmp == null)
+                    continue;
+
+                tmp.enabled = true;
+                var c = tmp.color;
+                c.a = 1f;
+                tmp.color = c;
+            }
+        }
+        else
+        {
+            enemyInboundWarningUI.SetActive(false);
+        }
     }
 }

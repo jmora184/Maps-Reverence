@@ -1,4 +1,5 @@
 using System.Collections;
+using TMPro;
 using UnityEngine;
 using UnityEngine.Events;
 
@@ -15,6 +16,12 @@ public class BaseActivator : MonoBehaviour
     [SerializeField] private string readyPromptMessage = "Press M to activate";
     [SerializeField] private string blockedPromptMessage = "Enemies Active in Area";
     [SerializeField] private KeyCode activateKey = KeyCode.M;
+
+    [Header("Blocked Prompt UI")]
+    [Tooltip("Optional custom UI root shown instead of RecruitPromptUI when activation is blocked by nearby enemies.")]
+    [SerializeField] private GameObject blockedPromptUI;
+    [Tooltip("Optional text component updated with Blocked Prompt Message when Blocked Prompt UI is shown.")]
+    [SerializeField] private TMP_Text blockedPromptText;
 
     [Header("Player Detection")]
     [SerializeField] private string playerTag = "Player";
@@ -46,6 +53,7 @@ public class BaseActivator : MonoBehaviour
     private bool enemyWasDetectedAfterActivation;
     private string lastShownMessage = string.Empty;
     private Coroutine enemyWarningRoutine;
+    private bool enemyWarningVisibleByThisScript;
     private readonly Collider[] overlapResults = new Collider[128];
 
     public bool IsActivated => hasActivated;
@@ -54,13 +62,15 @@ public class BaseActivator : MonoBehaviour
     private void Awake()
     {
         FindPlayer();
-        SetEnemyWarningUIVisible(false);
+        enemyWarningVisibleByThisScript = false;
+        SetBlockedPromptVisible(false);
     }
 
     private void OnEnable()
     {
         FindPlayer();
-        SetEnemyWarningUIVisible(false);
+        enemyWarningVisibleByThisScript = false;
+        SetBlockedPromptVisible(false);
         RefreshPrompt(false);
     }
 
@@ -75,7 +85,8 @@ public class BaseActivator : MonoBehaviour
             enemyWarningRoutine = null;
         }
 
-        SetEnemyWarningUIVisible(false);
+        HideEnemyWarningOwnedByThisScript();
+        SetBlockedPromptVisible(false);
         playerInRange = false;
         lastShownMessage = string.Empty;
         enemyWasDetectedAfterActivation = false;
@@ -144,8 +155,7 @@ public class BaseActivator : MonoBehaviour
 
         hasActivated = true;
         enemyWasDetectedAfterActivation = false;
-        RecruitPromptUI.Hide();
-        lastShownMessage = string.Empty;
+        ClearPromptIfNeeded();
         onActivated?.Invoke();
     }
 
@@ -153,6 +163,14 @@ public class BaseActivator : MonoBehaviour
     {
         if (!string.IsNullOrWhiteSpace(message))
             readyPromptMessage = message;
+
+        RefreshPrompt(AreEnemiesActiveInArea());
+    }
+
+    public void SetBlockedPromptMessage(string message)
+    {
+        if (!string.IsNullOrWhiteSpace(message))
+            blockedPromptMessage = message;
 
         RefreshPrompt(AreEnemiesActiveInArea());
     }
@@ -195,14 +213,14 @@ public class BaseActivator : MonoBehaviour
         if (!hasActivated)
         {
             enemyWasDetectedAfterActivation = false;
-            SetEnemyWarningUIVisible(false);
+            HideEnemyWarningOwnedByThisScript();
             return;
         }
 
         if (!enemiesActive)
         {
             enemyWasDetectedAfterActivation = false;
-            SetEnemyWarningUIVisible(false);
+            HideEnemyWarningOwnedByThisScript();
             return;
         }
 
@@ -228,20 +246,49 @@ public class BaseActivator : MonoBehaviour
     {
         SetEnemyWarningUIVisible(true);
         yield return new WaitForSeconds(Mathf.Max(0.01f, enemyDetectedWarningDuration));
-        SetEnemyWarningUIVisible(false);
+        HideEnemyWarningOwnedByThisScript();
         enemyWarningRoutine = null;
+    }
+
+    private void HideEnemyWarningOwnedByThisScript()
+    {
+        if (!enemyWarningVisibleByThisScript)
+            return;
+
+        SetEnemyWarningUIVisible(false);
     }
 
     private void SetEnemyWarningUIVisible(bool visible)
     {
-        if (enemyDetectedWarningUI != null)
-            enemyDetectedWarningUI.SetActive(visible);
+        if (enemyDetectedWarningUI == null)
+            return;
+
+        enemyDetectedWarningUI.SetActive(visible);
+        enemyWarningVisibleByThisScript = visible;
     }
 
     private void ShowPrompt(string message)
     {
         if (string.IsNullOrWhiteSpace(message))
             return;
+
+        bool isBlockedMessage = message == blockedPromptMessage;
+
+        if (isBlockedMessage)
+        {
+            if (blockedPromptText != null)
+                blockedPromptText.text = blockedPromptMessage;
+
+            if (blockedPromptUI != null)
+            {
+                RecruitPromptUI.Hide();
+                SetBlockedPromptVisible(true);
+                lastShownMessage = message;
+                return;
+            }
+        }
+
+        SetBlockedPromptVisible(false);
 
         if (lastShownMessage == message)
             return;
@@ -252,11 +299,25 @@ public class BaseActivator : MonoBehaviour
 
     private void ClearPromptIfNeeded()
     {
-        if (string.IsNullOrEmpty(lastShownMessage))
+        if (string.IsNullOrEmpty(lastShownMessage) && !IsBlockedPromptVisible())
             return;
 
         RecruitPromptUI.Hide();
+        SetBlockedPromptVisible(false);
         lastShownMessage = string.Empty;
+    }
+
+    private void SetBlockedPromptVisible(bool visible)
+    {
+        if (blockedPromptUI == null)
+            return;
+
+        blockedPromptUI.SetActive(visible);
+    }
+
+    private bool IsBlockedPromptVisible()
+    {
+        return blockedPromptUI != null && blockedPromptUI.activeSelf;
     }
 
     private bool AreEnemiesActiveInArea()

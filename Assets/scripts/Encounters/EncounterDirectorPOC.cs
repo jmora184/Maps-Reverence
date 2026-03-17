@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
@@ -49,6 +50,13 @@ public class EncounterDirectorPOC : MonoBehaviour
 
     [Header("Ally Groups")]
     public SpawnGroup[] allyGroups;
+
+    [Header("Enemy Inbound Warning UI")]
+    [Tooltip("Optional warning UI to show ONLY when a reinforcement/backup enemy group spawns.")]
+    public GameObject enemyInboundWarningUI;
+
+    [Tooltip("How long to show the inbound warning UI.")]
+    public float enemyInboundWarningDuration = 2f;
 
     [Header("Enemy Team Icons (Command Mode)")]
     public bool spawnEnemyTeamIcons = true;
@@ -135,6 +143,7 @@ public class EncounterDirectorPOC : MonoBehaviour
 
 
     private RectTransform _resolvedEnemyTeamIconsParent;
+    private Coroutine _enemyInboundWarningRoutine;
 
     private class EncounterReinforcementRuntime
     {
@@ -403,6 +412,15 @@ public class EncounterDirectorPOC : MonoBehaviour
                 if (EnemyTeamIconSystem.Instance != null)
                     EnemyTeamIconSystem.Instance.SetTeamScaleOverride(teamRootName, ov.scale, ov.multiplier, true);
             }
+
+            // Important: reinforcement-only enemy groups do NOT exist during the startup icon pass,
+            // so make sure their star/icon is created at the moment the team root is spawned.
+            if (faction == Faction.Enemy && spawnEnemyTeamIcons && !string.IsNullOrEmpty(teamRootName) && teamRoot != null)
+            {
+                var prefabToUse = group.teamIconPrefabOverride != null ? group.teamIconPrefabOverride : defaultEnemyTeamIconPrefab;
+                if (prefabToUse != null)
+                    EnsureEnemyTeamIcon(teamRootName, teamRoot, prefabToUse);
+            }
         }
 
         if (forcedSpawnPoint != null)
@@ -555,13 +573,69 @@ public class EncounterDirectorPOC : MonoBehaviour
         if (rt == null || rt.triggered) return;
         rt.triggered = true;
 
-        Vector3 objective = rt.watchedTeamRoot != null ? rt.watchedTeamRoot.position : transform.position;
+        Vector3 objective = transform.position;
+        if (rt.watchedTeamRoot != null)
+        {
+            var watchedAnchor = rt.watchedTeamRoot.GetComponent<EncounterTeamAnchor>();
+            if (watchedAnchor != null && watchedAnchor.HasMoveTarget)
+                objective = watchedAnchor.MoveTarget;
+            else
+                objective = rt.watchedTeamRoot.position;
+        }
+
         Transform spawned = SpawnGroupByIndex(enemyGroups, rt.backupGroupIndex, enemyTeamRootPrefix, Faction.Enemy, objective, rt.backupSpawnPointOverride);
+
+        if (spawned != null)
+            ShowEnemyInboundWarningUI();
 
         if (rt.debugLogs)
             Debug.Log(spawned != null
                 ? $"[{nameof(EncounterDirectorPOC)}] Spawned reinforcement enemy group {rt.backupGroupIndex} toward {objective}."
                 : $"[{nameof(EncounterDirectorPOC)}] Failed to spawn reinforcement enemy group {rt.backupGroupIndex}.", this);
+    }
+
+    private void ShowEnemyInboundWarningUI()
+    {
+        if (enemyInboundWarningUI == null)
+            return;
+
+        if (_enemyInboundWarningRoutine != null)
+            StopCoroutine(_enemyInboundWarningRoutine);
+
+        _enemyInboundWarningRoutine = StartCoroutine(ShowEnemyInboundWarningRoutine());
+    }
+
+    private IEnumerator ShowEnemyInboundWarningRoutine()
+    {
+        SetEnemyInboundWarningVisible(true);
+        yield return new WaitForSecondsRealtime(Mathf.Max(0.01f, enemyInboundWarningDuration));
+        SetEnemyInboundWarningVisible(false);
+        _enemyInboundWarningRoutine = null;
+    }
+
+    private void SetEnemyInboundWarningVisible(bool visible)
+    {
+        if (enemyInboundWarningUI == null)
+            return;
+
+        enemyInboundWarningUI.SetActive(visible);
+
+        if (visible)
+        {
+            var rect = enemyInboundWarningUI.transform as RectTransform;
+            if (rect != null)
+                rect.SetAsLastSibling();
+
+            var groups = enemyInboundWarningUI.GetComponentsInChildren<CanvasGroup>(true);
+            for (int i = 0; i < groups.Length; i++)
+            {
+                var group = groups[i];
+                if (group == null) continue;
+                group.alpha = 1f;
+                group.interactable = false;
+                group.blocksRaycasts = false;
+            }
+        }
     }
 
     private void RegisterEnemyTeamMember(string teamRootName, Transform member)
@@ -1062,17 +1136,34 @@ public class EncounterDirectorPOC : MonoBehaviour
         if (onlyShowWhenCommandCameraEnabled)
             show = commandCamera.enabled && commandCamera.gameObject.activeInHierarchy;
 
-
         Camera uiCamera = null;
         if (_iconsCanvas != null && _iconsCanvas.renderMode != RenderMode.ScreenSpaceOverlay)
         {
             uiCamera = _iconsCanvas.worldCamera != null ? _iconsCanvas.worldCamera : commandCamera;
         }
 
+        List<string> deadTeams = null;
+
         foreach (var kvp in _enemyTeamIcons)
         {
             var data = kvp.Value;
-            if (data == null || data.iconRect == null) continue;
+            if (data == null || data.iconRect == null)
+            {
+                if (deadTeams == null) deadTeams = new List<string>();
+                deadTeams.Add(kvp.Key);
+                continue;
+            }
+
+            int liveCount = GetEnemyTeamLiveMemberCount(data.teamRootName);
+            if (liveCount <= 0)
+            {
+                if (data.iconRect != null)
+                    Destroy(data.iconRect.gameObject);
+
+                if (deadTeams == null) deadTeams = new List<string>();
+                deadTeams.Add(kvp.Key);
+                continue;
+            }
 
             if (!show)
             {
@@ -1100,11 +1191,9 @@ public class EncounterDirectorPOC : MonoBehaviour
                 local += iconScreenOffsetPixels;
                 data.iconRect.anchoredPosition = local;
             }
-            // Scale by enemy team size (or per-team manual override). Applied here once per frame (enemy icons only).
-            int liveCount = GetEnemyTeamLiveMemberCount(data.teamRootName);
+
             float s;
 
-            // Per-team manual scale override (set by an Enemy SpawnGroup with overrideEnemyTeamIconScale=true)
             if (_enemyIconScaleOverrides.TryGetValue(data.teamRootName, out var ov) && ov.enabled)
             {
                 s = (ov.scale > 0f) ? ov.scale : 1f;
@@ -1131,8 +1220,19 @@ public class EncounterDirectorPOC : MonoBehaviour
             data.iconRect.localScale = Vector3.one;
             ApplyEnemyTeamStarImageScale(data.iconRect, s);
             MaybeLogEnemyIconScale(data.teamRootName, liveCount, s, data.iconRect);
-            // Keep above other UI elements that may be rebuilt/reordered.
             data.iconRect.SetAsLastSibling();
+        }
+
+        if (deadTeams != null)
+        {
+            for (int i = 0; i < deadTeams.Count; i++)
+            {
+                string key = deadTeams[i];
+                _enemyTeamIcons.Remove(key);
+                _enemyTeamMembers.Remove(key);
+                _enemyIconScaleOverrides.Remove(key);
+                _nextEnemyIconScaleLogTime.Remove(key);
+            }
         }
     }
 
@@ -1151,6 +1251,9 @@ public class EncounterDirectorPOC : MonoBehaviour
                     list.RemoveAt(i);
                     continue;
                 }
+
+                if (!t.gameObject.activeInHierarchy)
+                    continue;
 
                 sum += t.position;
                 alive++;
@@ -1408,6 +1511,9 @@ public class EncounterDirectorPOC : MonoBehaviour
                     list.RemoveAt(i);
                     continue;
                 }
+
+                if (!t.gameObject.activeInHierarchy)
+                    continue;
 
                 alive++;
             }

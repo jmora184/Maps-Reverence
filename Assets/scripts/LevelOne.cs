@@ -225,6 +225,21 @@ public class LevelOne : MonoBehaviour
         if (usingEntries) SpawnFromEntries(plan, teamRootGO.transform, spawned);
         else SpawnLegacy(plan, teamRootGO.transform, spawned);
 
+        if (_iconsByTeamRoot.TryGetValue(teamRootGO.transform, out var iconData) && iconData != null)
+        {
+            if (iconData.members == null)
+                iconData.members = new List<Transform>(spawned.Count);
+            else
+                iconData.members.Clear();
+
+            for (int i = 0; i < spawned.Count; i++)
+            {
+                var unit = spawned[i];
+                if (unit != null)
+                    iconData.members.Add(unit.transform);
+            }
+        }
+
         if (plan.moveTargetMode != MoveTargetMode.None)
         {
             foreach (var unit in spawned)
@@ -1240,8 +1255,26 @@ public class LevelOne : MonoBehaviour
     private int GetLiveEnemyCount(Transform teamRoot)
     {
         if (!teamRoot) return 0;
-        // In LevelOne, enemies are typically parented under the enemy team root. Use childCount as a simple proxy.
-        // If you later stop parenting enemies under the root, we can switch this to a tracked list like allies.
+
+        if (_iconsByTeamRoot.TryGetValue(teamRoot, out var data) && data != null && data.members != null && data.members.Count > 0)
+        {
+            int trackedLive = 0;
+            for (int i = data.members.Count - 1; i >= 0; i--)
+            {
+                var t = data.members[i];
+                if (t == null)
+                {
+                    data.members.RemoveAt(i);
+                    continue;
+                }
+
+                if (t.gameObject.activeInHierarchy)
+                    trackedLive++;
+            }
+
+            return trackedLive;
+        }
+
         int live = 0;
         for (int i = 0; i < teamRoot.childCount; i++)
         {
@@ -1573,6 +1606,7 @@ public class Enemy2HardMarchOverride : MonoBehaviour
 
     private bool _hadLeash;
     private bool _origLeash;
+    private bool _completedObjective;
 
     private void Awake()
     {
@@ -1603,7 +1637,11 @@ public class Enemy2HardMarchOverride : MonoBehaviour
 
     private void OnDestroy()
     {
-        if (_enemy2 != null && _hadLeash && _fEnableTeamLeash != null)
+        // Important: if this scripted march FINISHED successfully, do NOT restore team leash.
+        // Restoring the original leash here can make Enemy2 units snap back toward their
+        // original spawn/root anchor and ping-pong between the objective and that anchor.
+        // We only restore leash when the override ends early (timeout/despawn/etc.).
+        if (_enemy2 != null && _hadLeash && _fEnableTeamLeash != null && !_completedObjective)
             _fEnableTeamLeash.SetValue(_enemy2, _origLeash);
 
         if (_proxyGO != null) Destroy(_proxyGO);
@@ -1622,6 +1660,7 @@ public class Enemy2HardMarchOverride : MonoBehaviour
 
         if (Vector3.Distance(transform.position, obj.Value) <= arriveDistance)
         {
+            _completedObjective = true;
             ClearObjectiveInjection();
             Destroy(this);
             return;
