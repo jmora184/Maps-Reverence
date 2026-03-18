@@ -501,7 +501,7 @@ public class EncounterDirectorPOC : MonoBehaviour
         {
             watchedTeamRoot = watchedTeamRoot,
             backupGroupIndex = backupIndex,
-            deathsRequired = Mathf.Max(1, group.reinforcementDeathsRequired),
+            deathsRequired = Mathf.Max(0, group.reinforcementDeathsRequired),
             backupSpawnPointOverride = group.reinforcementSpawnPointOverride,
             debugLogs = group.reinforcementDebugLogs
         };
@@ -521,6 +521,9 @@ public class EncounterDirectorPOC : MonoBehaviour
 
         if (rt.debugLogs)
             Debug.Log($"[{nameof(EncounterDirectorPOC)}] Watching enemy group {sourceGroupIndex} team '{watchedTeamRoot.name}' for {rt.deathsRequired} deaths. Backup group index = {rt.backupGroupIndex}.", this);
+
+        if (rt.deathsRequired <= 0)
+            TriggerEncounterReinforcement(rt);
     }
 
     private void HandleAnyEnemyDied(EnemyHealthController dead)
@@ -573,24 +576,14 @@ public class EncounterDirectorPOC : MonoBehaviour
         if (rt == null || rt.triggered) return;
         rt.triggered = true;
 
-        Vector3 objective = transform.position;
-        if (rt.watchedTeamRoot != null)
-        {
-            var watchedAnchor = rt.watchedTeamRoot.GetComponent<EncounterTeamAnchor>();
-            if (watchedAnchor != null && watchedAnchor.HasMoveTarget)
-                objective = watchedAnchor.MoveTarget;
-            else
-                objective = rt.watchedTeamRoot.position;
-        }
-
-        Transform spawned = SpawnGroupByIndex(enemyGroups, rt.backupGroupIndex, enemyTeamRootPrefix, Faction.Enemy, objective, rt.backupSpawnPointOverride);
+        Transform spawned = SpawnGroupByIndex(enemyGroups, rt.backupGroupIndex, enemyTeamRootPrefix, Faction.Enemy, null, rt.backupSpawnPointOverride);
 
         if (spawned != null)
             ShowEnemyInboundWarningUI();
 
         if (rt.debugLogs)
             Debug.Log(spawned != null
-                ? $"[{nameof(EncounterDirectorPOC)}] Spawned reinforcement enemy group {rt.backupGroupIndex} toward {objective}."
+                ? $"[{nameof(EncounterDirectorPOC)}] Spawned reinforcement enemy group {rt.backupGroupIndex} using its own group behavior/objective data."
                 : $"[{nameof(EncounterDirectorPOC)}] Failed to spawn reinforcement enemy group {rt.backupGroupIndex}.", this);
     }
 

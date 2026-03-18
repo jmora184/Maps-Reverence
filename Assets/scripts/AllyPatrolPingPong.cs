@@ -37,6 +37,10 @@ public class AllyPatrolPingPong : MonoBehaviour
     [Header("Enable/Disable")]
     public bool patrolEnabledOnStart = true;
 
+    [Header("Auto Stop Conditions")]
+    [Tooltip("If true, patrol automatically turns off when this ally becomes a player follower.")]
+    public bool stopPatrolWhenFollowingPlayer = true;
+
     private NavMeshAgent _agent;
 
     private Vector3 _startPos;
@@ -139,10 +143,51 @@ public class AllyPatrolPingPong : MonoBehaviour
         return pos;
     }
 
+    private bool IsFollowingPlayer()
+    {
+        if (!stopPatrolWhenFollowingPlayer) return false;
+
+        var squad = PlayerSquadFollowSystem.Instance;
+        if (squad == null) return false;
+
+        // Preferred path if your current PlayerSquadFollowSystem has the helper method we added.
+        var isFollowingMethod = squad.GetType().GetMethod("IsFollowing");
+        if (isFollowingMethod != null)
+        {
+            object result = isFollowingMethod.Invoke(squad, new object[] { transform });
+            if (result is bool isFollowing) return isFollowing;
+        }
+
+        // Fallback for older versions: inspect the private follower list via reflection.
+        var followersField = squad.GetType().GetField("followers",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+
+        if (followersField != null)
+        {
+            var list = followersField.GetValue(squad) as System.Collections.IEnumerable;
+            if (list != null)
+            {
+                foreach (var item in list)
+                {
+                    if (ReferenceEquals(item, transform))
+                        return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     private void Update()
     {
         if (!patrolEnabledOnStart) return;
         if (_agent == null) return;
+
+        if (IsFollowingPlayer())
+        {
+            SetPatrolEnabled(false);
+            return;
+        }
 
         // Ensure patrol keeps control even if other scripts fight it.
         ForceWalkStateHard();

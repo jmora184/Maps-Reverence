@@ -70,6 +70,10 @@ public class PlayerSquadFollowSystem : MonoBehaviour
     [Tooltip("Player transform. If null, will auto-find by tag 'Player'.")]
     public Transform player;
 
+    [Header("Follower Limit")]
+    [Tooltip("Maximum number of allies that can follow the player at one time.")]
+    public int maxFollowers = 6;
+
     [Header("Activation")]
     [Tooltip("If true, we automatically stop following whenever command mode is entered (so command orders don't fight with follow slots).")]
     public bool stopFollowWhenEnterCommandMode = false;
@@ -253,6 +257,16 @@ public class PlayerSquadFollowSystem : MonoBehaviour
     /// <summary>How many allies are currently following the player via this system.</summary>
     public int FollowerCount => followers.Count;
 
+    public bool IsFollowing(Transform ally)
+    {
+        return ally != null && followers.Contains(ally);
+    }
+
+    public bool HasFollowerCapacity()
+    {
+        return followers.Count < Mathf.Max(1, maxFollowers);
+    }
+
     private readonly Dictionary<Transform, Transform> slotByFollower = new(); // follower -> slot transform
 
     // follower -> desired slot index (0..n-1)
@@ -429,9 +443,19 @@ public class PlayerSquadFollowSystem : MonoBehaviour
 
         // Toggle: click again to remove, click to add.
         if (newList.Contains(ally))
+        {
             newList.Remove(ally);
+        }
         else
+        {
+            if (newList.Count >= Mathf.Max(1, maxFollowers))
+            {
+                ShowHint($"You can only have {Mathf.Max(1, maxFollowers)} followers.", pickHintDuration);
+                return;
+            }
+
             newList.Add(ally);
+        }
 
         newList.Sort((a, b) => a.GetInstanceID().CompareTo(b.GetInstanceID()));
 
@@ -488,7 +512,13 @@ public class PlayerSquadFollowSystem : MonoBehaviour
 
             if (anyNotFollower)
             {
-                if (!newList.Contains(m)) newList.Add(m);
+                if (!newList.Contains(m))
+                {
+                    if (newList.Count >= Mathf.Max(1, maxFollowers))
+                        break;
+
+                    newList.Add(m);
+                }
             }
             else
             {
@@ -534,6 +564,13 @@ public class PlayerSquadFollowSystem : MonoBehaviour
         // Already following
         if (followers.Contains(ally))
             return false;
+
+        if (followers.Count >= Mathf.Max(1, maxFollowers))
+        {
+            if (showBlockedHint)
+                ShowHint($"You can only have {Mathf.Max(1, maxFollowers)} followers.", pickHintDuration);
+            return false;
+        }
 
         var newList = new List<Transform>(followers) { ally };
         newList.Sort((a, b) => a.GetInstanceID().CompareTo(b.GetInstanceID()));
@@ -687,6 +724,8 @@ public class PlayerSquadFollowSystem : MonoBehaviour
 
         if (onlyUpdateInFpsMode && commandMode)
             return;
+
+        CleanupInvalidFollowers();
 
         if (followers.Count == 0)
             return;
@@ -904,6 +943,67 @@ public class PlayerSquadFollowSystem : MonoBehaviour
         return f.normalized;
     }
 
+    private bool IsFollowerUsable(Transform t)
+    {
+        if (t == null) return false;
+        if (!t.gameObject.activeInHierarchy) return false;
+
+        var dc = t.GetComponentInParent<MnR.DeathController>();
+        if (dc != null && dc.IsDead) return false;
+
+        return true;
+    }
+
+    private void CleanupInvalidFollowers()
+    {
+        if (followers.Count == 0) return;
+
+        bool removedAny = false;
+        for (int i = followers.Count - 1; i >= 0; i--)
+        {
+            var f = followers[i];
+            if (IsFollowerUsable(f)) continue;
+
+            if (f != null)
+            {
+                if (slotByFollower.TryGetValue(f, out var slot) && slot != null)
+                    Destroy(slot.gameObject);
+
+                var ally = f.GetComponent<AllyController>();
+                if (ally != null && ally.target != null && IsOurSlot(ally.target))
+                    ally.target = null;
+
+                var ui = CommandOverlayUI.Instance;
+                if (ui != null)
+                    ui.SetPlayerFollowerTag(f, false);
+
+                taggedFollowers.Remove(f);
+                originalStoppingDistanceByFollower.Remove(f);
+                originalSpeedByFollower.Remove(f);
+                slotByFollower.Remove(f);
+                assignedIndexByFollower.Remove(f);
+            }
+
+            followers.RemoveAt(i);
+            removedAny = true;
+        }
+
+        if (!removedAny) return;
+
+        CleanupAssignmentForMissingFollowers();
+
+        if (followers.Count == 0)
+        {
+            hasLockedIdleForward = false;
+            enabled = false;
+        }
+        else
+        {
+            UpdateFollowerTags();
+            forceReassignNow = true;
+        }
+    }
+
     private bool NeedCatchUp()
     {
         if (followers.Count == 0 || player == null) return false;
@@ -970,6 +1070,9 @@ public class PlayerSquadFollowSystem : MonoBehaviour
 
             // Avoid adding player as follower
             if (player != null && f == player) continue;
+
+            if (followers.Count >= Mathf.Max(1, maxFollowers))
+                break;
 
             followers.Add(f);
         }

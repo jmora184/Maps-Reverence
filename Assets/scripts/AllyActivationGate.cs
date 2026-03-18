@@ -6,6 +6,7 @@ using UnityEngine.AI;
 /// - If inactive: ally can optionally ignore player-command movement but still allow AI/patrol movement.
 /// - Player can activate by proximity + key (default J).
 /// - While inactive and in range, shows RecruitPromptUI.
+/// - While active and in range, can optionally show a combined talk/follow prompt and add this ally to PlayerSquadFollowSystem.
 /// </summary>
 [DisallowMultipleComponent]
 public class AllyActivationGate : MonoBehaviour
@@ -32,13 +33,27 @@ public class AllyActivationGate : MonoBehaviour
     [SerializeField] private bool showRecruitPrompt = true;
     [SerializeField] private string recruitPromptText = "Press {KEY} to recruit";
     [Tooltip("If > 0, uses this range for showing the prompt. If <= 0, uses activationRange.")]
-    [SerializeField] private float recruitPromptRangeOverride = 0f;
+    [SerializeField] private float recruitPromptRangeOverride = 9f;
+
+    [Header("Follow Prompt")]
+    [SerializeField] private bool showFollowPrompt = true;
+    [SerializeField] private KeyCode followKey = KeyCode.N;
+    [SerializeField] private string followPromptText = "Press {KEY} to Follow";
+    [Tooltip("Max followers allowed at one time. Keep this in sync with PlayerSquadFollowSystem.")]
+    [SerializeField] private int maxFollowerSlots = 6;
+    [Tooltip("If > 0, uses this range for showing the follow prompt. If <= 0, uses activationRange.")]
+    [SerializeField] private float followPromptRangeOverride = 9f;
+
+    [Header("Talk Prompt Integration")]
+    [SerializeField] private bool includeTalkPromptWhenActive = true;
+    [Tooltip("If true, this script takes over the shared RecruitPromptUI for active allies so Talk + Follow can appear together.")]
+    [SerializeField] private bool suppressNPCGreetingPromptUI = true;
 
     private int _originalLayer;
     private NavMeshAgent _agent;
     private Transform _player;
     private bool _promptShowing;
-
+    private NPCProximityGreeting _greeting;
 
     public bool IsActive { get; private set; }
 
@@ -48,33 +63,39 @@ public class AllyActivationGate : MonoBehaviour
 
         _originalLayer = gameObject.layer;
         _agent = GetComponent<NavMeshAgent>();
+        _greeting = GetComponent<NPCProximityGreeting>();
 
         ResolvePlayer();
         ApplyInactiveState();
+        ApplySharedPromptOwnership();
     }
 
     private void OnEnable()
     {
         ResolvePlayer();
+        ApplySharedPromptOwnership();
     }
 
     private void OnDisable()
     {
-        if (_promptShowing)
-        {
-            RecruitPromptUI.Hide();
-            _promptShowing = false;
-        }
+        HidePrompt();
     }
 
     private void Update()
     {
-        if (IsActive) return;
-
         if (_player == null) ResolvePlayer();
 
-        // IMPORTANT: When inactive, we default to NOT freezing the agent so patrol/AI can still move.
-        // Commands are blocked elsewhere (CommandExecutor/selection rules) by checking IsActive.
+        if (!IsActive)
+        {
+            UpdateInactiveState();
+            return;
+        }
+
+        UpdateActivePromptAndFollowState();
+    }
+
+    private void UpdateInactiveState()
+    {
         if (freezeNavMeshAgentWhileInactive && _agent != null && _agent.isActiveAndEnabled)
         {
             if (!_agent.isStopped) _agent.isStopped = true;
@@ -82,7 +103,7 @@ public class AllyActivationGate : MonoBehaviour
             _agent.velocity = Vector3.zero;
         }
 
-        bool inPromptRange = showRecruitPrompt && _player != null && IsPlayerInRange(GetPromptRange());
+        bool inPromptRange = showRecruitPrompt && _player != null && IsPlayerInRange(GetRecruitPromptRange());
         if (inPromptRange)
         {
             string msg = string.IsNullOrEmpty(recruitPromptText) ? "Press {KEY} to recruit" : recruitPromptText;
@@ -92,16 +113,61 @@ public class AllyActivationGate : MonoBehaviour
         }
         else
         {
-            // Only hide if THIS ally was the one showing the prompt.
-            if (_promptShowing)
-            {
-                if (_promptShowing) { RecruitPromptUI.Hide(); _promptShowing = false; }
-                _promptShowing = false;
-            }
+            HidePrompt();
         }
 
         if (_player != null && IsPlayerInRange(activationRange) && Input.GetKeyDown(activationKey))
             Activate();
+    }
+
+    private void UpdateActivePromptAndFollowState()
+    {
+        var followSystem = PlayerSquadFollowSystem.Instance != null
+            ? PlayerSquadFollowSystem.Instance
+            : PlayerSquadFollowSystem.EnsureExists();
+
+        bool isInTalkRange = ShouldShowTalkPromptNow();
+        bool isAlreadyFollowing = followSystem != null && followSystem.IsFollowing(transform);
+
+        bool isInFollowRange = showFollowPrompt
+                               && _player != null
+                               && IsPlayerInRange(GetFollowPromptRange());
+
+        bool hasFollowerRoom = followSystem != null
+                               && followSystem.FollowerCount < Mathf.Max(1, maxFollowerSlots)
+                               && followSystem.HasFollowerCapacity();
+
+        bool canShowFollow = isInFollowRange && !isAlreadyFollowing && hasFollowerRoom;
+
+        string combinedPrompt = BuildCombinedPrompt(isInTalkRange, canShowFollow);
+
+        if (!string.IsNullOrWhiteSpace(combinedPrompt))
+        {
+            RecruitPromptUI.Show(combinedPrompt);
+            _promptShowing = true;
+        }
+        else
+        {
+            HidePrompt();
+        }
+
+        if (canShowFollow && Input.GetKeyDown(followKey))
+        {
+            bool added = followSystem.TryAddFollowerDirect(transform, true);
+            if (added)
+            {
+                string talkOnly = BuildCombinedPrompt(isInTalkRange, false);
+                if (!string.IsNullOrWhiteSpace(talkOnly))
+                {
+                    RecruitPromptUI.Show(talkOnly);
+                    _promptShowing = true;
+                }
+                else
+                {
+                    HidePrompt();
+                }
+            }
+        }
     }
 
     public void Activate()
@@ -115,7 +181,8 @@ public class AllyActivationGate : MonoBehaviour
         if (_agent != null && _agent.isActiveAndEnabled)
             _agent.isStopped = false;
 
-        if (_promptShowing) { RecruitPromptUI.Hide(); _promptShowing = false; }
+        ApplySharedPromptOwnership();
+        HidePrompt();
     }
 
     public void Deactivate()
@@ -124,7 +191,8 @@ public class AllyActivationGate : MonoBehaviour
         IsActive = false;
 
         ApplyInactiveState();
-        if (_promptShowing) { RecruitPromptUI.Hide(); _promptShowing = false; }
+        ApplySharedPromptOwnership();
+        HidePrompt();
     }
 
     private void ApplyInactiveState()
@@ -137,7 +205,6 @@ public class AllyActivationGate : MonoBehaviour
             if (ignore >= 0) gameObject.layer = ignore;
         }
 
-        // Only freeze movement if you explicitly want inactive allies to be totally immobile.
         if (freezeNavMeshAgentWhileInactive && _agent != null && _agent.isActiveAndEnabled)
         {
             _agent.isStopped = true;
@@ -146,9 +213,14 @@ public class AllyActivationGate : MonoBehaviour
         }
     }
 
-    private float GetPromptRange()
+    private float GetRecruitPromptRange()
     {
         return (recruitPromptRangeOverride > 0f) ? recruitPromptRangeOverride : activationRange;
+    }
+
+    private float GetFollowPromptRange()
+    {
+        return (followPromptRangeOverride > 0f) ? followPromptRangeOverride : activationRange;
     }
 
     private bool IsPlayerInRange(float range)
@@ -169,5 +241,64 @@ public class AllyActivationGate : MonoBehaviour
         try { playerObj = GameObject.FindGameObjectWithTag(playerTag); } catch { }
 
         _player = (playerObj != null) ? playerObj.transform : null;
+    }
+
+    private void HidePrompt()
+    {
+        if (!_promptShowing) return;
+        RecruitPromptUI.Hide();
+        _promptShowing = false;
+    }
+
+    private void ApplySharedPromptOwnership()
+    {
+        if (_greeting == null || !suppressNPCGreetingPromptUI) return;
+
+        if (IsActive && includeTalkPromptWhenActive)
+            _greeting.useRecruitPromptUI = false;
+        else
+            _greeting.useRecruitPromptUI = true;
+    }
+
+    private bool ShouldShowTalkPromptNow()
+    {
+        if (!includeTalkPromptWhenActive) return false;
+        if (_greeting == null) return false;
+        if (_player == null) return false;
+        if (_greeting.autoOpenDialogOnProximity) return false;
+        if (!_greeting.useRecruitPromptUI && !suppressNPCGreetingPromptUI) return false;
+
+        float talkRange = Mathf.Max(0.01f, _greeting.range + _greeting.rangeBuffer);
+        return IsPlayerInRange(talkRange);
+    }
+
+    private string BuildCombinedPrompt(bool showTalk, bool showFollow)
+    {
+        string msg = string.Empty;
+
+        if (showTalk && _greeting != null)
+        {
+            msg = string.IsNullOrWhiteSpace(_greeting.talkPromptMessage)
+                ? $"Press {_greeting.talkKey} to talk"
+                : _greeting.talkPromptMessage;
+
+            msg = msg.Replace("{KEY}", _greeting.talkKey.ToString());
+        }
+
+        if (showFollow)
+        {
+            string followMsg = string.IsNullOrWhiteSpace(followPromptText)
+                ? "Press {KEY} to Follow"
+                : followPromptText;
+
+            followMsg = followMsg.Replace("{KEY}", followKey.ToString());
+
+            if (string.IsNullOrWhiteSpace(msg))
+                msg = followMsg;
+            else
+                msg += "\n" + followMsg;
+        }
+
+        return msg;
     }
 }
