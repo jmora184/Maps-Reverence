@@ -24,7 +24,7 @@ public class PlayerRespawnController : MonoBehaviour
     [SerializeField] private CharacterController characterController;
 
     [Header("Respawn")]
-    [Tooltip("Where the player should respawn after death.")]
+    [Tooltip("Where the player should respawn after death or off-map recovery.")]
     [SerializeField] private Transform respawnPoint;
 
     [Tooltip("Delay before respawn. 0 = instant.")]
@@ -32,6 +32,25 @@ public class PlayerRespawnController : MonoBehaviour
 
     [Tooltip("If true, match the respawn point rotation too.")]
     [SerializeField] private bool applyRespawnRotation = true;
+
+    [Header("Off Map Recovery")]
+    [Tooltip("If enabled, respawns the player when they leave the assigned terrain bounds.")]
+    [SerializeField] private bool respawnIfOutsideTerrain = true;
+
+    [Tooltip("Terrain used to detect whether the player has gone off-map. If left empty, Terrain.activeTerrain will be used when available.")]
+    [SerializeField] private Terrain monitoredTerrain;
+
+    [Tooltip("Extra world-space distance allowed beyond the terrain edge before respawning.")]
+    [SerializeField] private float terrainBoundsPadding = 0f;
+
+    [Tooltip("If enabled, respawns the player when they fall below the minimum Y value.")]
+    [SerializeField] private bool respawnIfBelowY = true;
+
+    [Tooltip("Failsafe Y level. If the player's world Y goes below this, they respawn.")]
+    [SerializeField] private float minimumAllowedY = -50f;
+
+    [Tooltip("Small cooldown to prevent repeated off-map respawns from firing every frame.")]
+    [SerializeField] private float offMapRespawnCooldown = 0.5f;
 
     [Header("Ammo Restore")]
     [Tooltip("If true, tries to refill ammo on every weapon found in Player2Controller.guns.")]
@@ -41,6 +60,7 @@ public class PlayerRespawnController : MonoBehaviour
     [SerializeField] private bool debugLogs = false;
 
     private bool isRespawning = false;
+    private float lastOffMapRespawnTime = float.NegativeInfinity;
 
     private void Reset()
     {
@@ -52,6 +72,9 @@ public class PlayerRespawnController : MonoBehaviour
 
         if (characterController == null)
             characterController = GetComponent<CharacterController>();
+
+        if (monitoredTerrain == null)
+            monitoredTerrain = Terrain.activeTerrain;
     }
 
     private void Awake()
@@ -64,6 +87,9 @@ public class PlayerRespawnController : MonoBehaviour
 
         if (characterController == null)
             characterController = GetComponent<CharacterController>();
+
+        if (monitoredTerrain == null)
+            monitoredTerrain = Terrain.activeTerrain;
     }
 
     private void OnEnable()
@@ -76,6 +102,53 @@ public class PlayerRespawnController : MonoBehaviour
     {
         if (playerVitals != null)
             playerVitals.OnDied -= HandlePlayerDied;
+    }
+
+    private void Update()
+    {
+        if (isRespawning)
+            return;
+
+        if (respawnPoint == null)
+            return;
+
+        if (Time.time < lastOffMapRespawnTime + offMapRespawnCooldown)
+            return;
+
+        bool belowY = respawnIfBelowY && transform.position.y < minimumAllowedY;
+        bool outsideTerrain = respawnIfOutsideTerrain && IsOutsideMonitoredTerrain(transform.position);
+
+        if (!belowY && !outsideTerrain)
+            return;
+
+        lastOffMapRespawnTime = Time.time;
+
+        if (debugLogs)
+        {
+            if (belowY)
+                Debug.Log("[PlayerRespawnController] Player fell below minimum Y. Respawning.", this);
+            else if (outsideTerrain)
+                Debug.Log("[PlayerRespawnController] Player left monitored terrain bounds. Respawning.", this);
+        }
+
+        RespawnNow();
+    }
+
+    private bool IsOutsideMonitoredTerrain(Vector3 worldPosition)
+    {
+        if (monitoredTerrain == null || monitoredTerrain.terrainData == null)
+            return false;
+
+        Vector3 terrainPosition = monitoredTerrain.transform.position;
+        Vector3 terrainSize = monitoredTerrain.terrainData.size;
+
+        float minX = terrainPosition.x - terrainBoundsPadding;
+        float maxX = terrainPosition.x + terrainSize.x + terrainBoundsPadding;
+        float minZ = terrainPosition.z - terrainBoundsPadding;
+        float maxZ = terrainPosition.z + terrainSize.z + terrainBoundsPadding;
+
+        return worldPosition.x < minX || worldPosition.x > maxX ||
+               worldPosition.z < minZ || worldPosition.z > maxZ;
     }
 
     private void HandlePlayerDied()

@@ -84,6 +84,23 @@ public class CommandOverlayUI : MonoBehaviour
 
     [Tooltip("Parent name prefix that identifies enemies as belonging to an Enemy Team (ex: EnemyTeam_1, EnemyTeam_2...).")]
     public string enemyTeamMemberParentPrefix = "EnemyTeam_";
+
+    [Header("Player-Proximity Icon Spread")]
+    [Tooltip("Only spreads icons that get too close to the Player icon. Does not affect the rest of the map.")]
+    public bool enablePlayerProximityIconSpread = true;
+    [Tooltip("Icons must be this close to the Player icon (in UI pixels) before spread logic affects them.")]
+    public float playerIconSpreadTriggerRadiusPixels = 42f;
+    [Tooltip("How far outward nearby icons are pushed away from the Player icon.")]
+    public float playerIconSpreadExtraDistancePixels = 28f;
+    [Tooltip("Minimum desired separation between nearby non-team icons in the Player icon cluster.")]
+    public float playerIconSpreadMinSeparationPixels = 34f;
+    [Tooltip("How many pair-separation passes to run for the Player icon cluster.")]
+    public int playerIconSpreadResolveIterations = 4;
+    [Tooltip("Optional legacy ally team root prefix. Team members found under this parent prefix will NOT be spread near the Player icon.")]
+    public string allyTeamMemberParentPrefix = "AllyTeam_";
+    [Tooltip("If true, a Boss icon near the Player icon can also be pushed out of the way.")]
+    public bool includeBossIconInPlayerProximitySpread = false;
+
     [Header("Selected Ring")]
     public string selectedRingChildName = "SelectedRing";
     [Tooltip("Optional second ring for team selection. Add a child under the ally icon named this (ex: TeamSelectedRing).")]
@@ -140,6 +157,16 @@ public class CommandOverlayUI : MonoBehaviour
 
     private readonly Dictionary<Transform, RectTransform> allyIconByUnit = new();
     private readonly Dictionary<Transform, RectTransform> enemyIconByUnit = new();
+
+    private sealed class PlayerSpreadCandidate
+    {
+        public RectTransform icon;
+        public Transform unit;
+        public bool isEnemy;
+        public Vector2 originalPos;
+        public Vector2 pos;
+        public float desiredDistance;
+    }
 
     // Scene-spawned enemy team icons (UI) that should stay above unit icons.
     private readonly List<RectTransform> enemyTeamIcons = new List<RectTransform>();
@@ -509,6 +536,172 @@ public class CommandOverlayUI : MonoBehaviour
             p = p.parent;
         }
         return false;
+    }
+
+    private static bool TryGetEncounterTeamFaction(Transform t, out EncounterDirectorPOC.Faction faction)
+    {
+        faction = default;
+        if (t == null) return false;
+
+        Transform p = t;
+        while (p != null)
+        {
+            var anchor = p.GetComponent<EncounterTeamAnchor>();
+            if (anchor != null)
+            {
+                faction = anchor.faction;
+                return true;
+            }
+            p = p.parent;
+        }
+
+        return false;
+    }
+
+    private bool IsEnemyTeamMemberForPlayerSpread(Transform t)
+    {
+        if (t == null) return false;
+
+        if (TryGetEncounterTeamFaction(t, out var faction) && faction == EncounterDirectorPOC.Faction.Enemy)
+            return true;
+
+        return IsUnderParentNamePrefix(t, enemyTeamMemberParentPrefix);
+    }
+
+    private bool IsAllyTeamMemberForPlayerSpread(Transform t)
+    {
+        if (t == null) return false;
+
+        if (TeamManager.Instance != null && TeamManager.Instance.GetTeamOf(t) != null)
+            return true;
+
+        if (TryGetEncounterTeamFaction(t, out var faction) && faction == EncounterDirectorPOC.Faction.Ally)
+            return true;
+
+        return IsUnderParentNamePrefix(t, allyTeamMemberParentPrefix);
+    }
+
+    private bool ShouldExcludeFromPlayerProximitySpread(Transform unit, bool isEnemy)
+    {
+        if (unit == null) return true;
+        return isEnemy ? IsEnemyTeamMemberForPlayerSpread(unit) : IsAllyTeamMemberForPlayerSpread(unit);
+    }
+
+    private static Vector2 GetDeterministicSpreadDirection(Transform t)
+    {
+        int seed = t != null ? t.GetInstanceID() : 1;
+        float angle = Mathf.Abs(seed % 360) * Mathf.Deg2Rad;
+        return new Vector2(Mathf.Cos(angle), Mathf.Sin(angle));
+    }
+
+    private void AddPlayerSpreadCandidates(List<PlayerSpreadCandidate> list, Dictionary<Transform, RectTransform> dict, bool isEnemy, Vector2 playerPos, float triggerRadius)
+    {
+        if (list == null || dict == null) return;
+
+        foreach (var kvp in dict)
+        {
+            var unit = kvp.Key;
+            var icon = kvp.Value;
+            if (unit == null || icon == null) continue;
+            if (!icon.gameObject.activeInHierarchy) continue;
+            if (ShouldExcludeFromPlayerProximitySpread(unit, isEnemy)) continue;
+
+            Vector2 pos = icon.anchoredPosition;
+            float dist = Vector2.Distance(pos, playerPos);
+            if (dist > triggerRadius) continue;
+
+            list.Add(new PlayerSpreadCandidate
+            {
+                icon = icon,
+                unit = unit,
+                isEnemy = isEnemy,
+                originalPos = pos,
+                pos = pos,
+                desiredDistance = Mathf.Max(triggerRadius + playerIconSpreadExtraDistancePixels, dist + playerIconSpreadExtraDistancePixels)
+            });
+        }
+    }
+
+    private void ApplyPlayerProximityIconSpread()
+    {
+        if (!enablePlayerProximityIconSpread) return;
+        if (playerIcon == null || !playerIcon.gameObject.activeInHierarchy) return;
+        if (playerIconSpreadTriggerRadiusPixels <= 0f) return;
+
+        Vector2 playerPos = playerIcon.anchoredPosition;
+        float triggerRadius = Mathf.Max(1f, playerIconSpreadTriggerRadiusPixels);
+        float minSeparation = Mathf.Max(1f, playerIconSpreadMinSeparationPixels);
+        int iterations = Mathf.Max(1, playerIconSpreadResolveIterations);
+
+        var candidates = new List<PlayerSpreadCandidate>();
+        AddPlayerSpreadCandidates(candidates, allyIconByUnit, false, playerPos, triggerRadius);
+        AddPlayerSpreadCandidates(candidates, enemyIconByUnit, true, playerPos, triggerRadius);
+
+        if (includeBossIconInPlayerProximitySpread && bossIcon != null && bossIcon.gameObject.activeInHierarchy)
+        {
+            Vector2 bossPos = bossIcon.anchoredPosition;
+            float dist = Vector2.Distance(bossPos, playerPos);
+            if (dist <= triggerRadius)
+            {
+                candidates.Add(new PlayerSpreadCandidate
+                {
+                    icon = bossIcon,
+                    unit = bossTarget,
+                    isEnemy = true,
+                    originalPos = bossPos,
+                    pos = bossPos,
+                    desiredDistance = Mathf.Max(triggerRadius + playerIconSpreadExtraDistancePixels, dist + playerIconSpreadExtraDistancePixels)
+                });
+            }
+        }
+
+        if (candidates.Count == 0) return;
+
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            var c = candidates[i];
+            Vector2 delta = c.pos - playerPos;
+            if (delta.sqrMagnitude < 0.0001f)
+                delta = GetDeterministicSpreadDirection(c.unit);
+
+            c.pos = playerPos + delta.normalized * c.desiredDistance;
+        }
+
+        for (int iter = 0; iter < iterations; iter++)
+        {
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                for (int j = i + 1; j < candidates.Count; j++)
+                {
+                    Vector2 delta = candidates[j].pos - candidates[i].pos;
+                    float dist = delta.magnitude;
+                    if (dist >= minSeparation) continue;
+
+                    Vector2 dir = dist > 0.001f ? (delta / dist) : GetDeterministicSpreadDirection(candidates[j].unit);
+                    float push = (minSeparation - dist) * 0.5f;
+                    candidates[i].pos -= dir * push;
+                    candidates[j].pos += dir * push;
+                }
+            }
+
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                var c = candidates[i];
+                Vector2 delta = c.pos - playerPos;
+                if (delta.sqrMagnitude < 0.0001f)
+                    delta = GetDeterministicSpreadDirection(c.unit);
+
+                float dist = delta.magnitude;
+                if (dist < c.desiredDistance)
+                    c.pos = playerPos + delta.normalized * c.desiredDistance;
+            }
+        }
+
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            if (candidates[i].icon != null)
+                candidates[i].icon.anchoredPosition = candidates[i].pos;
+        }
     }
 
 
@@ -996,6 +1189,9 @@ public class CommandOverlayUI : MonoBehaviour
         // Sync team stars & disable teamed unit icons
         SyncTeamsAndStars(uiCam);
         UpdateAllyIconClickability();
+
+        // Only spread the local cluster that gets too close to the Player icon.
+        ApplyPlayerProximityIconSpread();
 
         // Keep team stars rendered above ally icons
         EnsureTeamStarsRenderOnTopOfAllyIcons();

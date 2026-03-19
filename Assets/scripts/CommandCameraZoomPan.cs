@@ -58,6 +58,25 @@ public class CommandCameraZoomPan : MonoBehaviour
     [Tooltip("If true, also allow Arrow keys for panning using the same X/Z mapping.")]
     public bool allowArrowKeys = true;
 
+    [Header("Enter Command Mode View")]
+    [Tooltip("When entering command mode, snap the camera to a fixed overview instead of leaving it wherever it was.")]
+    public bool applyEntryViewOnCommandModeEnter = true;
+
+    [Tooltip("World position to use when command mode opens.")]
+    public Vector3 commandModeEntryPosition = new Vector3(250f, 600f, 480f);
+
+    [Tooltip("Euler rotation to use when command mode opens.")]
+    public Vector3 commandModeEntryEuler = new Vector3(90f, 0f, 0f);
+
+    [Tooltip("Orthographic size to use when command mode opens.")]
+    public float commandModeEntryOrthoSize = 1350f;
+
+    [Tooltip("If true, sets the current zoom index to whichever zoom level is closest to the entry ortho size.")]
+    public bool syncZoomIndexToClosestLevelOnEntry = true;
+
+    [Tooltip("If true, terrain clamping is applied immediately after snapping to the entry view.")]
+    public bool clampAfterEntryView = false;
+
     private int _zoomIndex;
 
     void Reset()
@@ -65,6 +84,13 @@ public class CommandCameraZoomPan : MonoBehaviour
         commandCamera = GetComponent<Camera>();
         zoomLevels = new float[] { 1300f, 700f, 500f };
         startZoomIndex = 0;
+
+        applyEntryViewOnCommandModeEnter = true;
+        commandModeEntryPosition = new Vector3(250f, 600f, 480f);
+        commandModeEntryEuler = new Vector3(90f, 0f, 0f);
+        commandModeEntryOrthoSize = 1350f;
+        syncZoomIndexToClosestLevelOnEntry = true;
+        clampAfterEntryView = false;
     }
 
     void OnValidate()
@@ -83,6 +109,7 @@ public class CommandCameraZoomPan : MonoBehaviour
 
         if (panSpeedAt700 < 0f) panSpeedAt700 = 0f;
         if (boundsPadding < 0f) boundsPadding = 0f;
+        if (commandModeEntryOrthoSize < 1f) commandModeEntryOrthoSize = 1f;
     }
 
     void Awake()
@@ -145,6 +172,45 @@ public class CommandCameraZoomPan : MonoBehaviour
             pos.z = player.position.z;
             transform.position = pos;
         }
+    }
+
+    public void ApplyCommandModeEntryView()
+    {
+        if (commandCamera == null)
+            commandCamera = GetComponent<Camera>();
+
+        if (commandCamera == null) return;
+
+        transform.position = commandModeEntryPosition;
+        transform.rotation = Quaternion.Euler(commandModeEntryEuler);
+        commandCamera.orthographicSize = Mathf.Max(1f, commandModeEntryOrthoSize);
+
+        if (syncZoomIndexToClosestLevelOnEntry)
+            _zoomIndex = FindClosestZoomIndex(commandCamera.orthographicSize);
+
+        if (clampAfterEntryView)
+            ClampToTerrainBounds();
+    }
+
+    private int FindClosestZoomIndex(float targetSize)
+    {
+        if (zoomLevels == null || zoomLevels.Length == 0)
+            return 0;
+
+        int bestIndex = 0;
+        float bestDelta = Mathf.Abs(zoomLevels[0] - targetSize);
+
+        for (int i = 1; i < zoomLevels.Length; i++)
+        {
+            float delta = Mathf.Abs(zoomLevels[i] - targetSize);
+            if (delta < bestDelta)
+            {
+                bestDelta = delta;
+                bestIndex = i;
+            }
+        }
+
+        return bestIndex;
     }
 
     // Custom axes requested:

@@ -1,4 +1,4 @@
-﻿using System.Collections;
+using System.Collections;
 using UnityEngine;
 
 public class CommandCamToggle : MonoBehaviour
@@ -9,6 +9,7 @@ public class CommandCamToggle : MonoBehaviour
     public Camera fpsCam;
     public Camera commandCam;
     public GameObject commandUIRoot;
+    public GameObject commandLegendPanel;
 
     [Header("Optional: overlay to refresh when entering command mode")]
     public CommandOverlayUI overlayUI; // drag MiniUI (has CommandOverlayUI)
@@ -60,6 +61,9 @@ public class CommandCamToggle : MonoBehaviour
             }
         }
 
+        if (commandLegendPanel != null)
+            commandLegendPanel.SetActive(startInCommandMode);
+
         SetCommandMode(startInCommandMode, force: true);
     }
 
@@ -101,6 +105,9 @@ public class CommandCamToggle : MonoBehaviour
             }
         }
 
+        if (commandLegendPanel != null)
+            commandLegendPanel.SetActive(on);
+
         // Disable gameplay scripts while in command mode
         if (disableInCommandMode != null)
         {
@@ -125,6 +132,14 @@ public class CommandCamToggle : MonoBehaviour
             if (commandCam != null) commandCam.enabled = true;
             yield return null;
             if (fpsCam != null) fpsCam.enabled = false;
+
+            // Snap to the configured command-map overview, if that script exists.
+            if (commandCam != null)
+            {
+                CommandCameraZoomPan zoomPan = commandCam.GetComponent<CommandCameraZoomPan>();
+                if (zoomPan != null && zoomPan.applyEntryViewOnCommandModeEnter)
+                    zoomPan.ApplyCommandModeEntryView();
+            }
 
             // Refresh overlay/icons
             if (overlayUI == null)

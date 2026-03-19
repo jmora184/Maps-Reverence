@@ -266,7 +266,7 @@ public class EncounterDirectorPOC : MonoBehaviour
                 continue;
             }
 
-            EnsureEnemyTeamIcon(teamRootName, teamRoot, prefabToUse);
+            EnsureEnemyTeamIcon(teamRootName, teamRoot, prefabToUse, false);
         }
     }
 
@@ -419,7 +419,7 @@ public class EncounterDirectorPOC : MonoBehaviour
             {
                 var prefabToUse = group.teamIconPrefabOverride != null ? group.teamIconPrefabOverride : defaultEnemyTeamIconPrefab;
                 if (prefabToUse != null)
-                    EnsureEnemyTeamIcon(teamRootName, teamRoot, prefabToUse);
+                    EnsureEnemyTeamIcon(teamRootName, teamRoot, prefabToUse, group.spawnOnlyAsReinforcement);
             }
         }
 
@@ -978,13 +978,26 @@ public class EncounterDirectorPOC : MonoBehaviour
         public RectTransform prefabUsed;
     }
 
-    private void EnsureEnemyTeamIcon(string teamRootName, Transform teamRoot, RectTransform prefabToUse)
+    private void EnsureEnemyTeamIcon(string teamRootName, Transform teamRoot, RectTransform prefabToUse, bool showDirectionArrow)
     {
         if (_enemyTeamIcons.TryGetValue(teamRootName, out var rt) && rt != null)
         {
             if (rt.iconRect != null && rt.prefabUsed == prefabToUse)
             {
                 rt.teamRoot = teamRoot;
+                SetEnemyTeamArrowVisible(rt.iconRect, showDirectionArrow);
+
+                if (showDirectionArrow)
+                {
+                    var existingAnchor = teamRoot != null ? teamRoot.GetComponent<EncounterTeamAnchor>() : null;
+                    var existingArrow = GetOrCreateEnemyTeamArrow(rt.iconRect);
+                    if (existingAnchor != null && existingArrow != null)
+                    {
+                        var existingCam = commandCamera != null ? commandCamera : (Camera.main != null ? Camera.main : null);
+                        existingArrow.Bind(existingAnchor, existingCam);
+                    }
+                }
+
                 return;
             }
 
@@ -1017,7 +1030,7 @@ public class EncounterDirectorPOC : MonoBehaviour
         // IMPORTANT: The arrow must live on a child (eg. ArrowImage), NOT on the root icon image,
         // otherwise it will overwrite the star sprite and you'll "lose" the team icon.
         var anchor = teamRoot != null ? teamRoot.GetComponent<EncounterTeamAnchor>() : null;
-        if (anchor != null)
+        if (showDirectionArrow && anchor != null)
         {
             var arrow = GetOrCreateEnemyTeamArrow(iconGO);
             if (arrow != null)
@@ -1027,6 +1040,8 @@ public class EncounterDirectorPOC : MonoBehaviour
                 arrow.Bind(anchor, cam);
             }
         }
+
+        SetEnemyTeamArrowVisible(iconGO, showDirectionArrow);
 
         var runtime = new EnemyTeamIconRuntime
         {
@@ -1075,15 +1090,19 @@ public class EncounterDirectorPOC : MonoBehaviour
     {
         if (iconRoot == null) return null;
 
-        // Prefer an existing arrow component in children (your prefab likely already has one on ArrowImage).
-        var existing = iconRoot.GetComponentInChildren<EnemyTeamDirectionArrowUI>(true);
-        if (existing != null)
-            return existing;
+        // Prefer an existing arrow component on a CHILD object (ArrowImage), not on the root team icon.
+        var existingArrows = iconRoot.GetComponentsInChildren<EnemyTeamDirectionArrowUI>(true);
+        for (int i = 0; i < existingArrows.Length; i++)
+        {
+            var existing = existingArrows[i];
+            if (existing != null && existing.transform != iconRoot)
+                return existing;
+        }
 
         // Otherwise, try to find a child that should host the arrow graphic.
-        Transform arrowHost = iconRoot.Find("ArrowImage");
-        if (arrowHost == null) arrowHost = iconRoot.Find("Arrow");
-        if (arrowHost == null) arrowHost = iconRoot.Find("ArrowGraphic");
+        Transform arrowHost = FindNamedDescendant(iconRoot, "ArrowImage");
+        if (arrowHost == null) arrowHost = FindNamedDescendant(iconRoot, "Arrow");
+        if (arrowHost == null) arrowHost = FindNamedDescendant(iconRoot, "ArrowGraphic");
 
         if (arrowHost == null)
         {
@@ -1114,6 +1133,47 @@ public class EncounterDirectorPOC : MonoBehaviour
         // Auto-wire refs (should now bind to ArrowImage instead of the star icon).
         arrow.TryAutoWire();
         return arrow;
+    }
+
+    private static Transform FindNamedDescendant(Transform root, string name)
+    {
+        if (root == null || string.IsNullOrEmpty(name)) return null;
+
+        var all = root.GetComponentsInChildren<Transform>(true);
+        for (int i = 0; i < all.Length; i++)
+        {
+            var t = all[i];
+            if (t != null && t != root && string.Equals(t.name, name, StringComparison.Ordinal))
+                return t;
+        }
+
+        return null;
+    }
+
+    private void SetEnemyTeamArrowVisible(RectTransform iconRoot, bool visible)
+    {
+        if (iconRoot == null) return;
+
+        // Disable/enable all arrow scripts without accidentally hiding the ROOT icon object.
+        var arrows = iconRoot.GetComponentsInChildren<EnemyTeamDirectionArrowUI>(true);
+        for (int i = 0; i < arrows.Length; i++)
+        {
+            var arrow = arrows[i];
+            if (arrow == null) continue;
+
+            arrow.enabled = visible;
+
+            if (arrow.transform != iconRoot)
+                arrow.gameObject.SetActive(visible);
+        }
+
+        // Also explicitly hide/show any known arrow graphic children on the prefab.
+        Transform arrowHost = FindNamedDescendant(iconRoot, "ArrowImage");
+        if (arrowHost == null) arrowHost = FindNamedDescendant(iconRoot, "Arrow");
+        if (arrowHost == null) arrowHost = FindNamedDescendant(iconRoot, "ArrowGraphic");
+
+        if (arrowHost != null)
+            arrowHost.gameObject.SetActive(visible);
     }
     private void UpdateEnemyTeamIcons()
     {
