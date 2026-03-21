@@ -1,10 +1,11 @@
-// 2026-03-05
+// 2026-03-20
 // GrenadeThrowArmPose.cs
 //
 // Simple, tweakable, code-driven "left arm throws a grenade" pose/animation.
 // - Rotates LeftUpperArm and LeftForearm over time using AnimationCurves
 // - Trigger with a key (default: G) or call TriggerThrow() from your weapon/ability code
 // - Non-destructive: stores the starting local rotations and blends back to them
+// - Now supports its own cooldown so the pose will not replay while grenade throw is on cooldown.
 //
 // HOW TO USE
 // 1) Add this component to your Player (or Soldier_marine root).
@@ -35,6 +36,13 @@ public class GrenadeThrowArmPose : MonoBehaviour
     [Header("Test Trigger")]
     [SerializeField] private bool enableTestKey = true;
     [SerializeField] private KeyCode testKey = KeyCode.G;
+
+    [Header("Cooldown")]
+    [Tooltip("Optional cooldown so the arm pose cannot replay while the grenade itself is still on cooldown.")]
+    [Min(0f)] public float cooldown = 0.35f;
+
+    [Tooltip("If true, pressing the test key while cooling down does nothing.")]
+    public bool blockTestKeyDuringCooldown = true;
 
     [Header("Timing")]
     [Tooltip("Total duration of the throw motion (seconds).")]
@@ -92,6 +100,7 @@ public class GrenadeThrowArmPose : MonoBehaviour
 
     private bool _hasCached;
     private bool _isPlaying;
+    private float _nextAllowedTime;
 
     // Current frame targets (computed by coroutine, applied in LateUpdate or Update)
     private Quaternion _upperTarget;
@@ -99,6 +108,10 @@ public class GrenadeThrowArmPose : MonoBehaviour
     private Quaternion _handTarget;
 
     private Coroutine _co;
+
+    public bool IsPlaying => _isPlaying;
+    public bool IsOnCooldown => Time.time < _nextAllowedTime;
+    public float CooldownRemaining => Mathf.Max(0f, _nextAllowedTime - Time.time);
 
     private void Awake()
     {
@@ -124,7 +137,12 @@ public class GrenadeThrowArmPose : MonoBehaviour
     private void Update()
     {
         if (enableTestKey && Input.GetKeyDown(testKey))
-            TriggerThrow();
+        {
+            if (!blockTestKeyDuringCooldown || !IsOnCooldown)
+                TriggerThrow();
+            else if (debugLog)
+                Debug.Log($"[GrenadeThrowArmPose] Trigger blocked by cooldown. Remaining: {CooldownRemaining:0.00}s", this);
+        }
 
         if (!applyInLateUpdate)
             ApplyTargets();
@@ -155,6 +173,13 @@ public class GrenadeThrowArmPose : MonoBehaviour
             return;
         }
 
+        if (IsOnCooldown)
+        {
+            if (debugLog)
+                Debug.Log($"[GrenadeThrowArmPose] Trigger ignored due to cooldown. Remaining: {CooldownRemaining:0.00}s", this);
+            return;
+        }
+
         if (!_hasCached) CacheStartPose();
 
         if (_isPlaying)
@@ -165,7 +190,28 @@ public class GrenadeThrowArmPose : MonoBehaviour
             _isPlaying = false;
         }
 
+        if (cooldown > 0f)
+            _nextAllowedTime = Time.time + cooldown;
+
         _co = StartCoroutine(CoThrow());
+    }
+
+    /// Optional helper if another script wants to know whether it can play the arm pose.
+    public bool CanTriggerThrow()
+    {
+        return leftUpperArm != null && leftForearm != null && !IsOnCooldown;
+    }
+
+    /// Optional helper to force the arm pose cooldown to match an external grenade cooldown.
+    public void SetCooldownFromNow(float seconds)
+    {
+        if (seconds <= 0f)
+        {
+            _nextAllowedTime = Time.time;
+            return;
+        }
+
+        _nextAllowedTime = Mathf.Max(_nextAllowedTime, Time.time + seconds);
     }
 
     private IEnumerator CoThrow()

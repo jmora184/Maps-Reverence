@@ -159,15 +159,17 @@ public class GrenadeProjectile : MonoBehaviour
         }
 
         Collider[] hits = Physics.OverlapSphere(center, radius, hitMask, QueryTriggerInteraction.Collide);
-        HashSet<GameObject> processedRoots = new HashSet<GameObject>();
+        HashSet<int> processedTargets = new HashSet<int>();
 
         foreach (Collider hit in hits)
         {
             if (hit == null) continue;
 
-            GameObject processedRoot = hit.transform.root != null ? hit.transform.root.gameObject : hit.gameObject;
-            if (processedRoot == gameObject) continue;
-            if (!processedRoots.Add(processedRoot)) continue;
+            UnityEngine.Object damageKey = ResolveDamageTargetKey(hit);
+            if (damageKey == gameObject) continue;
+
+            int keyId = damageKey != null ? damageKey.GetInstanceID() : hit.GetInstanceID();
+            if (!processedTargets.Add(keyId)) continue;
 
             float distance = Vector3.Distance(center, ClosestPointOrTransform(hit, center));
             float appliedDamage = CalculateDamage(distance);
@@ -175,14 +177,16 @@ public class GrenadeProjectile : MonoBehaviour
 
             if (debugLogs)
             {
-                Debug.Log($"[GrenadeProjectile] Hit collider '{hit.name}', processedRoot '{processedRoot.name}', distance {distance:F2}, damage {damageInt}", processedRoot);
+                string targetName = damageKey != null ? damageKey.name : hit.name;
+                Debug.Log($"[GrenadeProjectile] Hit collider '{hit.name}', targetKey '{targetName}', distance {distance:F2}, damage {damageInt}", hit);
             }
 
             bool damaged = TryApplyDamage(hit, damageInt);
 
             if (debugLogs && !damaged)
             {
-                Debug.LogWarning($"[GrenadeProjectile] No supported damage receiver found from collider '{hit.name}' under root '{processedRoot.name}'", processedRoot);
+                string targetName = damageKey != null ? damageKey.name : hit.name;
+                Debug.LogWarning($"[GrenadeProjectile] No supported damage receiver found from collider '{hit.name}' for target '{targetName}'", hit);
             }
 
             Rigidbody hitRb = hit.attachedRigidbody;
@@ -214,6 +218,73 @@ public class GrenadeProjectile : MonoBehaviour
         {
             return col.transform.position;
         }
+    }
+
+
+    private UnityEngine.Object ResolveDamageTargetKey(Collider hit)
+    {
+        if (hit == null) return null;
+
+        // Prefer concrete health components so each enemy is damaged once even if it has multiple colliders.
+        PlayerVitals playerVitals = hit.GetComponent<PlayerVitals>() ?? hit.GetComponentInParent<PlayerVitals>();
+        if (playerVitals != null) return playerVitals;
+
+        AllyHealth allyHealth = hit.GetComponent<AllyHealth>() ?? hit.GetComponentInParent<AllyHealth>();
+        if (allyHealth != null) return allyHealth;
+
+        EnemyHealthController enemyHealth = hit.GetComponent<EnemyHealthController>() ?? hit.GetComponentInParent<EnemyHealthController>();
+        if (enemyHealth != null) return enemyHealth;
+
+        MeleeEnemyHealthController meleeHealth = hit.GetComponent<MeleeEnemyHealthController>() ?? hit.GetComponentInParent<MeleeEnemyHealthController>();
+        if (meleeHealth != null) return meleeHealth;
+
+        MonoBehaviour damageBehaviour = FindDamageBehaviour(hit.gameObject);
+        if (damageBehaviour != null) return damageBehaviour;
+
+        if (hit.attachedRigidbody != null)
+        {
+            damageBehaviour = FindDamageBehaviour(hit.attachedRigidbody.gameObject);
+            if (damageBehaviour != null) return damageBehaviour;
+        }
+
+        Transform t = hit.transform.parent;
+        while (t != null)
+        {
+            damageBehaviour = FindDamageBehaviour(t.gameObject);
+            if (damageBehaviour != null) return damageBehaviour;
+            t = t.parent;
+        }
+
+        if (hit.attachedRigidbody != null) return hit.attachedRigidbody;
+        return hit.gameObject;
+    }
+
+    private MonoBehaviour FindDamageBehaviour(GameObject go)
+    {
+        if (go == null) return null;
+
+        MonoBehaviour[] behaviours = go.GetComponents<MonoBehaviour>();
+        for (int i = 0; i < behaviours.Length; i++)
+        {
+            MonoBehaviour behaviour = behaviours[i];
+            if (behaviour == null) continue;
+
+            Type type = behaviour.GetType();
+            if (HasDamageMethod(type, "TakeDamage")) return behaviour;
+            if (HasDamageMethod(type, "ApplyDamage")) return behaviour;
+            if (HasDamageMethod(type, "Damage")) return behaviour;
+            if (HasDamageMethod(type, "ReceiveDamage")) return behaviour;
+            if (HasDamageMethod(type, "DamageAlly")) return behaviour;
+            if (HasDamageMethod(type, "DamageEnemy")) return behaviour;
+        }
+
+        return null;
+    }
+
+    private bool HasDamageMethod(Type type, string methodName)
+    {
+        return type.GetMethod(methodName, new[] { typeof(int) }) != null ||
+               type.GetMethod(methodName, new[] { typeof(float) }) != null;
     }
 
     private bool TryApplyDamage(Collider hit, int amount)

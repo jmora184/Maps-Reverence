@@ -29,11 +29,16 @@ public class CommandCamToggle : MonoBehaviour
     public bool lockCursorInFps = true;
     public bool clearQueueOnEnter = true;
 
+    [Header("Legend")]
+    public bool showLegendOnlyAtDefaultZoom = true;
+    public int legendVisibleZoomIndex = 0;
+
     private bool isCommandMode;
     public bool IsCommandMode => isCommandMode;
 
     private CanvasGroup uiGroup;
     private Coroutine switchRoutine;
+    private CommandCameraZoomPan zoomPan;
 
     [Header("Pause While In Command Mode")]
     public bool pauseGameInCommandMode = true;
@@ -45,6 +50,7 @@ public class CommandCamToggle : MonoBehaviour
         Instance = this;
 
         if (executor == null) executor = FindObjectOfType<CommandExecutor>();
+        CacheZoomPan();
 
         // Keep the UI object active so its scripts always initialize;
         // hide/show using CanvasGroup when possible (prevents first-toggle weirdness)
@@ -61,8 +67,7 @@ public class CommandCamToggle : MonoBehaviour
             }
         }
 
-        if (commandLegendPanel != null)
-            commandLegendPanel.SetActive(startInCommandMode);
+        RefreshLegendVisibility(startInCommandMode);
 
         SetCommandMode(startInCommandMode, force: true);
     }
@@ -74,6 +79,8 @@ public class CommandCamToggle : MonoBehaviour
 
         if (isCommandMode && Input.GetKeyDown(exitCommandKey))
             SetCommandMode(false);
+
+        RefreshLegendVisibility(isCommandMode);
     }
 
     public void SetCommandMode(bool on, bool force = false)
@@ -105,8 +112,7 @@ public class CommandCamToggle : MonoBehaviour
             }
         }
 
-        if (commandLegendPanel != null)
-            commandLegendPanel.SetActive(on);
+        RefreshLegendVisibility(on);
 
         // Disable gameplay scripts while in command mode
         if (disableInCommandMode != null)
@@ -136,10 +142,13 @@ public class CommandCamToggle : MonoBehaviour
             // Snap to the configured command-map overview, if that script exists.
             if (commandCam != null)
             {
-                CommandCameraZoomPan zoomPan = commandCam.GetComponent<CommandCameraZoomPan>();
+                CacheZoomPan();
+
                 if (zoomPan != null && zoomPan.applyEntryViewOnCommandModeEnter)
                     zoomPan.ApplyCommandModeEntryView();
             }
+
+            RefreshLegendVisibility(true);
 
             // Refresh overlay/icons
             if (overlayUI == null)
@@ -160,11 +169,40 @@ public class CommandCamToggle : MonoBehaviour
             if (fpsCam != null) fpsCam.enabled = true;
             if (commandCam != null) commandCam.enabled = false;
 
+            RefreshLegendVisibility(false);
+
             // Execute queued moves now (like old FullMini behavior)
             if (CommandQueue.Instance != null && executor != null)
             {
                 CommandQueue.Instance.FlushMoves(executor);
             }
         }
+    }
+
+    private void CacheZoomPan()
+    {
+        if (commandCam != null)
+            zoomPan = commandCam.GetComponent<CommandCameraZoomPan>();
+        else
+            zoomPan = null;
+    }
+
+    private void RefreshLegendVisibility(bool commandModeOn)
+    {
+        if (commandLegendPanel == null)
+            return;
+
+        bool shouldShow = commandModeOn;
+
+        if (shouldShow && showLegendOnlyAtDefaultZoom)
+        {
+            CacheZoomPan();
+
+            if (zoomPan != null)
+                shouldShow = zoomPan.CurrentZoomIndex == legendVisibleZoomIndex;
+        }
+
+        if (commandLegendPanel.activeSelf != shouldShow)
+            commandLegendPanel.SetActive(shouldShow);
     }
 }

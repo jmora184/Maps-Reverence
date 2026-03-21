@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Collections.Generic;
 using TMPro;
 using UnityEngine;
 using UnityEngine.Events;
@@ -28,6 +29,12 @@ public class BaseActivator : MonoBehaviour
     [SerializeField] private float promptRange = 12f;
     [SerializeField] private bool oneTimeUse = false;
 
+    [Header("Starting State")]
+    [Tooltip("If enabled, this base starts already captured/activated and will not require the player to press the activation key.")]
+    [SerializeField] private bool capturedByDefault = false;
+    [Tooltip("If enabled, On Activated is invoked once on startup when Captured By Default is checked.")]
+    [SerializeField] private bool invokeActivatedEventOnStart = true;
+
     [Header("Enemy Blocking")]
     [SerializeField] private float enemyDetectionRadius = 100f;
     [Tooltip("Optional. If set, any collider on these layers inside Enemy Detection Radius blocks activation.")]
@@ -55,6 +62,7 @@ public class BaseActivator : MonoBehaviour
     private Coroutine enemyWarningRoutine;
     private bool enemyWarningVisibleByThisScript;
     private readonly Collider[] overlapResults = new Collider[128];
+    private static readonly Dictionary<int, BaseActivator> blockedPromptOwners = new Dictionary<int, BaseActivator>();
 
     public bool IsActivated => hasActivated;
     public bool AreEnemiesDetectedInArea => AreEnemiesActiveInArea();
@@ -64,6 +72,16 @@ public class BaseActivator : MonoBehaviour
         FindPlayer();
         enemyWarningVisibleByThisScript = false;
         SetBlockedPromptVisible(false);
+
+        if (capturedByDefault)
+        {
+            hasActivated = true;
+            enemyWasDetectedAfterActivation = false;
+            ClearPromptIfNeeded();
+
+            if (invokeActivatedEventOnStart)
+                onActivated?.Invoke();
+        }
     }
 
     private void OnEnable()
@@ -197,15 +215,30 @@ public class BaseActivator : MonoBehaviour
             return;
         }
 
+        // Surgical fix requested by user:
+        // when the player is near this base and an enemy is inside the detection radius,
+        // drive the EnemyNear / blocked UI directly.
+        // This is no longer gated behind the base being uncaptured.
+        if (enemiesActive)
+        {
+            if (blockedPromptText != null)
+                blockedPromptText.text = blockedPromptMessage;
+
+            RecruitPromptUI.Hide();
+            SetBlockedPromptVisible(true);
+            lastShownMessage = blockedPromptMessage;
+            return;
+        }
+
         // After the first successful activation, never show the ready prompt again.
-        // But the enemy scanner stays active for the separate warning UI.
         if (hasActivated)
         {
             ClearPromptIfNeeded();
             return;
         }
 
-        ShowPrompt(enemiesActive ? blockedPromptMessage : readyPromptMessage);
+        SetBlockedPromptVisible(false);
+        ShowPrompt(readyPromptMessage);
     }
 
     private void HandlePostActivationEnemyWarning(bool enemiesActive)
@@ -312,12 +345,29 @@ public class BaseActivator : MonoBehaviour
         if (blockedPromptUI == null)
             return;
 
-        blockedPromptUI.SetActive(visible);
+        int key = blockedPromptUI.GetInstanceID();
+
+        if (visible)
+        {
+            blockedPromptOwners[key] = this;
+            blockedPromptUI.SetActive(true);
+            return;
+        }
+
+        if (blockedPromptOwners.TryGetValue(key, out BaseActivator owner) && owner != this)
+            return;
+
+        blockedPromptOwners.Remove(key);
+        blockedPromptUI.SetActive(false);
     }
 
     private bool IsBlockedPromptVisible()
     {
-        return blockedPromptUI != null && blockedPromptUI.activeSelf;
+        if (blockedPromptUI == null)
+            return false;
+
+        int key = blockedPromptUI.GetInstanceID();
+        return blockedPromptUI.activeSelf && (!blockedPromptOwners.TryGetValue(key, out BaseActivator owner) || owner == this);
     }
 
     private bool AreEnemiesActiveInArea()

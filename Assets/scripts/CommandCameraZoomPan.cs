@@ -1,21 +1,19 @@
 // CommandCameraZoomPan.cs
 // Drop this onto your CommandCamera GameObject.
 //
-// Zoom (H): cycles orthographic size 1300 -> 700 -> 500 -> 1300
-// Zoom centers on the player each press.
+// Zoom (H): cycles through the zoomLevels array.
+// Rule requested:
+// - When zoom index == 0 (full/default zoom), force X back to 250.
+// - When zoom index == 0 (full/default zoom), force Z back to 487.
+// - When zoom index == 0, camera size is the Element 0 size (default 1350).
+// - Zoomed-in levels still center on the player.
 //
 // Panning (only when zoomed in, unless allowPanningAtFullMap = true):
-//   W/S moves +X / -X
-//   A/D moves +Z / -Z   (SWAPPED per request: A = +Z, D = -Z)
-// Optional: Arrow keys use the same mapping as A/D for Z and Up/Down for X.
-//
-// Terrain clamp keeps the camera view inside the terrain bounds.
-//
-// IMPORTANT UNITY NOTE:
-// Public fields are serialized. If you already added this component earlier,
-// Unity keeps the old zoomLevels (e.g., 1300/1000/700) in the Inspector even after code changes.
-// This script auto-migrates that common legacy set to 1300/700/500 in OnValidate/Awake.
-// You can also use the component gear menu (⋮) -> Reset to restore defaults.
+//   W = +Z (up on screen)
+//   A = -X (left on screen)
+//   S = -Z (down on screen)
+//   D = +X (right on screen)
+// Arrow keys follow the same screen-space mapping.
 
 using UnityEngine;
 
@@ -26,7 +24,7 @@ public class CommandCameraZoomPan : MonoBehaviour
     [Tooltip("Optional. If not set, will use Camera on this GameObject.")]
     public Camera commandCamera;
 
-    [Tooltip("Player transform to center on when zooming.")]
+    [Tooltip("Player transform to center on when zooming in.")]
     public Transform player;
 
     [Tooltip("Optional. If not set, uses Terrain.activeTerrain.")]
@@ -36,8 +34,8 @@ public class CommandCameraZoomPan : MonoBehaviour
     [Tooltip("Key to cycle zoom levels.")]
     public KeyCode zoomKey = KeyCode.H;
 
-    [Tooltip("Orthographic sizes to cycle through. Default: 1300, 700, 500")]
-    public float[] zoomLevels = new float[] { 1300f, 700f, 500f };
+    [Tooltip("Orthographic sizes to cycle through. Element 0 is the default/full zoom.")]
+    public float[] zoomLevels = new float[] { 1350f, 1100f, 700f, 500f };
 
     [Tooltip("Start index into zoomLevels. 0 = full map (default).")]
     public int startZoomIndex = 0;
@@ -50,7 +48,7 @@ public class CommandCameraZoomPan : MonoBehaviour
     public bool allowPanningAtFullMap = false;
 
     [Tooltip("Extra padding from terrain edges (world units).")]
-    public float boundsPadding = 0f;
+    public float boundsPadding = 100f;
 
     [Tooltip("Use unscaled delta time (recommended if you pause time in command mode).")]
     public bool useUnscaledTime = true;
@@ -63,7 +61,7 @@ public class CommandCameraZoomPan : MonoBehaviour
     public bool applyEntryViewOnCommandModeEnter = true;
 
     [Tooltip("World position to use when command mode opens.")]
-    public Vector3 commandModeEntryPosition = new Vector3(250f, 600f, 480f);
+    public Vector3 commandModeEntryPosition = new Vector3(250f, 600f, 487f);
 
     [Tooltip("Euler rotation to use when command mode opens.")]
     public Vector3 commandModeEntryEuler = new Vector3(90f, 0f, 0f);
@@ -77,39 +75,47 @@ public class CommandCameraZoomPan : MonoBehaviour
     [Tooltip("If true, terrain clamping is applied immediately after snapping to the entry view.")]
     public bool clampAfterEntryView = false;
 
+    [Header("Default Zoom Rule")]
+    [Tooltip("When zoom index is 0, force X back to this value.")]
+    public bool forceXAtZoomIndex0 = true;
+
+    [Tooltip("When zoom index is 0, force Z back to this value.")]
+    public bool forceZAtZoomIndex0 = true;
+
+    [Tooltip("Forced X value when zoom index is 0.")]
+    public float zoomIndex0X = 250f;
+
+    [Tooltip("Forced Z value when zoom index is 0.")]
+    public float zoomIndex0Z = 487f;
+
     private int _zoomIndex;
 
     void Reset()
     {
         commandCamera = GetComponent<Camera>();
-        zoomLevels = new float[] { 1300f, 700f, 500f };
+        zoomLevels = new float[] { 1350f, 1100f, 700f, 500f };
         startZoomIndex = 0;
 
         applyEntryViewOnCommandModeEnter = true;
-        commandModeEntryPosition = new Vector3(250f, 600f, 480f);
+        commandModeEntryPosition = new Vector3(250f, 600f, 487f);
         commandModeEntryEuler = new Vector3(90f, 0f, 0f);
         commandModeEntryOrthoSize = 1350f;
         syncZoomIndexToClosestLevelOnEntry = true;
         clampAfterEntryView = false;
+
+        forceXAtZoomIndex0 = true;
+        forceZAtZoomIndex0 = true;
+        zoomIndex0X = 250f;
+        zoomIndex0Z = 487f;
     }
 
     void OnValidate()
     {
-        // Auto-migrate the most common legacy set so you don't get stuck at 1000/700.
-        if (zoomLevels != null && zoomLevels.Length == 3)
-        {
-            if (Mathf.Approximately(zoomLevels[0], 1300f) &&
-                Mathf.Approximately(zoomLevels[1], 1000f) &&
-                Mathf.Approximately(zoomLevels[2], 700f))
-            {
-                zoomLevels[1] = 700f;
-                zoomLevels[2] = 500f;
-            }
-        }
-
         if (panSpeedAt700 < 0f) panSpeedAt700 = 0f;
         if (boundsPadding < 0f) boundsPadding = 0f;
         if (commandModeEntryOrthoSize < 1f) commandModeEntryOrthoSize = 1f;
+
+        EnsureZoomLevelsValid();
     }
 
     void Awake()
@@ -125,21 +131,20 @@ public class CommandCameraZoomPan : MonoBehaviour
         }
 
         if (!commandCamera.orthographic)
-        {
             Debug.LogWarning("[CommandCameraZoomPan] Command camera is not orthographic. This script expects an orthographic camera.");
-        }
 
         if (terrainBounds == null)
             terrainBounds = Terrain.activeTerrain;
 
-        // Ensure zoomLevels are sane & migrate legacy values one more time at runtime.
-        MigrateLegacyZoomLevelsIfNeeded();
         EnsureZoomLevelsValid();
 
         _zoomIndex = Mathf.Clamp(startZoomIndex, 0, zoomLevels.Length - 1);
-
         ApplyZoom(_zoomIndex, centerOnPlayer: false);
-        ClampToTerrainBounds();
+
+        if (_zoomIndex == 0)
+            ApplyZoomIndexZeroRule();
+        else
+            ClampToTerrainBounds();
     }
 
     void Update()
@@ -147,23 +152,31 @@ public class CommandCameraZoomPan : MonoBehaviour
         if (zoomLevels == null || zoomLevels.Length == 0) return;
 
         if (Input.GetKeyDown(zoomKey))
-        {
             CycleZoom();
-        }
 
         HandlePanning_CustomAxes();
+
+        if (_zoomIndex == 0)
+            ApplyZoomIndexZeroRule();
     }
 
     private void CycleZoom()
     {
         _zoomIndex = (_zoomIndex + 1) % zoomLevels.Length;
-        ApplyZoom(_zoomIndex, centerOnPlayer: true);
-        ClampToTerrainBounds();
+
+        bool isDefaultZoom = (_zoomIndex == 0);
+        ApplyZoom(_zoomIndex, centerOnPlayer: !isDefaultZoom);
+
+        if (isDefaultZoom)
+            ApplyZoomIndexZeroRule();
+        else
+            ClampToTerrainBounds();
     }
 
     private void ApplyZoom(int index, bool centerOnPlayer)
     {
-        commandCamera.orthographicSize = zoomLevels[Mathf.Clamp(index, 0, zoomLevels.Length - 1)];
+        int safeIndex = Mathf.Clamp(index, 0, zoomLevels.Length - 1);
+        commandCamera.orthographicSize = zoomLevels[safeIndex];
 
         if (centerOnPlayer && player != null)
         {
@@ -174,6 +187,27 @@ public class CommandCameraZoomPan : MonoBehaviour
         }
     }
 
+    private void ApplyZoomIndexZeroRule()
+    {
+        if (commandCamera == null) return;
+
+        if (zoomLevels != null && zoomLevels.Length > 0)
+            commandCamera.orthographicSize = zoomLevels[0];
+        else
+            commandCamera.orthographicSize = commandModeEntryOrthoSize;
+
+        Vector3 pos = transform.position;
+
+        if (forceXAtZoomIndex0)
+            pos.x = zoomIndex0X;
+
+        if (forceZAtZoomIndex0)
+            pos.z = zoomIndex0Z;
+
+        transform.position = pos;
+        transform.rotation = Quaternion.Euler(commandModeEntryEuler);
+    }
+
     public void ApplyCommandModeEntryView()
     {
         if (commandCamera == null)
@@ -181,14 +215,22 @@ public class CommandCameraZoomPan : MonoBehaviour
 
         if (commandCamera == null) return;
 
-        transform.position = commandModeEntryPosition;
+        Vector3 entryPos = commandModeEntryPosition;
+        if (forceXAtZoomIndex0)
+            entryPos.x = zoomIndex0X;
+        if (forceZAtZoomIndex0)
+            entryPos.z = zoomIndex0Z;
+
+        transform.position = entryPos;
         transform.rotation = Quaternion.Euler(commandModeEntryEuler);
         commandCamera.orthographicSize = Mathf.Max(1f, commandModeEntryOrthoSize);
 
         if (syncZoomIndexToClosestLevelOnEntry)
             _zoomIndex = FindClosestZoomIndex(commandCamera.orthographicSize);
 
-        if (clampAfterEntryView)
+        if (_zoomIndex == 0)
+            ApplyZoomIndexZeroRule();
+        else if (clampAfterEntryView)
             ClampToTerrainBounds();
     }
 
@@ -213,44 +255,36 @@ public class CommandCameraZoomPan : MonoBehaviour
         return bestIndex;
     }
 
-    // Custom axes requested:
-    // - W/S moves X
-    // - A/D moves Z (SWAPPED: A = +Z, D = -Z)
     private void HandlePanning_CustomAxes()
     {
         bool zoomedIn = _zoomIndex != 0;
         if (!zoomedIn && !allowPanningAtFullMap) return;
 
-        float xAxis = 0f; // W/S -> X
-        float zAxis = 0f; // A/D -> Z
+        float xAxis = 0f;
+        float zAxis = 0f;
 
-        // WASD
-        if (Input.GetKey(KeyCode.W)) xAxis += 1f;
-        if (Input.GetKey(KeyCode.S)) xAxis -= 1f;
+        // Top-down camera (X=90) screen-space mapping:
+        // W = up = +Z
+        // A = left = -X
+        // S = down = -Z
+        // D = right = +X
+        if (Input.GetKey(KeyCode.W)) zAxis += 1f;
+        if (Input.GetKey(KeyCode.S)) zAxis -= 1f;
 
-        // Swapped directions here:
-        if (Input.GetKey(KeyCode.A)) zAxis += 1f; // A = +Z
-        if (Input.GetKey(KeyCode.D)) zAxis -= 1f; // D = -Z
+        if (Input.GetKey(KeyCode.A)) xAxis -= 1f;
+        if (Input.GetKey(KeyCode.D)) xAxis += 1f;
 
-        // Optional arrows (same mapping concept):
-        // Up/Down = X, Left/Right = Z
         if (allowArrowKeys)
         {
-            if (Input.GetKey(KeyCode.UpArrow)) xAxis += 1f;
-            if (Input.GetKey(KeyCode.DownArrow)) xAxis -= 1f;
-
-            // Keep arrows "intuitive": RightArrow = +Z, LeftArrow = -Z
-            // (If you want these swapped too, tell me.)
-            if (Input.GetKey(KeyCode.RightArrow)) zAxis += 1f;
-            if (Input.GetKey(KeyCode.LeftArrow)) zAxis -= 1f;
+            if (Input.GetKey(KeyCode.UpArrow)) zAxis += 1f;
+            if (Input.GetKey(KeyCode.DownArrow)) zAxis -= 1f;
+            if (Input.GetKey(KeyCode.LeftArrow)) xAxis -= 1f;
+            if (Input.GetKey(KeyCode.RightArrow)) xAxis += 1f;
         }
 
         if (Mathf.Approximately(xAxis, 0f) && Mathf.Approximately(zAxis, 0f)) return;
 
         float dt = useUnscaledTime ? Time.unscaledDeltaTime : Time.deltaTime;
-
-        // Speed scales with zoom so it feels consistent.
-        // At 700 -> panSpeedAt700. At 500 -> slower. At 1300 -> faster.
         float size = Mathf.Max(1f, commandCamera.orthographicSize);
         float speed = panSpeedAt700 * (size / 700f);
 
@@ -262,7 +296,7 @@ public class CommandCameraZoomPan : MonoBehaviour
 
     private void ClampToTerrainBounds()
     {
-        if (terrainBounds == null) return;
+        if (terrainBounds == null || commandCamera == null) return;
 
         Vector3 tPos = terrainBounds.transform.position;
         Vector3 tSize = terrainBounds.terrainData.size;
@@ -272,11 +306,9 @@ public class CommandCameraZoomPan : MonoBehaviour
         float minZ = tPos.z + boundsPadding;
         float maxZ = tPos.z + tSize.z - boundsPadding;
 
-        // Visible extents in world units for orthographic camera
         float halfH = commandCamera.orthographicSize;
         float halfW = commandCamera.orthographicSize * commandCamera.aspect;
 
-        // If the view is bigger than the terrain, pin to center
         float centerX = (minX + maxX) * 0.5f;
         float centerZ = (minZ + maxZ) * 0.5f;
 
@@ -312,31 +344,18 @@ public class CommandCameraZoomPan : MonoBehaviour
     public int CurrentZoomIndex => _zoomIndex;
     public float CurrentZoomSize => commandCamera != null ? commandCamera.orthographicSize : 0f;
 
-    private void MigrateLegacyZoomLevelsIfNeeded()
-    {
-        if (zoomLevels == null) return;
-        if (zoomLevels.Length == 3 &&
-            Mathf.Approximately(zoomLevels[0], 1300f) &&
-            Mathf.Approximately(zoomLevels[1], 1000f) &&
-            Mathf.Approximately(zoomLevels[2], 700f))
-        {
-            zoomLevels[1] = 700f;
-            zoomLevels[2] = 500f;
-        }
-    }
-
     private void EnsureZoomLevelsValid()
     {
         if (zoomLevels == null || zoomLevels.Length == 0)
         {
-            zoomLevels = new float[] { 1300f, 700f, 500f };
+            zoomLevels = new float[] { 1350f, 1100f, 700f, 500f };
             return;
         }
 
-        // Clamp to positive sizes
         for (int i = 0; i < zoomLevels.Length; i++)
         {
-            if (zoomLevels[i] < 1f) zoomLevels[i] = 1f;
+            if (zoomLevels[i] < 1f)
+                zoomLevels[i] = 1f;
         }
     }
 }

@@ -21,6 +21,16 @@ public class PlayerVitals : MonoBehaviour, IDamageable
     [Tooltip("Seconds of invincibility after taking damage. 0 = none.")]
     [SerializeField] private float invincibleSeconds = 1f;
 
+    [Header("Auto Recharge")]
+    [Tooltip("If enabled, the player begins recharging health after going this many seconds without taking damage.")]
+    [SerializeField] private bool rechargeEnabled = true;
+
+    [Tooltip("Seconds without taking damage before health starts recharging.")]
+    [SerializeField] private float rechargeDelay = 5f;
+
+    [Tooltip("How fast health recharges per second once the delay has passed.")]
+    [SerializeField] private float rechargeRatePerSecond = 75f;
+
     [Header("UI")]
     [Tooltip("GREEN bar 'fill' RectTransform (the part that shrinks). Pivot X must be 0.")]
     [SerializeField] private RectTransform barFill;
@@ -36,6 +46,9 @@ public class PlayerVitals : MonoBehaviour, IDamageable
     public event Action OnDied;
 
     private float invincTimer;
+    private float timeSinceLastDamage = Mathf.Infinity;
+    private bool rechargeQueued;
+    private float rechargeHealthFloat;
 
     public int MaxHealth => maxHealth;
     public int CurrentHealth => currentHealth;
@@ -55,6 +68,8 @@ public class PlayerVitals : MonoBehaviour, IDamageable
     {
         maxHealth = Mathf.Max(1, maxHealth);
         currentHealth = Mathf.Clamp(currentHealth, 0, maxHealth);
+        rechargeHealthFloat = currentHealth;
+        rechargeQueued = rechargeEnabled && currentHealth < maxHealth;
         PushToUI();
     }
 
@@ -62,6 +77,35 @@ public class PlayerVitals : MonoBehaviour, IDamageable
     {
         if (invincTimer > 0f)
             invincTimer -= Time.deltaTime;
+
+        if (!rechargeEnabled || IsDead || currentHealth >= maxHealth || !rechargeQueued)
+            return;
+
+        timeSinceLastDamage += Time.deltaTime;
+        if (timeSinceLastDamage < rechargeDelay)
+            return;
+
+        rechargeHealthFloat = Mathf.MoveTowards(
+            rechargeHealthFloat,
+            maxHealth,
+            Mathf.Max(0f, rechargeRatePerSecond) * Time.deltaTime);
+
+        int newHealth = Mathf.Clamp(Mathf.RoundToInt(rechargeHealthFloat), 0, maxHealth);
+        if (newHealth != currentHealth)
+        {
+            currentHealth = newHealth;
+            PushToUI();
+
+            if (logChanges) Debug.Log($"[PlayerVitals] Auto recharge => {currentHealth}/{maxHealth}", this);
+        }
+
+        if (currentHealth >= maxHealth)
+        {
+            currentHealth = maxHealth;
+            rechargeHealthFloat = maxHealth;
+            rechargeQueued = false;
+            PushToUI();
+        }
     }
 
     public bool Damage(int amount)
@@ -71,16 +115,20 @@ public class PlayerVitals : MonoBehaviour, IDamageable
         if (invincTimer > 0f) return false;
 
         currentHealth -= amount;
+        currentHealth = Mathf.Clamp(currentHealth, 0, maxHealth);
+        rechargeHealthFloat = currentHealth;
+
         if (currentHealth <= 0)
         {
-            currentHealth = 0;
+            rechargeQueued = false;
             PushToUI();
             if (logChanges) Debug.Log($"[PlayerVitals] DIED", this);
             OnDied?.Invoke();
         }
-
         else
         {
+            rechargeQueued = rechargeEnabled;
+            timeSinceLastDamage = 0f;
             PushToUI();
         }
 
@@ -102,14 +150,14 @@ public class PlayerVitals : MonoBehaviour, IDamageable
         Damage(Mathf.RoundToInt(amount));
     }
 
-
-
     public void Heal(int amount)
     {
         if (amount <= 0) return;
         if (IsDead) return;
 
         currentHealth = Mathf.Min(maxHealth, currentHealth + amount);
+        rechargeHealthFloat = currentHealth;
+        rechargeQueued = rechargeEnabled && currentHealth < maxHealth;
         PushToUI();
         if (logChanges) Debug.Log($"[PlayerVitals] Heal {amount} => {currentHealth}/{maxHealth}", this);
     }
@@ -118,6 +166,8 @@ public class PlayerVitals : MonoBehaviour, IDamageable
     {
         if (newMax > 0) maxHealth = Mathf.Max(1, newMax);
         currentHealth = Mathf.Clamp(newCurrent, 0, maxHealth);
+        rechargeHealthFloat = currentHealth;
+        rechargeQueued = rechargeEnabled && currentHealth < maxHealth;
         PushToUI();
     }
 
