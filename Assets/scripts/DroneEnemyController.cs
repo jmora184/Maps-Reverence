@@ -83,6 +83,14 @@ public class DroneEnemyController : MonoBehaviour
     public bool requireLineOfSight = true;
     public LayerMask losBlockLayers = ~0;
 
+    [Header("Shot Audio (Optional)")]
+    public AudioSource shotAudioSource;
+    public AudioClip shotSFX;
+    [Range(0f, 2f)] public float shotVolume = 1f;
+    public bool randomizeShotPitch = true;
+    public float minShotPitch = 0.97f;
+    public float maxShotPitch = 1.03f;
+
     [Header("Patrol")]
     public Transform[] waypoints;
     public bool pingPong = true;
@@ -156,6 +164,8 @@ public class DroneEnemyController : MonoBehaviour
             _rb.useGravity = false;
             _rb.isKinematic = true;
         }
+
+        ResolveShotAudioSourceIfNeeded();
     }
 
     private void Start()
@@ -551,6 +561,7 @@ public class DroneEnemyController : MonoBehaviour
 
             proj.SendMessage("SetOwner", gameObject, SendMessageOptions.DontRequireReceiver);
             proj.SendMessage("SetDamage", damagePerShot, SendMessageOptions.DontRequireReceiver);
+            TriggerShotSound();
         }
         else
         {
@@ -559,8 +570,28 @@ public class DroneEnemyController : MonoBehaviour
             {
                 hit.transform.SendMessage("TakeDamage", damagePerShot, SendMessageOptions.DontRequireReceiver);
                 hit.transform.SendMessage("GetShot", gameObject, SendMessageOptions.DontRequireReceiver);
+                TriggerShotSound();
             }
         }
+    }
+
+    private void ResolveShotAudioSourceIfNeeded()
+    {
+        if (shotAudioSource == null)
+            shotAudioSource = GetComponent<AudioSource>();
+    }
+
+    private void TriggerShotSound()
+    {
+        if (shotAudioSource == null || shotSFX == null)
+            return;
+
+        if (randomizeShotPitch)
+            shotAudioSource.pitch = UnityEngine.Random.Range(minShotPitch, maxShotPitch);
+        else
+            shotAudioSource.pitch = 1f;
+
+        shotAudioSource.PlayOneShot(shotSFX, shotVolume);
     }
 
     private Vector3 GetAimPoint(Transform target)

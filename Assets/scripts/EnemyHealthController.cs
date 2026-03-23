@@ -50,6 +50,29 @@ public bool clearLocomotionParamsOnDeath = true;
     [Tooltip("If true, fallback cleanup disables the GameObject (pool-friendly). If false, it destroys it.")]
     public bool fallbackDisableInsteadOfDestroy = true;
 
+
+    [Header("Death Audio")]
+    [Tooltip("Optional clip played when this enemy dies.")]
+    public AudioClip deathSFX;
+
+    [Tooltip("Loudness of the death clip.")]
+    [Range(0f, 2f)] public float deathVolume = 1f;
+
+    [Tooltip("0 = 2D, 1 = fully 3D. Start with 0 for testing.")]
+    [Range(0f, 1f)] public float deathSpatialBlend = 0f;
+
+    [Tooltip("Minimum distance for 3D death audio.")]
+    public float deathMinDistance = 2f;
+
+    [Tooltip("Maximum distance for 3D death audio.")]
+    public float deathMaxDistance = 25f;
+
+    [Tooltip("If true, creates a temporary detached audio object so the clip can finish even if this enemy is destroyed.")]
+    public bool useDetachedDeathAudio = true;
+
+    [Header("Debug Audio")]
+    public bool debugDeathAudio = false;
+
     // UI can subscribe to this
     public event Action<float> OnHealth01Changed;
 
@@ -167,6 +190,9 @@ public void DamageEnemy(int damageAmount)
 
         currentHealth = 0;
         RaiseHealthChanged();
+
+        PlayDeathSound();
+
         OnAnyEnemyDied?.Invoke(this);
 
         // 1) Preferred: MnR.DeathController (plays anim, disables AI/nav, cleans up)
@@ -242,6 +268,47 @@ if (anim != null)
             gameObject.SetActive(false);
         else
             Destroy(gameObject);
+    }
+
+    private void PlayDeathSound()
+    {
+        if (deathSFX == null) return;
+
+        Vector3 pos = transform.position;
+
+        if (useDetachedDeathAudio)
+        {
+            GameObject temp = new GameObject(name + "_DeathAudio");
+            temp.transform.position = pos;
+
+            var src = temp.AddComponent<AudioSource>();
+            src.clip = deathSFX;
+            src.volume = deathVolume;
+            src.spatialBlend = deathSpatialBlend;
+            src.minDistance = Mathf.Max(0.01f, deathMinDistance);
+            src.maxDistance = Mathf.Max(src.minDistance, deathMaxDistance);
+            src.playOnAwake = false;
+            src.loop = false;
+            src.rolloffMode = AudioRolloffMode.Linear;
+            src.Play();
+
+            if (debugDeathAudio) Debug.Log($"[EnemyHealthController] Playing detached death audio: {deathSFX.name}", temp);
+
+            Destroy(temp, deathSFX.length + 0.25f);
+            return;
+        }
+
+        var existing = GetComponent<AudioSource>();
+        if (existing == null)
+            existing = gameObject.AddComponent<AudioSource>();
+
+        existing.spatialBlend = deathSpatialBlend;
+        existing.minDistance = Mathf.Max(0.01f, deathMinDistance);
+        existing.maxDistance = Mathf.Max(existing.minDistance, deathMaxDistance);
+        existing.rolloffMode = AudioRolloffMode.Linear;
+        existing.PlayOneShot(deathSFX, deathVolume);
+
+        if (debugDeathAudio) Debug.Log($"[EnemyHealthController] Playing attached death audio: {deathSFX.name}", this);
     }
 
     private static bool HasAnimatorParameter(Animator animator, string paramName, AnimatorControllerParameterType type)

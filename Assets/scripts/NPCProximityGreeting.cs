@@ -1,4 +1,4 @@
-// 2026-03-07
+// 2026-03-21
 // NPCProximityGreeting.cs
 //
 // Behavior modes:
@@ -9,12 +9,82 @@
 // - If an ally changes from prisoner -> freed, dialog auto-opens ONE time.
 // - If another script activates/recruits the ally, call TriggerOneTimeIntroDialog().
 // - After that first auto-open, normal behavior resumes (press P unless auto-show mode is enabled).
+//
+// Added conditional message overrides:
+// - You can override the greeting and/or prompt based on watched conditions.
+// - Example: if Ally B is inactive (dead), show a different message.
+// - Example: if Ally C is active and no longer a prisoner, show a different message.
+// - Example: if Ally41 has AllyActivationGate.IsActive == true, show a different message.
+// - If death does NOT disable the ally GameObject, another script can call SetConditionFlag("SomeFlag", true).
 
+using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 [DisallowMultipleComponent]
 public class NPCProximityGreeting : MonoBehaviour
 {
+    private enum WatchedObjectRequirement
+    {
+        Ignore,
+        MustBeActive,
+        MustBeInactive
+    }
+
+    private enum PrisonerRequirement
+    {
+        Ignore,
+        MustBePrisoner,
+        MustBeFreed
+    }
+
+    private enum ExternalFlagRequirement
+    {
+        Ignore,
+        MustBeTrue,
+        MustBeFalse
+    }
+
+    private enum ActivationRequirement
+    {
+        Ignore,
+        MustBeActivated,
+        MustBeNotActivated
+    }
+
+    [Serializable]
+    private class ConditionalMessageOverride
+    {
+        public string label = "Override";
+        public bool isEnabled = true;
+
+        [Header("Optional watched GameObject")]
+        public GameObject watchedObject;
+        public WatchedObjectRequirement watchedObjectRequirement = WatchedObjectRequirement.Ignore;
+
+        [Header("Optional watched prisoner state")]
+        public AllyPrisonerState watchedPrisonerState;
+        public PrisonerRequirement prisonerRequirement = PrisonerRequirement.Ignore;
+
+        [Header("Optional external flag")]
+        [Tooltip("Optional runtime flag name. Another script can call SetConditionFlag(flagName, true/false).")]
+        public string externalFlagName;
+        public ExternalFlagRequirement externalFlagRequirement = ExternalFlagRequirement.Ignore;
+
+        [Header("Optional activation gate")]
+        [Tooltip("Use this when you want to react to AllyActivationGate.IsActive instead of raw GameObject active/inactive.")]
+        public AllyActivationGate watchedActivationGate;
+        public ActivationRequirement activationRequirement = ActivationRequirement.Ignore;
+
+        [Header("Override text")]
+        [TextArea] public string greetingOverride;
+
+        [Tooltip("If false, the normal talkPromptMessage is still used.")]
+        public bool overridePromptMessage = false;
+
+        public string talkPromptOverride = "Press P to talk";
+    }
+
     [Header("References")]
     [SerializeField] private NPCDialogBoxUI dialogUI;      // optional; auto-finds
     [SerializeField] private Transform playerOverride;     // optional; drag Player
@@ -87,6 +157,9 @@ public class NPCProximityGreeting : MonoBehaviour
     [Header("Dialog Message")]
     [TextArea] public string greeting = "Hello Captain";
 
+    [Header("Conditional Message Overrides (top to bottom priority)")]
+    [SerializeField] private ConditionalMessageOverride[] conditionalMessageOverrides;
+
     [Header("Range")]
     public float range = 2.5f;
     public float rangeBuffer = 0.75f;
@@ -111,6 +184,11 @@ public class NPCProximityGreeting : MonoBehaviour
     private bool _dialogOpen;
     private bool _oneTimeIntroShown;
     private bool _wasPrisoner;
+
+    private string _lastShownGreeting;
+    private string _lastShownPrompt;
+
+    private readonly Dictionary<string, bool> _externalConditionFlags = new Dictionary<string, bool>();
 
     // Animator param caches
     private int _talkingHash;
@@ -217,6 +295,8 @@ public class NPCProximityGreeting : MonoBehaviour
             return;
         }
 
+        RefreshVisibleTextIfNeeded();
+
         // In range
         if (autoOpenDialogOnProximity)
         {
@@ -282,7 +362,8 @@ public class NPCProximityGreeting : MonoBehaviour
     {
         if (!_promptShown && useRecruitPromptUI)
         {
-            RecruitPromptUI.Show(talkPromptMessage);
+            _lastShownPrompt = ResolvePromptMessage();
+            RecruitPromptUI.Show(_lastShownPrompt);
             _promptShown = true;
         }
     }
@@ -293,12 +374,14 @@ public class NPCProximityGreeting : MonoBehaviour
         {
             RecruitPromptUI.Hide();
             _promptShown = false;
+            _lastShownPrompt = null;
         }
     }
 
     private void OpenDialog()
     {
-        dialogUI.Show(greeting);
+        _lastShownGreeting = ResolveGreetingMessage();
+        dialogUI.Show(_lastShownGreeting);
         _dialogOpen = true;
         SetTalking(true);
     }
@@ -310,6 +393,7 @@ public class NPCProximityGreeting : MonoBehaviour
             dialogUI.Hide();
 
         _dialogOpen = false;
+        _lastShownGreeting = null;
 
         // Always stop talking when closing
         if (driveTalkAnimation) SetTalking(false);
@@ -401,6 +485,177 @@ public class NPCProximityGreeting : MonoBehaviour
 
         if (debugLogs)
             Debug.Log("[NPCProximityGreeting] ONE-TIME INTRO OPEN", this);
+    }
+
+    public void SetConditionFlag(string flagName, bool value)
+    {
+        if (string.IsNullOrWhiteSpace(flagName))
+            return;
+
+        _externalConditionFlags[flagName] = value;
+        RefreshVisibleTextIfNeeded();
+
+        if (debugLogs)
+            Debug.Log($"[NPCProximityGreeting] SetConditionFlag '{flagName}' = {value}", this);
+    }
+
+    public void ClearConditionFlag(string flagName)
+    {
+        if (string.IsNullOrWhiteSpace(flagName))
+            return;
+
+        _externalConditionFlags.Remove(flagName);
+        RefreshVisibleTextIfNeeded();
+
+        if (debugLogs)
+            Debug.Log($"[NPCProximityGreeting] ClearConditionFlag '{flagName}'", this);
+    }
+
+    private void RefreshVisibleTextIfNeeded()
+    {
+        if (_dialogOpen && dialogUI != null)
+        {
+            string currentGreeting = ResolveGreetingMessage();
+            if (_lastShownGreeting != currentGreeting)
+            {
+                dialogUI.Show(currentGreeting);
+                _lastShownGreeting = currentGreeting;
+            }
+        }
+
+        if (_promptShown && useRecruitPromptUI)
+        {
+            string currentPrompt = ResolvePromptMessage();
+            if (_lastShownPrompt != currentPrompt)
+            {
+                RecruitPromptUI.Show(currentPrompt);
+                _lastShownPrompt = currentPrompt;
+            }
+        }
+    }
+
+    private string ResolveGreetingMessage()
+    {
+        ConditionalMessageOverride matched = GetFirstMatchingOverride();
+        if (matched != null && !string.IsNullOrWhiteSpace(matched.greetingOverride))
+            return matched.greetingOverride;
+
+        return greeting;
+    }
+
+    private string ResolvePromptMessage()
+    {
+        ConditionalMessageOverride matched = GetFirstMatchingOverride();
+        if (matched != null && matched.overridePromptMessage && !string.IsNullOrWhiteSpace(matched.talkPromptOverride))
+            return matched.talkPromptOverride;
+
+        return talkPromptMessage;
+    }
+
+    private ConditionalMessageOverride GetFirstMatchingOverride()
+    {
+        if (conditionalMessageOverrides == null || conditionalMessageOverrides.Length == 0)
+            return null;
+
+        for (int i = 0; i < conditionalMessageOverrides.Length; i++)
+        {
+            ConditionalMessageOverride entry = conditionalMessageOverrides[i];
+            if (entry == null || !entry.isEnabled)
+                continue;
+
+            if (OverrideMatches(entry))
+                return entry;
+        }
+
+        return null;
+    }
+
+    private bool OverrideMatches(ConditionalMessageOverride entry)
+    {
+        return MatchesWatchedObject(entry)
+               && MatchesPrisonerRequirement(entry)
+               && MatchesExternalFlag(entry)
+               && MatchesActivationRequirement(entry);
+    }
+
+    private bool MatchesWatchedObject(ConditionalMessageOverride entry)
+    {
+        switch (entry.watchedObjectRequirement)
+        {
+            case WatchedObjectRequirement.Ignore:
+                return true;
+
+            case WatchedObjectRequirement.MustBeActive:
+                return entry.watchedObject != null && entry.watchedObject.activeInHierarchy;
+
+            case WatchedObjectRequirement.MustBeInactive:
+                return entry.watchedObject != null && !entry.watchedObject.activeInHierarchy;
+        }
+
+        return true;
+    }
+
+    private bool MatchesPrisonerRequirement(ConditionalMessageOverride entry)
+    {
+        switch (entry.prisonerRequirement)
+        {
+            case PrisonerRequirement.Ignore:
+                return true;
+
+            case PrisonerRequirement.MustBePrisoner:
+                return entry.watchedPrisonerState != null && entry.watchedPrisonerState.IsPrisoner;
+
+            case PrisonerRequirement.MustBeFreed:
+                return entry.watchedPrisonerState != null && !entry.watchedPrisonerState.IsPrisoner;
+        }
+
+        return true;
+    }
+
+    private bool MatchesExternalFlag(ConditionalMessageOverride entry)
+    {
+        switch (entry.externalFlagRequirement)
+        {
+            case ExternalFlagRequirement.Ignore:
+                return true;
+
+            case ExternalFlagRequirement.MustBeTrue:
+                return GetConditionFlag(entry.externalFlagName);
+
+            case ExternalFlagRequirement.MustBeFalse:
+                return !GetConditionFlag(entry.externalFlagName);
+        }
+
+        return true;
+    }
+    private bool MatchesActivationRequirement(ConditionalMessageOverride entry)
+    {
+        switch (entry.activationRequirement)
+        {
+            case ActivationRequirement.Ignore:
+                return true;
+
+            case ActivationRequirement.MustBeActivated:
+                return entry.watchedActivationGate != null && entry.watchedActivationGate.IsActive;
+
+            case ActivationRequirement.MustBeNotActivated:
+                return entry.watchedActivationGate != null && !entry.watchedActivationGate.IsActive;
+        }
+
+        return true;
+    }
+
+
+    private bool GetConditionFlag(string flagName)
+    {
+        if (string.IsNullOrWhiteSpace(flagName))
+            return false;
+
+        bool value;
+        if (_externalConditionFlags.TryGetValue(flagName, out value))
+            return value;
+
+        return false;
     }
 
     private void OnDisable()

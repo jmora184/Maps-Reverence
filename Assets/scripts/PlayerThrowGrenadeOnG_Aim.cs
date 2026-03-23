@@ -77,6 +77,19 @@ public class PlayerThrowGrenadeOnG_Aim : MonoBehaviour
     public Vector3 targetRotationEuler = Vector3.zero;
     public Vector3 targetScale = new Vector3(2f, 2f, 2f);
 
+    [Header("Throw Audio (Optional)")]
+    [Tooltip("AudioSource used to play the grenade throw sound. If empty and auto-find is enabled, this script will look on this object and its children.")]
+    public AudioSource throwAudioSource;
+
+    [Tooltip("Sound effect played when the grenade is successfully thrown.")]
+    public AudioClip throwSFX;
+
+    [Range(0f, 2f)]
+    public float throwVolume = 1f;
+
+    [Tooltip("If enabled, auto-finds an AudioSource when one is not assigned.")]
+    public bool autoFindThrowAudioSource = true;
+
     [Header("Debug")]
     public bool debugLogs = false;
 
@@ -103,6 +116,9 @@ public class PlayerThrowGrenadeOnG_Aim : MonoBehaviour
         maxGrenades = Mathf.Max(0, maxGrenades);
         startingGrenades = Mathf.Clamp(startingGrenades, 0, maxGrenades > 0 ? maxGrenades : startingGrenades);
         currentGrenades = useLimitedGrenades ? startingGrenades : Mathf.Max(currentGrenades, startingGrenades);
+
+        if (autoFindThrowAudioSource && throwAudioSource == null)
+            throwAudioSource = GetComponentInChildren<AudioSource>(true);
 
         NotifyGrenadeCountChanged();
     }
@@ -160,10 +176,15 @@ public class PlayerThrowGrenadeOnG_Aim : MonoBehaviour
         if (grenadePrefab != null)
         {
             bool threw = SpawnAndThrowGrenade();
-            if (threw && useLimitedGrenades)
+            if (threw)
             {
-                currentGrenades = Mathf.Max(0, currentGrenades - 1);
-                NotifyGrenadeCountChanged();
+                PlayThrowSound();
+
+                if (useLimitedGrenades)
+                {
+                    currentGrenades = Mathf.Max(0, currentGrenades - 1);
+                    NotifyGrenadeCountChanged();
+                }
 
                 if (debugLogs)
                     Debug.Log($"{nameof(PlayerThrowGrenadeOnG_Aim)}: Grenade thrown. Remaining: {currentGrenades}/{maxGrenades}", this);
@@ -229,6 +250,23 @@ public class PlayerThrowGrenadeOnG_Aim : MonoBehaviour
         return true;
     }
 
+    private void PlayThrowSound()
+    {
+        if (throwSFX == null) return;
+
+        if (throwAudioSource == null && autoFindThrowAudioSource)
+            throwAudioSource = GetComponentInChildren<AudioSource>(true);
+
+        if (throwAudioSource == null)
+        {
+            if (debugLogs)
+                Debug.LogWarning($"{nameof(PlayerThrowGrenadeOnG_Aim)}: Throw SFX assigned but no AudioSource is available.", this);
+            return;
+        }
+
+        throwAudioSource.PlayOneShot(throwSFX, throwVolume);
+    }
+
     private Vector3 GetOwnerVelocity()
     {
         if (_ownerRb != null)
@@ -258,24 +296,46 @@ public class PlayerThrowGrenadeOnG_Aim : MonoBehaviour
 
     public void RefillGrenadesToFull()
     {
-        currentGrenades = Mathf.Max(0, maxGrenades);
+        currentGrenades = maxGrenades > 0 ? maxGrenades : currentGrenades;
         NotifyGrenadeCountChanged();
 
         if (debugLogs)
             Debug.Log($"{nameof(PlayerThrowGrenadeOnG_Aim)}: Grenades refilled to {currentGrenades}/{maxGrenades}", this);
     }
 
-    public void SetGrenades(int amount)
+    public bool TryAddGrenades(int amount)
     {
-        currentGrenades = Mathf.Clamp(amount, 0, Mathf.Max(0, maxGrenades));
-        NotifyGrenadeCountChanged();
+        if (amount <= 0) return false;
+
+        int old = currentGrenades;
+        int cappedMax = maxGrenades > 0 ? maxGrenades : int.MaxValue;
+        currentGrenades = Mathf.Clamp(currentGrenades + amount, 0, cappedMax);
+
+        bool changed = currentGrenades != old;
+        if (changed)
+        {
+            NotifyGrenadeCountChanged();
+
+            if (debugLogs)
+                Debug.Log($"{nameof(PlayerThrowGrenadeOnG_Aim)}: Added {amount} grenades. Now {currentGrenades}/{maxGrenades}", this);
+        }
+
+        return changed;
     }
 
-    public void AddGrenades(int amount)
+    public bool HasGrenades()
     {
-        if (amount <= 0) return;
-        currentGrenades = Mathf.Clamp(currentGrenades + amount, 0, Mathf.Max(0, maxGrenades));
-        NotifyGrenadeCountChanged();
+        return !useLimitedGrenades || currentGrenades > 0;
+    }
+
+    public int GetCurrentGrenades()
+    {
+        return currentGrenades;
+    }
+
+    public int GetMaxGrenades()
+    {
+        return maxGrenades;
     }
 
     private void NotifyGrenadeCountChanged()

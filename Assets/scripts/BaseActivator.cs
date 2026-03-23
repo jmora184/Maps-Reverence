@@ -48,6 +48,15 @@ public class BaseActivator : MonoBehaviour
     [SerializeField] private GameObject enemyDetectedWarningUI;
     [SerializeField] private float enemyDetectedWarningDuration = 2f;
 
+    [Header("Activation Audio")]
+    [SerializeField] private AudioClip activatedSfx;
+    [SerializeField] private AudioSource activationAudioSource;
+    [SerializeField, Range(0f, 1f)] private float activatedSfxVolume = 1f;
+    [SerializeField] private bool usePlayClipAtPointForActivation = false;
+    [SerializeField, Range(0f, 1f)] private float activationSpatialBlend = 1f;
+    [SerializeField] private float activationMinDistance = 10f;
+    [SerializeField] private float activationMaxDistance = 35f;
+
     [Header("Events")]
     [SerializeField] private UnityEvent onPlayerEnteredRange;
     [SerializeField] private UnityEvent onPlayerExitedRange;
@@ -70,6 +79,7 @@ public class BaseActivator : MonoBehaviour
     private void Awake()
     {
         FindPlayer();
+        EnsureActivationAudioSource();
         enemyWarningVisibleByThisScript = false;
         SetBlockedPromptVisible(false);
 
@@ -87,6 +97,7 @@ public class BaseActivator : MonoBehaviour
     private void OnEnable()
     {
         FindPlayer();
+        EnsureActivationAudioSource();
         enemyWarningVisibleByThisScript = false;
         SetBlockedPromptVisible(false);
         RefreshPrompt(false);
@@ -174,6 +185,7 @@ public class BaseActivator : MonoBehaviour
         hasActivated = true;
         enemyWasDetectedAfterActivation = false;
         ClearPromptIfNeeded();
+        PlayActivatedSfx();
         onActivated?.Invoke();
     }
 
@@ -442,6 +454,37 @@ public class BaseActivator : MonoBehaviour
             return ((1 << hit.gameObject.layer) & enemyLayers.value) != 0;
 
         return false;
+    }
+
+    private void EnsureActivationAudioSource()
+    {
+        if (activationAudioSource == null)
+            activationAudioSource = GetComponent<AudioSource>();
+    }
+
+    private void PlayActivatedSfx()
+    {
+        if (activatedSfx == null)
+            return;
+
+        if (usePlayClipAtPointForActivation)
+        {
+            AudioSource.PlayClipAtPoint(activatedSfx, transform.position, Mathf.Clamp01(activatedSfxVolume));
+            return;
+        }
+
+        EnsureActivationAudioSource();
+
+        if (activationAudioSource == null)
+        {
+            AudioSource.PlayClipAtPoint(activatedSfx, transform.position, Mathf.Clamp01(activatedSfxVolume));
+            return;
+        }
+
+        activationAudioSource.spatialBlend = Mathf.Clamp01(activationSpatialBlend);
+        activationAudioSource.minDistance = Mathf.Max(0.01f, activationMinDistance);
+        activationAudioSource.maxDistance = Mathf.Max(activationAudioSource.minDistance, activationMaxDistance);
+        activationAudioSource.PlayOneShot(activatedSfx, Mathf.Clamp01(activatedSfxVolume));
     }
 
     private void FindPlayer()

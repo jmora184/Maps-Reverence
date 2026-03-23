@@ -73,6 +73,20 @@ public class AlienBossController : MonoBehaviour
     [Header("Attack")]
     public float attackCooldown = 1.35f;
 
+    [Header("Audio - Aggro")]
+    public AudioClip aggroSfx;
+    public AudioSource aggroAudioSource;
+    [Range(0f, 1f)] public float aggroSfxVolume = 1f;
+
+    [Header("Audio - Footsteps")]
+    public AudioClip footstepSfx;
+    public AudioSource footstepAudioSource;
+    [Range(0f, 1f)] public float footstepSfxVolume = 1f;
+    public float walkFootstepInterval = 0.55f;
+    public float runFootstepInterval = 0.3f;
+    public float minVelocityForFootsteps = 0.15f;
+    public bool requireAgentPathForFootsteps = true;
+
     [Header("Animator Params")]
     public string speedParam = "Speed";
     public string aggroTrigger = "agro";
@@ -95,6 +109,7 @@ public class AlienBossController : MonoBehaviour
 
     // Aggro latch so we don't replay agro
     private bool _aggroLatched = false;
+    private float _nextFootstepTime = 0f;
 
     // Waypoint caching so child waypoints still work
     private Vector3 _spawnAnchorWorld;
@@ -115,6 +130,10 @@ public class AlienBossController : MonoBehaviour
         if (!agent) agent = GetComponent<NavMeshAgent>();
         if (!health) health = GetComponent<AlienBossHealth>();
         if (!animator) animator = GetComponentInChildren<Animator>();
+        if (!aggroAudioSource) aggroAudioSource = GetComponent<AudioSource>();
+        if (!aggroAudioSource) aggroAudioSource = GetComponentInChildren<AudioSource>();
+        if (!footstepAudioSource) footstepAudioSource = GetComponent<AudioSource>();
+        if (!footstepAudioSource) footstepAudioSource = GetComponentInChildren<AudioSource>();
 
         _spawnAnchorWorld = transform.position;
         CacheWaypoints();
@@ -181,10 +200,12 @@ public class AlienBossController : MonoBehaviour
             _state = State.Dead;
             ApplySpeedForState(_state);
             UpdateAnimatorSpeed();
+            StopFootsteps();
             return;
         }
 
         UpdateAnimatorSpeed();
+        UpdateFootsteps();
 
         switch (_state)
         {
@@ -501,11 +522,13 @@ public class AlienBossController : MonoBehaviour
         if (shouldPlayAggro && animator && !string.IsNullOrWhiteSpace(aggroTrigger))
         {
             animator.SetTrigger(aggroTrigger);
+            PlayAggroSfx();
             _aggroLatched = true;
         }
         else if (!playAggroOnce && animator && !string.IsNullOrWhiteSpace(aggroTrigger) && (provoked || wasIdle))
         {
             animator.SetTrigger(aggroTrigger);
+            PlayAggroSfx();
         }
     }
 
@@ -544,6 +567,8 @@ public class AlienBossController : MonoBehaviour
             agent.enabled = false;
         }
 
+        StopFootsteps();
+
         if (animator && !string.IsNullOrWhiteSpace(dieTrigger))
             animator.SetTrigger(dieTrigger);
 
@@ -553,6 +578,68 @@ public class AlienBossController : MonoBehaviour
     // ----------------------
     // Helpers
     // ----------------------
+    public void PlayAggroSfx()
+    {
+        PlayClip(aggroAudioSource, aggroSfx, aggroSfxVolume);
+    }
+
+    public void PlayFootstepSfx()
+    {
+        PlayClip(footstepAudioSource, footstepSfx, footstepSfxVolume);
+    }
+
+    private void UpdateFootsteps()
+    {
+        if (!agent || !footstepSfx)
+            return;
+
+        if (_state == State.Dead)
+        {
+            StopFootsteps();
+            return;
+        }
+
+        bool hasPath = !requireAgentPathForFootsteps || (agent.enabled && agent.hasPath);
+        bool moving = agent.enabled && !agent.isStopped && hasPath && agent.velocity.magnitude >= minVelocityForFootsteps;
+
+        if (!moving)
+        {
+            _nextFootstepTime = 0f;
+            return;
+        }
+
+        float interval = (_state == State.Patrol) ? walkFootstepInterval : runFootstepInterval;
+        interval = Mathf.Max(0.05f, interval);
+
+        if (_nextFootstepTime <= 0f)
+            _nextFootstepTime = Time.time + interval;
+
+        if (Time.time >= _nextFootstepTime)
+        {
+            PlayFootstepSfx();
+            _nextFootstepTime = Time.time + interval;
+        }
+    }
+
+    private void StopFootsteps()
+    {
+        _nextFootstepTime = 0f;
+    }
+
+    private void PlayClip(AudioSource src, AudioClip clip, float volume)
+    {
+        if (!clip) return;
+
+        if (!src)
+        {
+            src = GetComponent<AudioSource>();
+            if (!src) src = GetComponentInChildren<AudioSource>();
+        }
+
+        if (src)
+            src.PlayOneShot(clip, Mathf.Clamp01(volume));
+    }
+
     private Transform NormalizeAttacker(Transform t)
     {
         if (!t) return null;

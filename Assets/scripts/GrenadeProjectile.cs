@@ -18,6 +18,16 @@ public class GrenadeProjectile : MonoBehaviour
     public GameObject explosionVfx;
     public AudioSource explosionAudioSourcePrefab;
 
+    [Header("Explosion Audio (Optional)")]
+    [Tooltip("Simple explosion clip option. If assigned, this script will spawn a temporary AudioSource at the explosion point.")]
+    public AudioClip explosionSFX;
+
+    [Range(0f, 2f)]
+    public float explosionVolume = 1f;
+
+    [Tooltip("If both are assigned, prefer the simple clip over the audio source prefab.")]
+    public bool preferExplosionClipOverPrefab = true;
+
     [Header("Damage Falloff")]
     public bool useDamageFalloff = true;
     public float minimumDamageMultiplier = 0.25f;
@@ -152,11 +162,7 @@ public class GrenadeProjectile : MonoBehaviour
             Instantiate(explosionVfx, center, Quaternion.identity);
         }
 
-        if (explosionAudioSourcePrefab != null)
-        {
-            AudioSource spawnedAudio = Instantiate(explosionAudioSourcePrefab, center, Quaternion.identity);
-            Destroy(spawnedAudio.gameObject, spawnedAudio.clip != null ? spawnedAudio.clip.length + 0.25f : 2f);
-        }
+        PlayExplosionSound(center);
 
         Collider[] hits = Physics.OverlapSphere(center, radius, hitMask, QueryTriggerInteraction.Collide);
         HashSet<int> processedTargets = new HashSet<int>();
@@ -199,6 +205,51 @@ public class GrenadeProjectile : MonoBehaviour
         Destroy(gameObject);
     }
 
+    private void PlayExplosionSound(Vector3 center)
+    {
+        if (preferExplosionClipOverPrefab && explosionSFX != null)
+        {
+            SpawnOneShotAudio(center, explosionSFX, explosionVolume);
+            return;
+        }
+
+        if (explosionAudioSourcePrefab != null)
+        {
+            AudioSource spawnedAudio = Instantiate(explosionAudioSourcePrefab, center, Quaternion.identity);
+            if (spawnedAudio != null)
+            {
+                if (spawnedAudio.clip != null && !spawnedAudio.isPlaying)
+                    spawnedAudio.Play();
+
+                Destroy(spawnedAudio.gameObject, spawnedAudio.clip != null ? spawnedAudio.clip.length + 0.25f : 2f);
+            }
+            return;
+        }
+
+        if (explosionSFX != null)
+        {
+            SpawnOneShotAudio(center, explosionSFX, explosionVolume);
+        }
+    }
+
+    private void SpawnOneShotAudio(Vector3 position, AudioClip clip, float volume)
+    {
+        if (clip == null) return;
+
+        GameObject audioGO = new GameObject("GrenadeExplosionAudio");
+        audioGO.transform.position = position;
+
+        AudioSource source = audioGO.AddComponent<AudioSource>();
+        source.clip = clip;
+        source.volume = volume;
+        source.spatialBlend = 1f;
+        source.playOnAwake = false;
+        source.loop = false;
+
+        source.Play();
+        Destroy(audioGO, clip.length + 0.25f);
+    }
+
     private float CalculateDamage(float distance)
     {
         if (!useDamageFalloff) return damage;
@@ -219,7 +270,6 @@ public class GrenadeProjectile : MonoBehaviour
             return col.transform.position;
         }
     }
-
 
     private UnityEngine.Object ResolveDamageTargetKey(Collider hit)
     {

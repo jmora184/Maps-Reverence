@@ -35,6 +35,15 @@ public class AnimalBiteDamageRange : MonoBehaviour
     [Tooltip("Animator layer index to watch (0 is default).")]
     public int layerIndex = 0;
 
+    [Header("Attack SFX")]
+    [Tooltip("Sound played when the animal enters its attack state.")]
+    public AudioClip attackSfx;
+    [Tooltip("Optional dedicated audio source. If empty, the script will try to find one on this object.")]
+    public AudioSource attackAudioSource;
+    [Range(0f, 1f)] public float attackSfxVolume = 1f;
+    [Tooltip("If true, plays the attack sound when the animator enters the attack state.")]
+    public bool playAttackSfxOnStateEnter = true;
+
     [Header("Player")]
     [Tooltip("Optional explicit reference. If null, we find by playerTag.")]
     public Transform playerTransform;
@@ -48,31 +57,30 @@ public class AnimalBiteDamageRange : MonoBehaviour
     [Tooltip("Where range is measured from. If null, uses this transform.")]
     public Transform rangeOrigin;
 
-[Header("Multi-Target (Optional)")]
-[Tooltip("If false (default), this script behaves like before: it only damages the Player. If true, it can damage Player/Allies/Enemies based on toggles + tags within biteRange.")]
-public bool enableMultiTarget = false;
+    [Header("Multi-Target (Optional)")]
+    [Tooltip("If false (default), this script behaves like before: it only damages the Player. If true, it can damage Player/Allies/Enemies based on toggles + tags within biteRange.")]
+    public bool enableMultiTarget = false;
 
-[Tooltip("Which layers are considered damageable targets when Multi-Target is enabled.")]
-public LayerMask targetLayers = ~0;
+    [Tooltip("Which layers are considered damageable targets when Multi-Target is enabled.")]
+    public LayerMask targetLayers = ~0;
 
-[Tooltip("If true, multi-target uses QueryTriggerInteraction.Collide so trigger hitboxes are included.")]
-public bool includeTriggerColliders = true;
+    [Tooltip("If true, multi-target uses QueryTriggerInteraction.Collide so trigger hitboxes are included.")]
+    public bool includeTriggerColliders = true;
 
-[Header("Target Factions (used when Multi-Target is enabled)")]
-public bool damagePlayer = true;
-public bool damageAllies = true;
-public bool damageEnemies = true;
+    [Header("Target Factions (used when Multi-Target is enabled)")]
+    public bool damagePlayer = true;
+    public bool damageAllies = true;
+    public bool damageEnemies = true;
 
-[Tooltip("Tag used for Ally targets.")]
-public string allyTag = "Ally";
+    [Tooltip("Tag used for Ally targets.")]
+    public string allyTag = "Ally";
 
-[Tooltip("Tag used for Enemy targets.")]
-public string enemyTag = "Enemy";
+    [Tooltip("Tag used for Enemy targets.")]
+    public string enemyTag = "Enemy";
 
-[Header("Optional Tag Filter (Multi-Target)")]
-[Tooltip("If empty, tags are decided by faction toggles above. If set, only objects with ANY of these tags will be damaged.")]
-public string[] requiredTags;
-
+    [Header("Optional Tag Filter (Multi-Target)")]
+    [Tooltip("If empty, tags are decided by faction toggles above. If set, only objects with ANY of these tags will be damaged.")]
+    public string[] requiredTags;
 
     [Header("Damage")]
     public int damage = 5;
@@ -95,6 +103,7 @@ public string[] requiredTags;
     {
         if (!animator) animator = GetComponentInChildren<Animator>();
         if (!rangeOrigin) rangeOrigin = transform;
+        if (!attackAudioSource) attackAudioSource = GetComponent<AudioSource>();
     }
 
     private void Start()
@@ -110,6 +119,9 @@ public string[] requiredTags;
         // Enter event: false -> true
         if (inAttack && !_wasInAttackState)
         {
+            if (playAttackSfxOnStateEnter)
+                PlayAttackSfx();
+
             DealDamage("enter");
         }
         else if (inAttack && tickDamageWhileInState)
@@ -118,6 +130,18 @@ public string[] requiredTags;
         }
 
         _wasInAttackState = inAttack;
+    }
+
+    public void PlayAttackSfx()
+    {
+        if (!attackSfx) return;
+
+        if (!attackAudioSource) attackAudioSource = GetComponent<AudioSource>();
+
+        if (attackAudioSource)
+            attackAudioSource.PlayOneShot(attackSfx, attackSfxVolume);
+        else
+            AudioSource.PlayClipAtPoint(attackSfx, transform.position, attackSfxVolume);
     }
 
     private bool IsInAttackState()
@@ -137,75 +161,75 @@ public string[] requiredTags;
         return go ? go.transform : null;
     }
 
-private void DealDamage(string reason)
-{
-    if (Time.time < _nextDamageTime) return;
-
-    Vector3 originPos = rangeOrigin ? rangeOrigin.position : transform.position;
-
-    // Multi-target mode: damage allowed targets within biteRange
-    if (enableMultiTarget)
+    private void DealDamage(string reason)
     {
-        Collider[] hits = Physics.OverlapSphere(originPos, biteRange, targetLayers, includeTriggerColliders ? QueryTriggerInteraction.Collide : QueryTriggerInteraction.Ignore);
-        if (hits == null || hits.Length == 0) return;
+        if (Time.time < _nextDamageTime) return;
 
-        bool hitAny = false;
+        Vector3 originPos = rangeOrigin ? rangeOrigin.position : transform.position;
 
-        foreach (var c in hits)
+        // Multi-target mode: damage allowed targets within biteRange
+        if (enableMultiTarget)
         {
-            if (!c) continue;
+            Collider[] hits = Physics.OverlapSphere(originPos, biteRange, targetLayers, includeTriggerColliders ? QueryTriggerInteraction.Collide : QueryTriggerInteraction.Ignore);
+            if (hits == null || hits.Length == 0) return;
 
-            // Don't damage ourselves
-            if (c.transform == transform || c.transform.IsChildOf(transform))
-                continue;
+            bool hitAny = false;
 
-            if (!IsAllowedTarget(c))
-                continue;
+            foreach (var c in hits)
+            {
+                if (!c) continue;
 
-            if (ApplyDamage(c))
-                hitAny = true;
+                // Don't damage ourselves
+                if (c.transform == transform || c.transform.IsChildOf(transform))
+                    continue;
+
+                if (!IsAllowedTarget(c))
+                    continue;
+
+                if (ApplyDamage(c))
+                    hitAny = true;
+            }
+
+            if (hitAny)
+            {
+                _nextDamageTime = Time.time + Mathf.Max(0.05f, damageCooldown);
+                if (logDamage)
+                    Debug.Log($"[AnimalBiteDamageRange] Dealt {damage} ({reason}) to targets within {biteRange}.", this);
+            }
+
+            return;
         }
 
-        if (hitAny)
+        // Default (legacy) mode: Player-only
+        if (!playerTransform) playerTransform = FindPlayerByTag();
+        if (!playerTransform)
+        {
+            if (logDamage)
+                Debug.LogWarning("[AnimalBiteDamageRange] Player not found (check Player tag or assign playerTransform).", this);
+            return;
+        }
+
+        // Range check
+        float dist = Vector3.Distance(originPos, playerTransform.position);
+        if (dist > biteRange)
+        {
+            if (logDamage)
+                Debug.Log($"[AnimalBiteDamageRange] Attack state '{attackStateName}' but player out of range ({dist:F2} > {biteRange}).", this);
+            return;
+        }
+
+        if (ApplyDamage(playerTransform))
         {
             _nextDamageTime = Time.time + Mathf.Max(0.05f, damageCooldown);
             if (logDamage)
-                Debug.Log($"[AnimalBiteDamageRange] Dealt {damage} ({reason}) to targets within {biteRange}.", this);
+                Debug.Log($"[AnimalBiteDamageRange] Dealt {damage} to player ({reason}) at distance {dist:F2}.", this);
         }
-
-        return;
+        else
+        {
+            if (logDamage)
+                Debug.LogWarning("[AnimalBiteDamageRange] Player found, but no damage receiver found (IDamageable/TakeDamage/etc).", this);
+        }
     }
-
-    // Default (legacy) mode: Player-only
-    if (!playerTransform) playerTransform = FindPlayerByTag();
-    if (!playerTransform)
-    {
-        if (logDamage)
-            Debug.LogWarning("[AnimalBiteDamageRange] Player not found (check Player tag or assign playerTransform).", this);
-        return;
-    }
-
-    // Range check
-    float dist = Vector3.Distance(originPos, playerTransform.position);
-    if (dist > biteRange)
-    {
-        if (logDamage)
-            Debug.Log($"[AnimalBiteDamageRange] Attack state '{attackStateName}' but player out of range ({dist:F2} > {biteRange}).", this);
-        return;
-    }
-
-    if (ApplyDamage(playerTransform))
-    {
-        _nextDamageTime = Time.time + Mathf.Max(0.05f, damageCooldown);
-        if (logDamage)
-            Debug.Log($"[AnimalBiteDamageRange] Dealt {damage} to player ({reason}) at distance {dist:F2}.", this);
-    }
-    else
-    {
-        if (logDamage)
-            Debug.LogWarning("[AnimalBiteDamageRange] Player found, but no damage receiver found (IDamageable/TakeDamage/etc).", this);
-    }
-}
 
     private bool HasTagInParents(Transform t, string tag)
     {
@@ -219,110 +243,111 @@ private void DealDamage(string reason)
         return false;
     }
 
-bool IsAllowedTarget(Collider c)
-{
-    if (!c) return false;
-
-    // If Required Tags is set, it overrides toggles
-    if (requiredTags != null && requiredTags.Length > 0)
+    bool IsAllowedTarget(Collider c)
     {
-        string t1 = c.tag;
-        string t2 = c.transform.root != null ? c.transform.root.tag : t1;
-        for (int i = 0; i < requiredTags.Length; i++)
+        if (!c) return false;
+
+        // If Required Tags is set, it overrides toggles
+        if (requiredTags != null && requiredTags.Length > 0)
         {
-            string req = requiredTags[i];
-            if (string.IsNullOrEmpty(req)) continue;
-            if (string.Equals(t1, req, System.StringComparison.OrdinalIgnoreCase) || string.Equals(t2, req, System.StringComparison.OrdinalIgnoreCase)) return true;
+            string t1 = c.tag;
+            string t2 = c.transform.root != null ? c.transform.root.tag : t1;
+            for (int i = 0; i < requiredTags.Length; i++)
+            {
+                string req = requiredTags[i];
+                if (string.IsNullOrEmpty(req)) continue;
+                if (string.Equals(t1, req, System.StringComparison.OrdinalIgnoreCase) || string.Equals(t2, req, System.StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            return false;
         }
+
+        // IMPORTANT: some prefabs have an untagged root with tagged children.
+        // We therefore detect faction tags anywhere up the parent chain (starting from the collider hit).
+        Transform t = c.transform;
+
+        if (damagePlayer && HasTagInParents(t, playerTag)) return true;
+        if (damageAllies && HasTagInParents(t, allyTag)) return true;
+        if (damageEnemies && HasTagInParents(t, enemyTag)) return true;
+
         return false;
     }
 
-    // IMPORTANT: some prefabs have an untagged root with tagged children.
-/// We therefore detect faction tags anywhere up the parent chain (starting from the collider hit).
-Transform t = c.transform;
-
-if (damagePlayer && HasTagInParents(t, playerTag)) return true;
-if (damageAllies && HasTagInParents(t, allyTag)) return true;
-if (damageEnemies && HasTagInParents(t, enemyTag)) return true;
-
-return false;
-}
-private void TryNotifyEnemyAggro(Collider c)
-{
-    if (!c) return;
-
-    // If the target has an enemy AI controller, notify it so it can aggro back onto THIS animal.
-    // We prefer calling GetShot(attacker) if available because your Enemy2Controller uses it
-    // to open a short-range "damage aggro" window and set combat target.
-    MonoBehaviour[] monos = c.GetComponentsInParent<MonoBehaviour>(true);
-    if (monos == null) return;
-
-    for (int i = 0; i < monos.Length; i++)
+    private void TryNotifyEnemyAggro(Collider c)
     {
-        var mb = monos[i];
-        if (!mb) continue;
+        if (!c) return;
 
-        var t = mb.GetType();
+        // If the target has an enemy AI controller, notify it so it can aggro back onto THIS animal.
+        // We prefer calling GetShot(attacker) if available because your Enemy2Controller uses it
+        // to open a short-range "damage aggro" window and set combat target.
+        MonoBehaviour[] monos = c.GetComponentsInParent<MonoBehaviour>(true);
+        if (monos == null) return;
 
-        // GetShot(Transform attacker)
-        MethodInfo mGetShot = t.GetMethod("GetShot", BF, null, new Type[] { typeof(Transform) }, null);
-        if (mGetShot != null)
+        for (int i = 0; i < monos.Length; i++)
         {
-            mGetShot.Invoke(mb, new object[] { this.transform });
-            return;
-        }
+            var mb = monos[i];
+            if (!mb) continue;
 
-        // Fallback: SetCombatTarget(Transform t) or SetTarget(Transform t)
-        MethodInfo mSetCombatTarget = t.GetMethod("SetCombatTarget", BF, null, new Type[] { typeof(Transform) }, null);
-        if (mSetCombatTarget != null)
-        {
-            mSetCombatTarget.Invoke(mb, new object[] { this.transform });
-            return;
-        }
+            var t = mb.GetType();
 
-        MethodInfo mSetTarget = t.GetMethod("SetTarget", BF, null, new Type[] { typeof(Transform) }, null);
-        if (mSetTarget != null)
-        {
-            mSetTarget.Invoke(mb, new object[] { this.transform });
-            return;
+            // GetShot(Transform attacker)
+            MethodInfo mGetShot = t.GetMethod("GetShot", BF, null, new Type[] { typeof(Transform) }, null);
+            if (mGetShot != null)
+            {
+                mGetShot.Invoke(mb, new object[] { this.transform });
+                return;
+            }
+
+            // Fallback: SetCombatTarget(Transform t) or SetTarget(Transform t)
+            MethodInfo mSetCombatTarget = t.GetMethod("SetCombatTarget", BF, null, new Type[] { typeof(Transform) }, null);
+            if (mSetCombatTarget != null)
+            {
+                mSetCombatTarget.Invoke(mb, new object[] { this.transform });
+                return;
+            }
+
+            MethodInfo mSetTarget = t.GetMethod("SetTarget", BF, null, new Type[] { typeof(Transform) }, null);
+            if (mSetTarget != null)
+            {
+                mSetTarget.Invoke(mb, new object[] { this.transform });
+                return;
+            }
         }
     }
-}
 
-private bool ApplyDamage(Collider c)
+    private bool ApplyDamage(Collider c)
     {
         TryNotifyEnemyAggro(c);
 
-if (!c) return false;
+        if (!c) return false;
 
-    // Preferred: IDamageable
-    var dmg = c.GetComponentInParent<IDamageable>();
-    if (dmg != null)
-    {
-        dmg.TakeDamage(damage);
+        // Preferred: IDamageable
+        var dmg = c.GetComponentInParent<IDamageable>();
+        if (dmg != null)
+        {
+            dmg.TakeDamage(damage);
+            return true;
+        }
+
+        // Reflection fallback
+        MonoBehaviour[] monos = c.GetComponentsInParent<MonoBehaviour>(true);
+        if (monos != null)
+        {
+            foreach (var mb in monos)
+            {
+                if (!mb) continue;
+                if (TryInvokeDamageMethod(mb, "TakeDamage", damage)) return true;
+                if (TryInvokeDamageMethod(mb, "ApplyDamage", damage)) return true;
+                if (TryInvokeDamageMethod(mb, "Damage", damage)) return true;
+                if (TryInvokeDamageMethod(mb, "ReceiveDamage", damage)) return true;
+                if (TryInvokeDamageMethod(mb, "Hurt", damage)) return true;
+            }
+        }
+
+        // Last-ditch: SendMessage (won't throw if missing)
+        c.gameObject.SendMessage("TakeDamage", (float)damage, SendMessageOptions.DontRequireReceiver);
+        c.gameObject.SendMessage("TakeDamage", damage, SendMessageOptions.DontRequireReceiver);
         return true;
     }
-
-    // Reflection fallback
-    MonoBehaviour[] monos = c.GetComponentsInParent<MonoBehaviour>(true);
-    if (monos != null)
-    {
-        foreach (var mb in monos)
-        {
-            if (!mb) continue;
-            if (TryInvokeDamageMethod(mb, "TakeDamage", damage)) return true;
-            if (TryInvokeDamageMethod(mb, "ApplyDamage", damage)) return true;
-            if (TryInvokeDamageMethod(mb, "Damage", damage)) return true;
-            if (TryInvokeDamageMethod(mb, "ReceiveDamage", damage)) return true;
-            if (TryInvokeDamageMethod(mb, "Hurt", damage)) return true;
-        }
-    }
-
-    // Last-ditch: SendMessage (won't throw if missing)
-    c.gameObject.SendMessage("TakeDamage", (float)damage, SendMessageOptions.DontRequireReceiver);
-    c.gameObject.SendMessage("TakeDamage", damage, SendMessageOptions.DontRequireReceiver);
-    return true;
-}
 
     private bool ApplyDamage(Transform player)
     {
@@ -378,9 +403,9 @@ if (!c) return false;
         return false;
     }
 
-private void OnDrawGizmosSelected()
-{
-    Transform o = rangeOrigin != null ? rangeOrigin : transform;
-    Gizmos.DrawWireSphere(o.position, biteRange);
-}
+    private void OnDrawGizmosSelected()
+    {
+        Transform o = rangeOrigin != null ? rangeOrigin : transform;
+        Gizmos.DrawWireSphere(o.position, biteRange);
+    }
 }

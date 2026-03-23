@@ -32,6 +32,15 @@ public class AlienBossHealth : MonoBehaviour
     [Tooltip("Delay before destroying (lets death animation play).")]
     public float destroyDelay = 5.0f;
 
+    [Header("Death Audio")]
+    public AudioClip dieSfx;
+    public AudioSource dieAudioSource;
+    [Range(0f, 1f)] public float dieSfxVolume = 1f;
+    public bool useDetachedDeathAudio = true;
+    [Range(0f, 1f)] public float deathSpatialBlend = 0f;
+    public float deathMinDistance = 10f;
+    public float deathMaxDistance = 40f;
+
     public int CurrentHealth => currentHealth;
     public bool IsDead => currentHealth <= 0;
 
@@ -44,6 +53,8 @@ public class AlienBossHealth : MonoBehaviour
     {
         if (currentHealth <= 0) currentHealth = maxHealth;
         if (!animator) animator = GetComponentInChildren<Animator>();
+        if (!dieAudioSource) dieAudioSource = GetComponent<AudioSource>();
+        if (!dieAudioSource) dieAudioSource = GetComponentInChildren<AudioSource>();
     }
 
     public void ResetHealth()
@@ -86,6 +97,8 @@ public class AlienBossHealth : MonoBehaviour
         if (_deathHandled) return;
         _deathHandled = true;
 
+        PlayDieSfx();
+
         if (animator && !string.IsNullOrWhiteSpace(dieTrigger))
             animator.SetTrigger(dieTrigger);
 
@@ -99,5 +112,37 @@ public class AlienBossHealth : MonoBehaviour
 
         if (destroyOnDeath)
             Destroy(gameObject, Mathf.Max(0f, destroyDelay));
+    }
+
+    public void PlayDieSfx()
+    {
+        if (!dieSfx) return;
+
+        if (useDetachedDeathAudio)
+        {
+            GameObject temp = new GameObject(name + "_DeathAudio");
+            temp.transform.position = transform.position;
+
+            AudioSource src = temp.AddComponent<AudioSource>();
+            src.clip = dieSfx;
+            src.volume = Mathf.Clamp01(dieSfxVolume);
+            src.spatialBlend = Mathf.Clamp01(deathSpatialBlend);
+            src.minDistance = Mathf.Max(0.01f, deathMinDistance);
+            src.maxDistance = Mathf.Max(src.minDistance, deathMaxDistance);
+            src.rolloffMode = AudioRolloffMode.Linear;
+            src.dopplerLevel = 0f;
+            src.Play();
+
+            Destroy(temp, Mathf.Max(0.1f, dieSfx.length + 0.25f));
+            return;
+        }
+
+        if (dieAudioSource)
+        {
+            dieAudioSource.PlayOneShot(dieSfx, Mathf.Clamp01(dieSfxVolume));
+            return;
+        }
+
+        AudioSource.PlayClipAtPoint(dieSfx, transform.position, Mathf.Clamp01(dieSfxVolume));
     }
 }

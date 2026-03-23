@@ -44,6 +44,14 @@ public class AlienBossMeleeDamageRange : MonoBehaviour
     [Tooltip("Minimum seconds between damage applications (prevents double-hits when transitions are weird).")]
     public float damageCooldown = 0.75f;
 
+    [Header("Attack Audio")]
+    public AudioClip poundSfx;
+    public AudioClip swingSfx;
+    public AudioClip attackSfxFallback;
+    public AudioSource attackAudioSource;
+    [Range(0f, 1f)] public float attackSfxVolume = 1f;
+    public bool playAttackSfxOnStateEnter = true;
+
     [Header("Debug")]
     public bool logDamage = false;
 
@@ -57,6 +65,8 @@ public class AlienBossMeleeDamageRange : MonoBehaviour
         if (!boss) boss = GetComponentInParent<AlienBossController>();
         if (!animator) animator = GetComponentInChildren<Animator>();
         if (!rangeOrigin) rangeOrigin = transform;
+        if (!attackAudioSource) attackAudioSource = GetComponent<AudioSource>();
+        if (!attackAudioSource) attackAudioSource = GetComponentInChildren<AudioSource>();
     }
 
     private void Start()
@@ -70,6 +80,9 @@ public class AlienBossMeleeDamageRange : MonoBehaviour
 
         if (inAttack && !_wasInAttack)
         {
+            if (playAttackSfxOnStateEnter)
+                PlayAttackSfxForCurrentState();
+
             DealDamageOnce("enter");
         }
 
@@ -78,8 +91,13 @@ public class AlienBossMeleeDamageRange : MonoBehaviour
 
     private bool IsInAttackState()
     {
-        if (!animator) return false;
-        if (attackStateNames == null || attackStateNames.Length == 0) return false;
+        return !string.IsNullOrEmpty(GetCurrentAttackStateName());
+    }
+
+    private string GetCurrentAttackStateName()
+    {
+        if (!animator) return null;
+        if (attackStateNames == null || attackStateNames.Length == 0) return null;
 
         int li = Mathf.Clamp(layerIndex, 0, animator.layerCount - 1);
         AnimatorStateInfo st = animator.GetCurrentAnimatorStateInfo(li);
@@ -88,10 +106,45 @@ public class AlienBossMeleeDamageRange : MonoBehaviour
         {
             string n = attackStateNames[i];
             if (string.IsNullOrWhiteSpace(n)) continue;
-            if (st.IsName(n)) return true;
+            if (st.IsName(n)) return n;
         }
 
-        return false;
+        return null;
+    }
+
+    public void PlayAttackSfxForCurrentState()
+    {
+        string stateName = GetCurrentAttackStateName();
+        AudioClip clip = GetAttackClipForState(stateName);
+        PlayAttackSfx(clip);
+    }
+
+    public void PlayAttackSfx(AudioClip clip)
+    {
+        if (!clip) return;
+
+        if (!attackAudioSource)
+        {
+            attackAudioSource = GetComponent<AudioSource>();
+            if (!attackAudioSource) attackAudioSource = GetComponentInChildren<AudioSource>();
+        }
+
+        if (attackAudioSource)
+            attackAudioSource.PlayOneShot(clip, Mathf.Clamp01(attackSfxVolume));
+    }
+
+    private AudioClip GetAttackClipForState(string stateName)
+    {
+        if (!string.IsNullOrWhiteSpace(stateName))
+        {
+            string lower = stateName.ToLowerInvariant();
+            if (lower.Contains("pound") && poundSfx) return poundSfx;
+            if (lower.Contains("swing") && swingSfx) return swingSfx;
+        }
+
+        if (poundSfx) return poundSfx;
+        if (swingSfx) return swingSfx;
+        return attackSfxFallback;
     }
 
     private void DealDamageOnce(string reason)

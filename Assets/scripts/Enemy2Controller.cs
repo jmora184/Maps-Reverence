@@ -1,4 +1,4 @@
-﻿
+
 using System.Collections;
 using UnityEngine;
 using UnityEngine.AI;
@@ -280,6 +280,29 @@ public class Enemy2Controller : MonoBehaviour
     public GameObject bullet;
     public Transform firePoint;
 
+    [Header("Shot Audio (optional)")]
+    [Tooltip("AudioSource used to play this enemy's firing sound. You can place it on the enemy root, weapon bone, or fire point object.")]
+    public AudioSource shotAudioSource;
+
+    [Tooltip("Shot sound for this enemy type.")]
+    public AudioClip shotSFX;
+
+    [Range(0f, 2f)]
+    [Tooltip("Volume multiplier used with PlayOneShot.")]
+    public float shotVolume = 1f;
+
+    [Tooltip("If enabled and Shot Audio Source is empty, we try to find one on this enemy automatically at runtime.")]
+    public bool autoFindShotAudioSource = true;
+
+    [Tooltip("Adds slight pitch variation so burst fire sounds less robotic.")]
+    public bool randomizeShotPitch = true;
+
+    [Tooltip("Minimum random pitch used when Randomize Shot Pitch is enabled.")]
+    public float minShotPitch = 0.97f;
+
+    [Tooltip("Maximum random pitch used when Randomize Shot Pitch is enabled.")]
+    public float maxShotPitch = 1.03f;
+
     
 
 [Header("Bullet Damage Factions")]
@@ -395,6 +418,8 @@ public string bulletsAnimalTag = "Animal";
 
         if (deathController != null)
             deathController.OnDied += HandleDeathControllerDied;
+
+        ResolveShotAudioSourceIfNeeded();
 
         // Root motion can move the character even when agent is stopped.
         if (anim != null) anim.applyRootMotion = false;
@@ -1564,9 +1589,45 @@ bc.damageAnimals = bulletsDamageAnimals;
 if (!string.IsNullOrEmpty(bulletsAnimalTag))
     bc.animalTag = bulletsAnimalTag;
 }
+        TriggerShotSound();
         if (debugMuzzleFlash) Debug.Log($"[Enemy2Controller] Shot fired -> triggering muzzle flash on {name}", this);
         TriggerMuzzleFlashSimple();
         if (anim != null) anim.SetTrigger("fireShot");
+    }
+
+    private void ResolveShotAudioSourceIfNeeded()
+    {
+        if (!autoFindShotAudioSource || shotAudioSource != null) return;
+
+        shotAudioSource = GetComponent<AudioSource>();
+        if (shotAudioSource == null)
+            shotAudioSource = GetComponentInChildren<AudioSource>();
+
+        if (shotAudioSource != null)
+            shotAudioSource.playOnAwake = false;
+    }
+
+    private void TriggerShotSound()
+    {
+        if (shotSFX == null) return;
+
+        if (shotAudioSource == null)
+            ResolveShotAudioSourceIfNeeded();
+
+        if (shotAudioSource == null) return;
+
+        if (randomizeShotPitch)
+        {
+            float min = Mathf.Min(minShotPitch, maxShotPitch);
+            float max = Mathf.Max(minShotPitch, maxShotPitch);
+            shotAudioSource.pitch = Random.Range(min, max);
+        }
+        else
+        {
+            shotAudioSource.pitch = 1f;
+        }
+
+        shotAudioSource.PlayOneShot(shotSFX, Mathf.Max(0f, shotVolume));
     }
 
 

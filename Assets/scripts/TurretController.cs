@@ -44,6 +44,14 @@ public class TurretController : MonoBehaviour
     public float fireRate = 4f;
     public float muzzleForwardOffset = 0.05f;
 
+    [Header("Shot Audio (Optional)")]
+    public AudioSource shotAudioSource;
+    public AudioClip shotSFX;
+    [Min(0f)] public float shotVolume = 1f;
+    public bool randomizeShotPitch = true;
+    public float minShotPitch = 0.95f;
+    public float maxShotPitch = 1.05f;
+
     [Header("Debug")]
     public bool log = false;
 
@@ -53,6 +61,11 @@ public class TurretController : MonoBehaviour
 
     private enum Mode { SingleTag, AllyMode, EnemyMode }
     private Mode _mode = Mode.SingleTag;
+
+    private void Awake()
+    {
+        ResolveShotAudioSourceIfNeeded();
+    }
 
     private void Start()
     {
@@ -199,5 +212,30 @@ public class TurretController : MonoBehaviour
 
         Vector3 spawnPos = firePoint.position + firePoint.forward * muzzleForwardOffset;
         Instantiate(projectilePrefab, spawnPos, firePoint.rotation);
+        TriggerShotSound();
+    }
+
+    private void ResolveShotAudioSourceIfNeeded()
+    {
+        if (shotAudioSource == null)
+            shotAudioSource = GetComponent<AudioSource>();
+    }
+
+    private void TriggerShotSound()
+    {
+        if (shotAudioSource == null || shotSFX == null)
+            return;
+
+        float originalPitch = shotAudioSource.pitch;
+
+        if (randomizeShotPitch)
+        {
+            float low = Mathf.Min(minShotPitch, maxShotPitch);
+            float high = Mathf.Max(minShotPitch, maxShotPitch);
+            shotAudioSource.pitch = Random.Range(low, high);
+        }
+
+        shotAudioSource.PlayOneShot(shotSFX, shotVolume);
+        shotAudioSource.pitch = originalPitch;
     }
 }

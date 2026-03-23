@@ -49,6 +49,25 @@ public class AllyHealth : MonoBehaviour
     [Tooltip("Fallback cleanup disables object instead of destroying it.")]
     public bool fallbackDisableInsteadOfDestroy = true;
 
+    [Header("Death Audio")]
+    [Tooltip("Optional clip played when this ally dies.")]
+    public AudioClip deathSFX;
+
+    [Tooltip("Loudness of the death clip.")]
+    [Range(0f, 2f)] public float deathVolume = 1f;
+
+    [Tooltip("0 = 2D, 1 = fully 3D. Start with 0 for testing.")]
+    [Range(0f, 1f)] public float deathSpatialBlend = 0f;
+
+    [Tooltip("Minimum distance for 3D death audio.")]
+    public float deathMinDistance = 2f;
+
+    [Tooltip("Maximum distance for 3D death audio.")]
+    public float deathMaxDistance = 25f;
+
+    [Tooltip("If true, creates a temporary detached audio object so the clip can finish even if this ally is destroyed.")]
+    public bool useDetachedDeathAudio = true;
+
     [Header("Debug")]
     public bool debugLogs = false;
 
@@ -94,6 +113,8 @@ public class AllyHealth : MonoBehaviour
         RaiseHealthChanged();
 
         if (debugLogs) Debug.Log($"[AllyHealth] Die() on {name}", this);
+
+        PlayDeathSound();
 
         // Notify AI immediately so enemies drop this target
         OnDied?.Invoke();
@@ -165,6 +186,48 @@ public class AllyHealth : MonoBehaviour
             gameObject.SetActive(false);
         else
             Destroy(gameObject);
+    }
+
+
+    void PlayDeathSound()
+    {
+        if (deathSFX == null) return;
+
+        Vector3 pos = transform.position;
+
+        if (useDetachedDeathAudio)
+        {
+            GameObject temp = new GameObject(name + "_DeathAudio");
+            temp.transform.position = pos;
+
+            var src = temp.AddComponent<AudioSource>();
+            src.clip = deathSFX;
+            src.volume = deathVolume;
+            src.spatialBlend = deathSpatialBlend;
+            src.minDistance = Mathf.Max(0.01f, deathMinDistance);
+            src.maxDistance = Mathf.Max(src.minDistance, deathMaxDistance);
+            src.playOnAwake = false;
+            src.loop = false;
+            src.rolloffMode = AudioRolloffMode.Linear;
+            src.Play();
+
+            if (debugLogs) Debug.Log($"[AllyHealth] Playing detached death audio: {deathSFX.name}", temp);
+
+            Destroy(temp, deathSFX.length + 0.25f);
+            return;
+        }
+
+        var existing = GetComponent<AudioSource>();
+        if (existing == null)
+            existing = gameObject.AddComponent<AudioSource>();
+
+        existing.spatialBlend = deathSpatialBlend;
+        existing.minDistance = Mathf.Max(0.01f, deathMinDistance);
+        existing.maxDistance = Mathf.Max(existing.minDistance, deathMaxDistance);
+        existing.rolloffMode = AudioRolloffMode.Linear;
+        existing.PlayOneShot(deathSFX, deathVolume);
+
+        if (debugLogs) Debug.Log($"[AllyHealth] Playing attached death audio: {deathSFX.name}", this);
     }
 
     void RaiseHealthChanged()

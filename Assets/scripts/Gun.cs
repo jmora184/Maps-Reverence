@@ -4,8 +4,10 @@ using UnityEngine;
 
 /// <summary>
 /// Simple gun data container used by your player/gun controller.
-/// Added: reliable muzzle flash trigger so the flash shows on EVERY shot,
-/// even when the ParticleSystem is already playing (common with high fire rate).
+/// Added:
+/// - reliable muzzle flash trigger so the flash shows on EVERY shot,
+///   even when the ParticleSystem is already playing (common with high fire rate).
+/// - per-weapon shot audio support so rifle/revolver can each use their own WAV clip.
 /// </summary>
 public class Gun : MonoBehaviour
 {
@@ -45,7 +47,6 @@ public class Gun : MonoBehaviour
     [Tooltip("How quickly extra spread recovers back to 0 when you stop firing (degrees per second).")]
     public float spreadRecoveryPerSec = 2.5f;
 
-
     [Header("Info")]
     public string gunName;
 
@@ -62,6 +63,29 @@ public class Gun : MonoBehaviour
     [Min(1)]
     public int emitCount = 1;
 
+    [Header("Audio (optional)")]
+    [Tooltip("Assign an AudioSource on this weapon (or a child). This plays the gunshot sound.")]
+    public AudioSource shotAudioSource;
+
+    [Tooltip("Gunshot clip for this weapon. Example: rifle WAV on the rifle, revolver WAV on the revolver.")]
+    public AudioClip shotSFX;
+
+    [Range(0f, 1.5f)]
+    [Tooltip("Playback volume for the gunshot.")]
+    public float shotVolume = 1f;
+
+    [Tooltip("Small random pitch variation makes auto fire sound less robotic.")]
+    public bool randomizeShotPitch = true;
+
+    [Tooltip("Lowest random pitch used for the shot sound.")]
+    public float minShotPitch = 0.97f;
+
+    [Tooltip("Highest random pitch used for the shot sound.")]
+    public float maxShotPitch = 1.03f;
+
+    [Tooltip("If true and no AudioSource is assigned, we try to find one on this object/children in Awake.")]
+    public bool autoFindShotAudioSource = true;
+
     [Header("Fire Animation (Optional)")]
     [Tooltip("Assign an Animator on the weapon model if you want a per-shot recoil animation (great for pistols/revolvers).")]
     public Animator fireAnimator;
@@ -77,6 +101,14 @@ public class Gun : MonoBehaviour
         // If enabled and not assigned, try to find an animator on this weapon prefab.
         if (playFireAnimationOnShot && fireAnimator == null)
             fireAnimator = GetComponentInChildren<Animator>();
+
+        if (autoFindShotAudioSource && shotAudioSource == null)
+        {
+            shotAudioSource = GetComponent<AudioSource>();
+
+            if (shotAudioSource == null)
+                shotAudioSource = GetComponentInChildren<AudioSource>();
+        }
     }
 
     private void Update()
@@ -107,6 +139,29 @@ public class Gun : MonoBehaviour
             muzzleFlashPS.Stop(true, ParticleSystemStopBehavior.StopEmitting);
 
         muzzleFlashPS.Play(true);
+    }
+
+    /// <summary>
+    /// Call this after a successful shot to play the weapon sound.
+    /// Works for both single shots and automatic fire.
+    /// </summary>
+    public void TriggerShotSound()
+    {
+        if (shotAudioSource == null || shotSFX == null)
+            return;
+
+        if (randomizeShotPitch)
+        {
+            float low = Mathf.Min(minShotPitch, maxShotPitch);
+            float high = Mathf.Max(minShotPitch, maxShotPitch);
+            shotAudioSource.pitch = Random.Range(low, high);
+        }
+        else
+        {
+            shotAudioSource.pitch = 1f;
+        }
+
+        shotAudioSource.PlayOneShot(shotSFX, shotVolume);
     }
 
     /// <summary>

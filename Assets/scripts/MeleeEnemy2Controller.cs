@@ -74,6 +74,20 @@ public class MeleeEnemy2Controller : MonoBehaviour
     [Min(0.05f)] public float attackCooldown = 1.1f;
     [Min(0f)] public float inRangeBuffer = 0.25f;
 
+    [Header("Attack Audio (Optional)")]
+    public AudioSource attackAudioSource;
+    public AudioClip attackSFX;
+    [Min(0f)] public float attackVolume = 1f;
+    public bool randomizeAttackPitch = true;
+    public float minAttackPitch = 0.96f;
+    public float maxAttackPitch = 1.04f;
+
+    [Header("Run Audio (Optional)")]
+    public AudioSource runAudioSource;
+    public AudioClip runLoopSFX;
+    [Min(0f)] public float runVolume = 1f;
+    public float runPitch = 1f;
+
     [Header("Animator Triggers")]
     public string attackTrigger = "attack";
     public string takeDamageTrigger = "take_damage";
@@ -146,6 +160,9 @@ public class MeleeEnemy2Controller : MonoBehaviour
         anim = GetComponentInChildren<Animator>();
         rb = GetComponent<Rigidbody>();
         characterController = GetComponent<CharacterController>();
+
+        ResolveAttackAudioSourceIfNeeded();
+        ResolveRunAudioSourceIfNeeded();
 
         if (waypointPatrolBehaviour == null)
         {
@@ -220,6 +237,8 @@ public class MeleeEnemy2Controller : MonoBehaviour
             ApplyWalkSpeed();
             DriveAnimatorLocomotion(agent.velocity.magnitude, hasCombatTarget: false);
         }
+
+        UpdateRunLoopAudio();
     }
 
     private void LateUpdate()
@@ -358,6 +377,102 @@ private void CombatTick()
 
         anim.ResetTrigger(attackTrigger);
         anim.SetTrigger(attackTrigger);
+        TriggerAttackSound();
+    }
+
+    private void ResolveRunAudioSourceIfNeeded()
+    {
+        if (runAudioSource != null) return;
+
+        var localSources = GetComponents<AudioSource>();
+        foreach (var s in localSources)
+        {
+            if (s != null && s != attackAudioSource)
+            {
+                runAudioSource = s;
+                return;
+            }
+        }
+
+        var childSources = GetComponentsInChildren<AudioSource>();
+        foreach (var s in childSources)
+        {
+            if (s != null && s != attackAudioSource)
+            {
+                runAudioSource = s;
+                return;
+            }
+        }
+
+        // Fallback: share the same source only if no separate source exists.
+        if (runAudioSource == null)
+            runAudioSource = attackAudioSource;
+    }
+
+    private void UpdateRunLoopAudio()
+    {
+        if (runLoopSFX == null)
+        {
+            StopRunLoopSound();
+            return;
+        }
+
+        if (runAudioSource == null)
+            ResolveRunAudioSourceIfNeeded();
+        if (runAudioSource == null) return;
+
+        bool shouldPlay = !isDead && combatTarget != null && agent != null && !agent.isStopped && agent.velocity.magnitude > movingThreshold;
+
+        if (!shouldPlay)
+        {
+            StopRunLoopSound();
+            return;
+        }
+
+        if (runAudioSource.clip != runLoopSFX)
+            runAudioSource.clip = runLoopSFX;
+
+        runAudioSource.loop = true;
+        runAudioSource.playOnAwake = false;
+        runAudioSource.volume = runVolume;
+        runAudioSource.pitch = runPitch;
+
+        if (!runAudioSource.isPlaying)
+            runAudioSource.Play();
+    }
+
+    private void StopRunLoopSound()
+    {
+        if (runAudioSource == null) return;
+        if (runAudioSource.isPlaying && runAudioSource.clip == runLoopSFX)
+            runAudioSource.Stop();
+    }
+
+    private void ResolveAttackAudioSourceIfNeeded()
+    {
+        if (attackAudioSource != null) return;
+        attackAudioSource = GetComponent<AudioSource>();
+        if (attackAudioSource == null)
+            attackAudioSource = GetComponentInChildren<AudioSource>();
+    }
+
+    private void TriggerAttackSound()
+    {
+        if (attackSFX == null) return;
+        if (attackAudioSource == null)
+            ResolveAttackAudioSourceIfNeeded();
+        if (attackAudioSource == null) return;
+
+        float originalPitch = attackAudioSource.pitch;
+        if (randomizeAttackPitch)
+        {
+            float low = Mathf.Min(minAttackPitch, maxAttackPitch);
+            float high = Mathf.Max(minAttackPitch, maxAttackPitch);
+            attackAudioSource.pitch = Random.Range(low, high);
+        }
+
+        attackAudioSource.PlayOneShot(attackSFX, attackVolume);
+        attackAudioSource.pitch = originalPitch;
     }
 
     private void TriggerTakeDamage()
@@ -467,6 +582,7 @@ private void CombatTick()
     {
         if (isDead) return;
         isDead = true;
+        StopRunLoopSound();
 
         deathPos = transform.position;
         deathRot = transform.rotation;
@@ -546,6 +662,7 @@ private void CombatTick()
     {
         if (isDead) return;
 
+        StopRunLoopSound();
         combatTarget = null;
 
         if (agent != null)

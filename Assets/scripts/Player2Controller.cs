@@ -46,6 +46,27 @@ private bool canJump, canDoubleJump;
 
     public Animator anim; // Reference to Animator component
 
+    [Header("Footsteps (Optional)")]
+    [Tooltip("Optional dedicated AudioSource for player footsteps. If left empty, one on this object will be used if available.")]
+    public AudioSource footstepAudioSource;
+    [Tooltip("Footstep clip played while the player is moving on the ground.")]
+    public AudioClip footstepSFX;
+    [Tooltip("Volume used for each footstep one-shot.")]
+    public float footstepVolume = 1f;
+    [Tooltip("Time between footsteps while walking.")]
+    public float walkFootstepInterval = 0.5f;
+    [Tooltip("Time between footsteps while running.")]
+    public float runFootstepInterval = 0.33f;
+    [Tooltip("Minimum horizontal movement speed before footsteps can play.")]
+    public float minHorizontalSpeedForFootsteps = 0.15f;
+    [Tooltip("Adds slight pitch variation so footsteps sound less repetitive.")]
+    public bool randomizeFootstepPitch = true;
+    public float minFootstepPitch = 0.96f;
+    public float maxFootstepPitch = 1.04f;
+
+    private float nextFootstepTime = 0f;
+    private bool wasMovingForFootsteps = false;
+
     [Header("Gun Runtime (Active)")]
     public Gun activeGun;
 
@@ -176,6 +197,7 @@ private bool canJump, canDoubleJump;
 private void Awake()
     {
         instance = this;
+        ResolveFootstepAudioSourceIfNeeded();
     }
 
 
@@ -261,6 +283,7 @@ if (gunHolder != null)
             }
 
             charCon.Move(moveInput * Time.deltaTime);
+            UpdateFootsteps();
 
             Vector2 mouseInput = new Vector2(Input.GetAxisRaw("Mouse X"), Input.GetAxisRaw("Mouse Y")) * mouseSensitivity;
 
@@ -358,6 +381,13 @@ if (gunHolder != null)
                             bc.owner = bulletOwnerOverride != null ? bulletOwnerOverride : transform.root;
 
                         IgnoreShooterCollisions(b);
+
+                        // Play the equipped weapon's gunshot sound after a successful shot spawn.
+                        if (activeGun != null)
+                        {
+                            activeGun.TriggerShotSound();
+                            activeGun.TriggerFireAnimation();
+                        }
                     }
 
                     ApplyRecoil();
@@ -414,6 +444,7 @@ if (gunHolder != null)
         {
             // if command camera is on, stop muzzle flash
             if (muzzleFlash != null) muzzleFlash.SetActive(false);
+            ResetFootstepTimer();
         }
 
         // ---------------------------
@@ -448,6 +479,65 @@ if (gunHolder != null)
         UpdateRecoil();
     }
 
+
+    private void ResolveFootstepAudioSourceIfNeeded()
+    {
+        if (footstepAudioSource == null)
+            footstepAudioSource = GetComponent<AudioSource>();
+    }
+
+    private void ResetFootstepTimer()
+    {
+        nextFootstepTime = Time.time;
+        wasMovingForFootsteps = false;
+    }
+
+    private void UpdateFootsteps()
+    {
+        if (footstepAudioSource == null || footstepSFX == null || charCon == null)
+            return;
+
+        bool groundedForFootsteps = charCon.isGrounded || canJump;
+        Vector2 planarInput = new Vector2(Input.GetAxisRaw("Horizontal"), Input.GetAxisRaw("Vertical"));
+        bool hasMoveInput = planarInput.sqrMagnitude > 0.01f;
+
+        if (!groundedForFootsteps || !hasMoveInput)
+        {
+            ResetFootstepTimer();
+            return;
+        }
+
+        Vector3 horizontalVelocity = charCon.velocity;
+        horizontalVelocity.y = 0f;
+        float horizontalSpeed = horizontalVelocity.magnitude;
+        if (horizontalSpeed < minHorizontalSpeedForFootsteps)
+            return;
+
+        bool isRunning = Input.GetKey(KeyCode.LeftShift);
+        float interval = isRunning ? runFootstepInterval : walkFootstepInterval;
+        interval = Mathf.Max(0.05f, interval);
+
+        if (!wasMovingForFootsteps)
+        {
+            wasMovingForFootsteps = true;
+            nextFootstepTime = Time.time + (interval * 0.35f);
+            return;
+        }
+
+        if (Time.time < nextFootstepTime)
+            return;
+
+        float originalPitch = footstepAudioSource.pitch;
+        if (randomizeFootstepPitch)
+            footstepAudioSource.pitch = Random.Range(minFootstepPitch, maxFootstepPitch);
+        else
+            footstepAudioSource.pitch = 1f;
+
+        footstepAudioSource.PlayOneShot(footstepSFX, footstepVolume);
+        footstepAudioSource.pitch = originalPitch;
+
+        nextFootstepTime = Time.time + interval;
+    }
 
     private void TriggerMuzzleFlash()
     {

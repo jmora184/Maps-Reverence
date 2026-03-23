@@ -3,12 +3,13 @@
 
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.Reflection;
 using UnityEngine;
 using UnityEngine.AI;
 using Random = UnityEngine.Random;
 
-public class AllyController : MonoBehaviour
+public class AllyMeleeController : MonoBehaviour
 {
     public enum CommandModeGunIconType
     {
@@ -43,6 +44,13 @@ public class AllyController : MonoBehaviour
 
     private float travelFollowTimer;
     public float distanceToChase = 10f, distanceToLose = 15f, distanceToStop = 2f;
+    [Header("Aggro / Detection")]
+    [Tooltip("How far this melee ally can auto-detect enemies from. Separate from melee attack range / desired attack range.")]
+    public float aggroDetectionRange = 25f;
+
+    [Tooltip("If true, suspicious old ranged-combat values copied from AllyController are auto-corrected for melee on Awake.")]
+    public bool autoRepairOldRangedSettings = true;
+
 
     [Header("Commanded Attack Chase Override")]
     [Tooltip("If true, a direct Attack order will keep chasing the target even if it's beyond distanceToLose.")]
@@ -69,37 +77,78 @@ public class AllyController : MonoBehaviour
     // Fallback baseline when no AllyCombatStats is present.
     private float _baseAgentSpeedFallback = 0f;
 
-    [Header("Combat")]
-    public GameObject bullet;
+    [Header("Melee Combat")]
+    [Tooltip("Cooldown between sword swings / melee attacks.")]
+    public float attackRate = 0.9f;
+    private float attackCount;
+
+    [Tooltip("Optional hand / weapon origin used for line-of-sight checks. You can assign the sword hand or weapon bone here.")]
     public Transform firePoint;
 
-    [Header("Muzzle Flash (Simple Toggle)")]
-    [Tooltip("Assign your Muzzle Flash GameObject (mesh spheres/cubes). It can live anywhere; we'll move it to firePoint when firing.")]
-    public GameObject muzzleFlashObject;
-    [Range(0.005f, 0.2f)]
-    [Tooltip("How long the muzzle flash stays visible per shot (seconds). Typical 0.03 - 0.08")]
-    public float muzzleFlashDuration = 0.05f;
-    [Tooltip("If true, we snap the muzzle flash object to firePoint position/rotation when firing.")]
-    public bool muzzleFlashFollowFirePoint = true;
-    [Tooltip("Optional local offset from firePoint when snapping.")]
-    public Vector3 muzzleFlashLocalOffset = Vector3.zero;
-    private Coroutine _muzzleFlashRoutine;
-    public float fireRate = 0.5f;
-    private float fireCount;
+    [Tooltip("How close the ally must be to land a melee hit.")]
+    public float meleeAttackRange = 2.25f;
 
-    [Header("Shot Audio (Optional)")]
-    [Tooltip("AudioSource used for ally gunshot playback. If left empty, we'll try to find one on this object or its children.")]
-    public AudioSource shotAudioSource;
-    [Tooltip("Gunshot clip for this ally.")]
-    public AudioClip shotSFX;
-    [Range(0f, 2f)] public float shotVolume = 1f;
-    [Tooltip("If true, each shot gets a slight pitch variation so burst fire sounds less robotic.")]
-    public bool randomizeShotPitch = true;
-    [Range(0.5f, 1.5f)] public float minShotPitch = 0.95f;
-    [Range(0.5f, 1.5f)] public float maxShotPitch = 1.05f;
+    [Tooltip("Small grace distance so a swing still connects if the target shifts slightly during the animation.")]
+    public float meleeRangeGrace = 0.5f;
+
+    [Tooltip("Fallback melee damage when no AllyCombatStats component is present.")]
+    public int meleeBaseDamage = 10;
+
+    [Tooltip("Animator trigger used for the sword swing animation. Set this to match your Animator Controller.")]
+    public string meleeAttackTrigger = "Shoot";
+
+    [Tooltip("If true, damage is dealt only when AnimEvent_ApplyMeleeDamage() is called from the animation. If false, damage is applied immediately when the swing starts.")]
+    public bool applyDamageViaAnimationEvent = false;
+
+    [Tooltip("How long a queued melee strike remains valid while waiting for an animation event.")]
+    public float meleeDamageWindow = 0.4f;
+[Tooltip("Optional origin transform for melee hit detection. Assign the sword hand / blade root if you have one. If left empty, firePoint is used, then the ally transform.")]
+public Transform meleeHitOrigin;
+
+[Tooltip("Forward offset from the hit origin used when checking the sword contact area.")]
+public float meleeHitForwardOffset = 0.9f;
+
+[Tooltip("Radius of the melee hit overlap. Make this a bit larger than the blade thickness so hits are reliable.")]
+public float meleeHitRadius = 1.35f;
+
+[Tooltip("If true, a swing can damage multiple enemies inside the sword contact area.")]
+public bool meleeCanHitMultipleTargets = false;
+
+[Tooltip("If true and animation-event mode is enabled, the controller still applies damage after a short delay if the event was never fired.")]
+public bool enableAnimationEventFallback = true;
+
+[Tooltip("Delay used for the fallback auto-hit when animation-event mode is enabled.")]
+public float animationEventFallbackDelay = 0.18f;
+
+[Tooltip("Maximum facing angle allowed before a melee attack can start.")]
+public float meleeMaxAttackAngle = 65f;
+
+[Tooltip("Enable debug logs for melee target detection and damage application.")]
+public bool debugMeleeDamage = false;
+
+
+    [Header("Swing Audio (Optional)")]
+    [Tooltip("AudioSource used for melee swing playback. If left empty, we'll try to find one on this object or its children.")]
+    public AudioSource meleeAudioSource;
+    [Tooltip("Optional sword swing clip.")]
+    public AudioClip meleeSwingSFX;
+    [Range(0f, 2f)] public float meleeSwingVolume = 1f;
+    [Tooltip("If true, each swing gets a slight pitch variation so repeated attacks sound less robotic.")]
+    public bool randomizeMeleePitch = true;
+    [Range(0.5f, 1.5f)] public float minMeleePitch = 0.95f;
+    [Range(0.5f, 1.5f)] public float maxMeleePitch = 1.05f;
+
+    [Header("Death Audio (Optional)")]
+    [Tooltip("Optional audio source for death playback. If left empty, we'll try to find one. For the safest result, enable Play Death Clip At Point so the sound continues even if this object is disabled/destroyed.")]
+    public AudioSource deathAudioSource;
+    [Tooltip("Optional death sound clip played once when this ally dies.")]
+    public AudioClip deathSFX;
+    [Range(0f, 2f)] public float deathVolume = 1f;
+    [Tooltip("If true, plays the death clip at the ally's position so it can continue even if the object is disabled or destroyed immediately.")]
+    public bool playDeathClipAtPoint = true;
 
     [Header("Footstep Audio (Optional)")]
-    [Tooltip("Recommended: use a separate AudioSource for footsteps so they don't interfere with gunshots. If left empty, we'll try to find one on this object or its children.")]
+    [Tooltip("Recommended: use a separate AudioSource for footsteps so they don't interfere with melee swings. If left empty, we'll try to find one on this object or its children.")]
     public AudioSource footstepAudioSource;
     [Tooltip("One or more footstep clips. If multiple are assigned, one is chosen randomly each step.")]
     public AudioClip[] footstepSFX;
@@ -123,7 +172,7 @@ public class AllyController : MonoBehaviour
     [Tooltip("Fallback vertical offset added to target.position when no AimPoint/Collider is found.")]
     public float aimHeightOffset = 1.2f;
 
-    [Header("Line Of Sight (Shooting)")]
+    [Header("Line Of Sight (Optional)")]
     [Tooltip("If true, the ally will only FIRE when it has a clear line of sight to the aim point (raycast using lineOfSightMask).")]
     public bool requireLineOfSightToShoot = false;
 
@@ -135,7 +184,7 @@ public class AllyController : MonoBehaviour
 
     [Header("Combat Range")]
     [Tooltip("Preferred distance to keep from the enemy while fighting.")]
-    public float desiredAttackRange = 6f;
+    public float desiredAttackRange = 2f;
 
     [Tooltip("Enable a minimum/maximum preferred combat distance band (ex: keep between 20 and 60). If disabled, the ally uses desiredAttackRange as a single ideal distance.")]
     public bool enableDesiredAttackRangeBand = false;
@@ -148,11 +197,11 @@ public class AllyController : MonoBehaviour
 
     [Tooltip("Small buffer around desiredAttackRange to prevent jitter (hysteresis).")]
     public float attackRangeBuffer = 0.75f;
-    [Header("Shooting Range Gate")]
-    [Tooltip("If true, the ally will ONLY fire when within its desired attack range (or the min/max band) plus buffers.")]
+    [Header("Attack Range Gate")]
+    [Tooltip("If true, the ally will ONLY attack when within its desired attack range (or the min/max band) plus buffers.")]
     public bool onlyShootWhenInDesiredAttackRange = true;
 
-    [Tooltip("Extra buffer (meters) added on top of attackRangeBuffer when deciding if we are close enough to shoot.")]
+    [Tooltip("Extra buffer (meters) added on top of attackRangeBuffer when deciding if we are close enough to attack.")]
     public float shootRangeExtraBuffer = 0.5f;
 
 
@@ -271,6 +320,7 @@ public class AllyController : MonoBehaviour
     private bool _animHasSpeed;
     private int _animSpeedHash;
     private float _footstepTimer;
+    private bool _deathSoundPlayed;
 
     [Header("Move Marker Auto-Clear")]
     [Tooltip("When close enough to the pinned destination, auto-clear the move marker for this ally.")]
@@ -330,6 +380,39 @@ public class AllyController : MonoBehaviour
     private bool hasResumeDestination;
     private bool resumeWasFollowing;
 
+    private void NormalizeMeleeCombatSettingsIfNeeded()
+    {
+        if (!autoRepairOldRangedSettings)
+            return;
+
+        float safeMeleeRange = Mathf.Clamp(meleeAttackRange > 0f ? meleeAttackRange : 2.25f, 1.25f, 4f);
+        float desiredSafe = Mathf.Clamp(safeMeleeRange, 1.25f, 4f);
+
+        // If this prefab still has old gun-style spacing (ex: 30 / 60), convert it to melee spacing.
+        bool suspiciousSingleRange = desiredAttackRange > 6f;
+        bool suspiciousBand = enableDesiredAttackRangeBand && (desiredAttackRangeMin > 6f || desiredAttackRangeMax > 8f);
+
+        if (suspiciousSingleRange)
+            desiredAttackRange = desiredSafe;
+
+        if (suspiciousBand)
+        {
+            enableDesiredAttackRangeBand = false;
+            desiredAttackRangeMin = Mathf.Max(1f, desiredSafe - 0.5f);
+            desiredAttackRangeMax = desiredSafe + 0.5f;
+        }
+
+        // Keep aggro separate and generous so the ally can notice enemies before sword range.
+        float fallbackAggro = Mathf.Max(distanceToChase, 20f);
+        if (enableDesiredAttackRangeBand)
+            fallbackAggro = Mathf.Max(fallbackAggro, desiredAttackRangeMax);
+        else
+            fallbackAggro = Mathf.Max(fallbackAggro, desiredAttackRange + 6f);
+
+        if (aggroDetectionRange < safeMeleeRange + 1f)
+            aggroDetectionRange = fallbackAggro;
+    }
+
     private void Awake()
     {
         if (agent == null) agent = GetComponent<NavMeshAgent>();
@@ -347,6 +430,7 @@ public class AllyController : MonoBehaviour
         if (agent != null)
             agent.updateRotation = false;
 
+        NormalizeMeleeCombatSettingsIfNeeded();
         CacheAnimatorParams();
 
         combatStats = GetComponent<AllyCombatStats>();
@@ -358,12 +442,9 @@ public class AllyController : MonoBehaviour
         _strafeSide = (Random.value < 0.5f) ? -1 : 1;
         _strafeAngleOffset = Random.Range(-strafeAngleJitter, strafeAngleJitter);
 
-        // Ensure muzzle flash starts hidden.
-        if (muzzleFlashObject != null)
-            muzzleFlashObject.SetActive(false);
-
-        ResolveShotAudioSourceIfNeeded();
+        ResolveMeleeAudioSourceIfNeeded();
         ResolveFootstepAudioSourceIfNeeded();
+        ResolveDeathAudioSourceIfNeeded();
     }
 
     private void CacheAnimatorParams()
@@ -549,8 +630,17 @@ public class AllyController : MonoBehaviour
         return true;
     }
 
+    private float GetAggroDetectionRange()
+    {
+    // Keep aggro/detection separate from melee attack spacing.
+    // Fallback to distanceToChase so older prefabs still behave sensibly.
+        return Mathf.Max(0.1f, aggroDetectionRange > 0f ? aggroDetectionRange : distanceToChase);
+    }
+
     private void Update()
     {
+        CheckAndPlayDeathSoundIfNeeded();
+
         // Rotation:
         // If we let the agent rotate while we also rotate to face targets in combat,
         // the character can end up "running backwards" or snapping.
@@ -777,15 +867,24 @@ public class AllyController : MonoBehaviour
                     Transform m = team.Members[i];
                     if (m == null || m == this.transform) continue;
 
-                    AllyController other = m.GetComponent<AllyController>();
-                    if (other == null || !other.IsChasing) continue;
+                    Transform enemy = null;
 
-                    Transform enemy = other.CurrentEnemy;
+                    AllyController otherRanged = m.GetComponent<AllyController>();
+                    if (otherRanged != null && otherRanged.IsChasing)
+                    {
+                        enemy = otherRanged.CurrentEnemy;
+                    }
+                    else
+                    {
+                        AllyMeleeController otherMelee = m.GetComponent<AllyMeleeController>();
+                        if (otherMelee == null || !otherMelee.IsChasing) continue;
+                        enemy = otherMelee.CurrentEnemy;
+                    }
                     if (enemy == null) continue;
                     if (TargetIsDeadOrInvalid(enemy)) continue;
 
                     float d = Vector3.Distance(transform.position, enemy.position);
-                    if (d > distanceToChase) continue;
+                    if (d > GetAggroDetectionRange()) continue;
                     if (d > maxTargetDist) continue;
                     if (d >= bestDist) continue;
 
@@ -819,7 +918,7 @@ public class AllyController : MonoBehaviour
                 Transform t = go.transform;
                 if (TargetIsDeadOrInvalid(t)) continue;
                 float d = Vector3.Distance(transform.position, t.position);
-                if (d >= distanceToChase) continue;
+                if (d >= GetAggroDetectionRange()) continue;
                 if (d >= bestDist) continue;
 
                 if (enableManualHoldZone && _hasManualHold && IsSettledAtManualHoldPoint())
@@ -1838,65 +1937,137 @@ public class AllyController : MonoBehaviour
             }
         }
 
-        // Fire
-        fireCount -= Time.deltaTime;
-        if (fireCount > 0) return;
-
-        fireCount = fireRate;
-
-        if (firePoint != null)
-            firePoint.LookAt(targetPoint + new Vector3(0f, 0.5f, 0f));
+        // Attack
+        attackCount -= Time.deltaTime;
+        if (attackCount > 0f) return;
 
         Vector3 targetDir = targetPoint - transform.position;
+        targetDir.y = 0f;
         float angle = Vector3.SignedAngle(targetDir, transform.forward, Vector3.up);
 
-        if (Mathf.Abs(angle) < 30f)
+        float allowedAttackRange = Mathf.Max(0.1f, meleeAttackRange + meleeRangeGrace);
+        if (dist > allowedAttackRange)
+            return;
+
+        if (Mathf.Abs(angle) < Mathf.Max(5f, meleeMaxAttackAngle))
         {
-            if (bullet != null && firePoint != null)
-            {
-                GameObject spawned = Instantiate(bullet, firePoint.position, firePoint.rotation);
-                TriggerMuzzleFlashSimple();
-                TriggerShotSound();
+            attackCount = Mathf.Max(0.01f, attackRate);
+            QueueMeleeDamage(enemy);
+            TriggerMeleeSwingSound();
 
-                // Set bullet damage from AllyCombatStats (team size scaling).
-                BulletController bc = spawned.GetComponent<BulletController>();
-                if (bc != null)
-                {
-                                        bc.owner = transform;
-if (combatStats != null)
-                        bc.Damage = combatStats.GetDamageInt();
+            if (soldierAnimator != null && !string.IsNullOrWhiteSpace(meleeAttackTrigger))
+                soldierAnimator.SetTrigger(meleeAttackTrigger);
 
-                    bc.owner = transform;
-                    // Ally bullets should damage enemies, not allies.
-                    bc.damageEnemy = true;
-                    bc.damageAlly = false;
-                }
-            }
-
-            if (soldierAnimator != null)
-                soldierAnimator.SetTrigger("Shoot");
+            if (!applyDamageViaAnimationEvent)
+                ApplyQueuedMeleeDamage();
         }
     }
 
 
-    private void ResolveShotAudioSourceIfNeeded()
-    {
-        if (shotAudioSource != null) return;
+    private Transform _queuedMeleeTarget;
+    private float _queuedMeleeExpireTime;
+    private bool _queuedMeleeDamagePending;
+private Vector3 _queuedMeleeHitCenter;
+private Coroutine _meleeFallbackRoutine;
 
-        shotAudioSource = GetComponent<AudioSource>();
-        if (shotAudioSource == null)
-            shotAudioSource = GetComponentInChildren<AudioSource>();
+
+    private void ResolveDeathAudioSourceIfNeeded()
+    {
+        if (deathAudioSource != null) return;
+
+        AudioSource[] sources = GetComponentsInChildren<AudioSource>(true);
+        for (int i = 0; i < sources.Length; i++)
+        {
+            AudioSource src = sources[i];
+            if (src == null) continue;
+            if (src == meleeAudioSource) continue;
+            if (src == footstepAudioSource) continue;
+
+            deathAudioSource = src;
+            return;
+        }
+
+        deathAudioSource = GetComponent<AudioSource>();
+        if (deathAudioSource == null)
+            deathAudioSource = GetComponentInChildren<AudioSource>();
+    }
+
+    private bool IsSelfDead()
+    {
+        var dc = GetComponent<MnR.DeathController>() ?? GetComponentInParent<MnR.DeathController>();
+        if (dc != null && dc.IsDead) return true;
+
+        return false;
+    }
+
+    private void CheckAndPlayDeathSoundIfNeeded()
+    {
+        if (_deathSoundPlayed) return;
+        if (deathSFX == null) return;
+        if (!IsSelfDead()) return;
+
+        PlayDeathSoundNow();
+    }
+
+    private void OnDisable()
+    {
+        CheckAndPlayDeathSoundIfNeeded();
+    }
+
+    private void OnDestroy()
+    {
+        CheckAndPlayDeathSoundIfNeeded();
+    }
+
+    public void PlayDeathSoundNow()
+    {
+        if (_deathSoundPlayed) return;
+        if (deathSFX == null) return;
+
+        _deathSoundPlayed = true;
+
+        if (footstepAudioSource != null)
+            footstepAudioSource.Stop();
+
+        if (meleeAudioSource != null)
+            meleeAudioSource.Stop();
+
+        if (playDeathClipAtPoint)
+        {
+            AudioSource.PlayClipAtPoint(deathSFX, transform.position, deathVolume);
+            return;
+        }
+
+        ResolveDeathAudioSourceIfNeeded();
+        if (deathAudioSource != null)
+        {
+            deathAudioSource.pitch = 1f;
+            deathAudioSource.PlayOneShot(deathSFX, deathVolume);
+        }
+        else
+        {
+            AudioSource.PlayClipAtPoint(deathSFX, transform.position, deathVolume);
+        }
+    }
+
+    private void ResolveMeleeAudioSourceIfNeeded()
+    {
+        if (meleeAudioSource != null) return;
+
+        meleeAudioSource = GetComponent<AudioSource>();
+        if (meleeAudioSource == null)
+            meleeAudioSource = GetComponentInChildren<AudioSource>();
     }
 
     private void ResolveFootstepAudioSourceIfNeeded()
     {
         if (footstepAudioSource != null) return;
 
-        // Prefer a different AudioSource than the gunshot source when possible.
+        // Prefer a different AudioSource than the melee swing source when possible.
         AudioSource[] sources = GetComponentsInChildren<AudioSource>(true);
         for (int i = 0; i < sources.Length; i++)
         {
-            if (sources[i] != null && sources[i] != shotAudioSource)
+            if (sources[i] != null && sources[i] != meleeAudioSource)
             {
                 footstepAudioSource = sources[i];
                 return;
@@ -1951,19 +2122,379 @@ if (combatStats != null)
         _footstepTimer = Mathf.Max(0.05f, footstepInterval);
     }
 
-    private void TriggerShotSound()
+private Vector3 GetMeleeHitCenter(Transform enemy)
+{
+    Transform origin = meleeHitOrigin != null ? meleeHitOrigin : (firePoint != null ? firePoint : transform);
+    Vector3 forward = origin.forward;
+    forward.y = 0f;
+    if (forward.sqrMagnitude < 0.001f)
+        forward = transform.forward;
+
+    Vector3 center = origin.position + forward.normalized * Mathf.Max(0f, meleeHitForwardOffset);
+
+    if (enemy != null)
     {
-        if (shotSFX == null) return;
+        Vector3 toEnemy = GetAimPosition(enemy) - center;
+        toEnemy.y = 0f;
+        float maxSnap = Mathf.Max(0.25f, meleeHitRadius + meleeRangeGrace + 0.75f);
+        if (toEnemy.sqrMagnitude > 0.001f && toEnemy.magnitude <= maxSnap)
+            center = enemy.position;
+    }
 
-        ResolveShotAudioSourceIfNeeded();
-        if (shotAudioSource == null) return;
+    return center;
+}
 
-        if (randomizeShotPitch)
-            shotAudioSource.pitch = Random.Range(minShotPitch, maxShotPitch);
+private IEnumerator FallbackApplyMeleeDamageAfterDelay(float delay)
+{
+    yield return new WaitForSeconds(Mathf.Max(0.01f, delay));
+
+    if (_queuedMeleeDamagePending)
+        ApplyQueuedMeleeDamage();
+}
+
+private bool TryApplyDamageToTransformHierarchy(Transform start, int damage)
+{
+    if (start == null) return false;
+
+    var seen = new HashSet<Component>();
+
+    bool TryOnComponent(Component c)
+    {
+        if (c == null) return false;
+        if (!seen.Add(c)) return false;
+        return TryInvokeDamageMethod(c, damage);
+    }
+
+    EnemyHealthController eh = start.GetComponent<EnemyHealthController>();
+    if (TryOnComponent(eh)) return true;
+
+    Enemy2Controller e2 = start.GetComponent<Enemy2Controller>();
+    if (TryOnComponent(e2)) return true;
+
+    MnR.DeathController dc = start.GetComponent<MnR.DeathController>();
+    if (TryOnComponent(dc)) return true;
+
+    eh = start.GetComponentInParent<EnemyHealthController>();
+    if (TryOnComponent(eh)) return true;
+
+    e2 = start.GetComponentInParent<Enemy2Controller>();
+    if (TryOnComponent(e2)) return true;
+
+    dc = start.GetComponentInParent<MnR.DeathController>();
+    if (TryOnComponent(dc)) return true;
+
+    eh = start.GetComponentInChildren<EnemyHealthController>(true);
+    if (TryOnComponent(eh)) return true;
+
+    e2 = start.GetComponentInChildren<Enemy2Controller>(true);
+    if (TryOnComponent(e2)) return true;
+
+    dc = start.GetComponentInChildren<MnR.DeathController>(true);
+    if (TryOnComponent(dc)) return true;
+
+    Transform root = start.root;
+    if (root != null && root != start)
+    {
+        eh = root.GetComponentInChildren<EnemyHealthController>(true);
+        if (TryOnComponent(eh)) return true;
+
+        e2 = root.GetComponentInChildren<Enemy2Controller>(true);
+        if (TryOnComponent(e2)) return true;
+
+        dc = root.GetComponentInChildren<MnR.DeathController>(true);
+        if (TryOnComponent(dc)) return true;
+    }
+
+    Transform t = start;
+    while (t != null)
+    {
+        MonoBehaviour[] behaviours = t.GetComponents<MonoBehaviour>();
+        for (int i = 0; i < behaviours.Length; i++)
+        {
+            MonoBehaviour mb = behaviours[i];
+            if (mb == null) continue;
+            if (!seen.Add(mb)) continue;
+            if (TryInvokeDamageMethod(mb, damage))
+                return true;
+        }
+        t = t.parent;
+    }
+
+    return false;
+}
+
+private int ApplyMeleeDamageByOverlap(Transform enemy, int damage)
+{
+    Vector3 center = _queuedMeleeHitCenter;
+    if (center == Vector3.zero)
+        center = GetMeleeHitCenter(enemy);
+
+    float radius = Mathf.Max(0.1f, meleeHitRadius);
+    Collider[] hits = Physics.OverlapSphere(center, radius, ~0, QueryTriggerInteraction.Collide);
+    if (hits == null || hits.Length == 0)
+    {
+        if (debugMeleeDamage)
+            Debug.Log($"{name}: melee overlap found no colliders.", this);
+        return 0;
+    }
+
+    int appliedCount = 0;
+    HashSet<Transform> damagedRoots = new HashSet<Transform>();
+
+    for (int i = 0; i < hits.Length; i++)
+    {
+        Collider col = hits[i];
+        if (col == null) continue;
+
+        Transform hitT = col.transform;
+        if (hitT == transform || hitT.IsChildOf(transform))
+            continue;
+
+        Transform root = hitT.root != null ? hitT.root : hitT;
+        if (!damagedRoots.Add(root))
+            continue;
+
+        bool looksLikeEnemy = false;
+        if (hitT.CompareTag("Enemy") || root.CompareTag("Enemy"))
+            looksLikeEnemy = true;
+        else if (hitT.GetComponentInParent<EnemyHealthController>() != null || hitT.GetComponentInChildren<EnemyHealthController>(true) != null)
+            looksLikeEnemy = true;
+        else if (hitT.GetComponentInParent<Enemy2Controller>() != null || hitT.GetComponentInChildren<Enemy2Controller>(true) != null)
+            looksLikeEnemy = true;
+
+        if (!looksLikeEnemy)
+            continue;
+
+        if (TryApplyDamageToTransformHierarchy(hitT, damage))
+        {
+            appliedCount++;
+            if (debugMeleeDamage)
+                Debug.Log($"{name}: melee overlap damaged {root.name} for {damage}.", root);
+
+            if (!meleeCanHitMultipleTargets)
+                return appliedCount;
+        }
+    }
+
+    if (appliedCount == 0 && enemy != null && TryApplyDamageToTransformHierarchy(enemy, damage))
+    {
+        appliedCount = 1;
+        if (debugMeleeDamage)
+            Debug.Log($"{name}: melee fallback damaged queued target {enemy.name} for {damage}.", enemy);
+    }
+
+    if (debugMeleeDamage && appliedCount == 0)
+        Debug.Log($"{name}: melee swing found colliders but no valid damage receiver.", this);
+
+    return appliedCount;
+}
+
+private void QueueMeleeDamage(Transform enemy)
+{
+    _queuedMeleeTarget = enemy;
+    _queuedMeleeExpireTime = Time.time + Mathf.Max(0.05f, meleeDamageWindow);
+    _queuedMeleeDamagePending = true;
+    _queuedMeleeHitCenter = GetMeleeHitCenter(enemy);
+
+    if (_meleeFallbackRoutine != null)
+    {
+        StopCoroutine(_meleeFallbackRoutine);
+        _meleeFallbackRoutine = null;
+    }
+
+    if (applyDamageViaAnimationEvent && enableAnimationEventFallback)
+        _meleeFallbackRoutine = StartCoroutine(FallbackApplyMeleeDamageAfterDelay(animationEventFallbackDelay));
+}
+
+private void ApplyQueuedMeleeDamage()
+{
+    if (!_queuedMeleeDamagePending)
+        return;
+
+    if (_meleeFallbackRoutine != null)
+    {
+        StopCoroutine(_meleeFallbackRoutine);
+        _meleeFallbackRoutine = null;
+    }
+
+    Transform enemy = _queuedMeleeTarget;
+    _queuedMeleeDamagePending = false;
+    _queuedMeleeTarget = null;
+
+    if (Time.time > _queuedMeleeExpireTime) return;
+
+    bool enemyStillValid = enemy != null && !TargetIsDeadOrInvalid(enemy);
+    if (enemyStillValid)
+    {
+        float directDist = Vector3.Distance(transform.position, GetAimPosition(enemy));
+        float allowed = Mathf.Max(0.1f, Mathf.Max(meleeAttackRange, meleeHitRadius + meleeHitForwardOffset) + meleeRangeGrace + 0.75f);
+        if (directDist > allowed)
+            enemyStillValid = false;
+    }
+
+    int applied = ApplyMeleeDamageByOverlap(enemyStillValid ? enemy : null, GetMeleeDamageAmount());
+
+    if (debugMeleeDamage && applied <= 0)
+        Debug.Log($"{name}: queued melee damage applied to 0 targets.", this);
+}
+
+    private int GetMeleeDamageAmount()
+    {
+        if (combatStats != null)
+            return Mathf.Max(1, combatStats.GetDamageInt());
+
+        return Mathf.Max(1, meleeBaseDamage);
+    }
+
+    private bool TryApplyMeleeDamage(Transform enemy, int damage)
+    {
+        if (enemy == null) return false;
+
+        Component[] preferred = new Component[]
+        {
+            enemy.GetComponentInParent<Enemy2Controller>(),
+            enemy.GetComponentInParent<EnemyHealthController>(),
+            enemy.GetComponentInParent<MnR.DeathController>()
+        };
+
+        for (int i = 0; i < preferred.Length; i++)
+        {
+            Component c = preferred[i];
+            if (c != null && TryInvokeDamageMethod(c, damage))
+                return true;
+        }
+
+        Transform t = enemy;
+        while (t != null)
+        {
+            MonoBehaviour[] behaviours = t.GetComponents<MonoBehaviour>();
+            for (int i = 0; i < behaviours.Length; i++)
+            {
+                MonoBehaviour mb = behaviours[i];
+                if (mb == null) continue;
+                if (TryInvokeDamageMethod(mb, damage))
+                    return true;
+            }
+            t = t.parent;
+        }
+
+        return false;
+    }
+
+    private bool TryInvokeDamageMethod(Component targetComponent, int damage)
+    {
+        if (targetComponent == null) return false;
+
+        string[] methodNames =
+        {
+            "TakeDamage",
+            "ApplyDamage",
+            "ReceiveDamage",
+            "Damage",
+            "Hit",
+            "TakeHit",
+            "GetShot",
+            "TakeMeleeDamage",
+            "TakeSwordDamage"
+        };
+
+        Type type = targetComponent.GetType();
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+        MethodInfo[] methods = type.GetMethods(flags);
+
+        for (int m = 0; m < methodNames.Length; m++)
+        {
+            for (int i = 0; i < methods.Length; i++)
+            {
+                MethodInfo mi = methods[i];
+                if (mi == null || mi.Name != methodNames[m]) continue;
+
+                ParameterInfo[] ps = mi.GetParameters();
+                if (ps.Length > 3) continue;
+
+                if (!TryBuildDamageArgs(ps, damage, out object[] args))
+                    continue;
+
+                try
+                {
+                    mi.Invoke(targetComponent, args);
+                    return true;
+                }
+                catch
+                {
+                    // Try the next compatible signature.
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private bool TryBuildDamageArgs(ParameterInfo[] parameters, int damage, out object[] args)
+    {
+        args = new object[parameters.Length];
+        bool assignedDamage = false;
+
+        for (int i = 0; i < parameters.Length; i++)
+        {
+            Type pt = parameters[i].ParameterType;
+
+            if (!assignedDamage && (pt == typeof(int) || pt == typeof(float) || pt == typeof(double)))
+            {
+                args[i] = Convert.ChangeType(damage, pt);
+                assignedDamage = true;
+                continue;
+            }
+
+            if (pt == typeof(Transform))
+            {
+                args[i] = transform;
+                continue;
+            }
+
+            if (pt == typeof(GameObject))
+            {
+                args[i] = gameObject;
+                continue;
+            }
+
+            if (pt == typeof(Vector3))
+            {
+                args[i] = transform.position;
+                continue;
+            }
+
+            if (pt == typeof(bool))
+            {
+                args[i] = true;
+                continue;
+            }
+
+            if (parameters[i].HasDefaultValue)
+            {
+                args[i] = parameters[i].DefaultValue;
+                continue;
+            }
+
+            return false;
+        }
+
+        return assignedDamage;
+    }
+
+    private void TriggerMeleeSwingSound()
+    {
+        if (meleeSwingSFX == null) return;
+
+        ResolveMeleeAudioSourceIfNeeded();
+        if (meleeAudioSource == null) return;
+
+        if (randomizeMeleePitch)
+            meleeAudioSource.pitch = Random.Range(minMeleePitch, maxMeleePitch);
         else
-            shotAudioSource.pitch = 1f;
+            meleeAudioSource.pitch = 1f;
 
-        shotAudioSource.PlayOneShot(shotSFX, shotVolume);
+        meleeAudioSource.PlayOneShot(meleeSwingSFX, meleeSwingVolume);
     }
 
     private bool IsWithinShootRange(float dist, bool useBand, float minRange, float maxRange, float range, bool useDynamicRange)
@@ -1971,46 +2502,17 @@ if (combatStats != null)
         float shootBuf = Mathf.Max(0f, attackRangeBuffer + shootRangeExtraBuffer);
 
         // If we're using a min/max band AND we're not dynamically moving the desired range,
-        // then we only shoot while inside the band (with buffers).
+        // then we only attack while inside the band (with buffers).
         if (useBand && !useDynamicRange)
             return dist <= (maxRange + shootBuf) && dist >= (minRange - shootBuf);
 
-        // Otherwise, shoot when within the current desired range (plus buffers).
+        // Otherwise, attack when within the current desired range (plus buffers).
         return dist <= (range + shootBuf);
     }
 
-    private void TriggerMuzzleFlashSimple()
+    // Optional: call this from the sword contact frame in your animation.
+    public void AnimEvent_ApplyMeleeDamage()
     {
-        if (muzzleFlashObject == null) return;
-
-        if (muzzleFlashFollowFirePoint && firePoint != null)
-        {
-            muzzleFlashObject.transform.position = firePoint.TransformPoint(muzzleFlashLocalOffset);
-            muzzleFlashObject.transform.rotation = firePoint.rotation;
-        }
-        // Reset active state so the flash is noticeable even if it was left on.
-        if (muzzleFlashObject.activeSelf)
-            muzzleFlashObject.SetActive(false);
-
-        muzzleFlashObject.SetActive(true);
-
-        if (_muzzleFlashRoutine != null)
-            StopCoroutine(_muzzleFlashRoutine);
-
-        _muzzleFlashRoutine = StartCoroutine(DisableMuzzleFlashAfterDelay());
-    }
-
-    private IEnumerator DisableMuzzleFlashAfterDelay()
-    {
-        yield return new WaitForSeconds(Mathf.Max(0.005f, muzzleFlashDuration));
-        if (muzzleFlashObject != null)
-            muzzleFlashObject.SetActive(false);
-        _muzzleFlashRoutine = null;
-    }
-
-    // Optional: call this from an Animation Event on the fire frame
-    public void AnimEvent_MuzzleFlash()
-    {
-        TriggerMuzzleFlashSimple();
+        ApplyQueuedMeleeDamage();
     }
 }
