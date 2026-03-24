@@ -91,6 +91,15 @@ public class DroneEnemyController : MonoBehaviour
     public float minShotPitch = 0.97f;
     public float maxShotPitch = 1.03f;
 
+    [Header("Death Audio (Optional)")]
+    [Tooltip("Optional source whose 3D/spatial settings will be copied onto the detached death audio object.")]
+    public AudioSource deathAudioSourceTemplate;
+    public AudioClip deathSFX;
+    [Range(0f, 2f)] public float deathVolume = 1f;
+    public bool randomizeDeathPitch = true;
+    public float minDeathPitch = 0.97f;
+    public float maxDeathPitch = 1.03f;
+
     [Header("Patrol")]
     public Transform[] waypoints;
     public bool pingPong = true;
@@ -594,6 +603,73 @@ public class DroneEnemyController : MonoBehaviour
         shotAudioSource.PlayOneShot(shotSFX, shotVolume);
     }
 
+    private void PlayDetachedDeathSound()
+    {
+        if (deathSFX == null)
+            return;
+
+        GameObject audioObj = new GameObject(name + "_DeathAudio");
+        audioObj.transform.position = transform.position;
+
+        AudioSource src = audioObj.AddComponent<AudioSource>();
+        CopyDeathAudioSettings(src);
+
+        if (randomizeDeathPitch)
+            src.pitch = UnityEngine.Random.Range(minDeathPitch, maxDeathPitch);
+        else
+            src.pitch = 1f;
+
+        src.clip = deathSFX;
+        src.Play();
+
+        Destroy(audioObj, Mathf.Max(0.1f, deathSFX.length / Mathf.Max(0.01f, Mathf.Abs(src.pitch))) + 0.25f);
+    }
+
+    private void CopyDeathAudioSettings(AudioSource destination)
+    {
+        if (destination == null)
+            return;
+
+        AudioSource template = deathAudioSourceTemplate;
+        if (template == null)
+            template = shotAudioSource;
+        if (template == null)
+            template = GetComponent<AudioSource>();
+
+        if (template != null)
+        {
+            destination.outputAudioMixerGroup = template.outputAudioMixerGroup;
+            destination.mute = template.mute;
+            destination.bypassEffects = template.bypassEffects;
+            destination.bypassListenerEffects = template.bypassListenerEffects;
+            destination.bypassReverbZones = template.bypassReverbZones;
+            destination.priority = template.priority;
+            destination.volume = template.volume * deathVolume;
+            destination.panStereo = template.panStereo;
+            destination.spatialBlend = template.spatialBlend;
+            destination.reverbZoneMix = template.reverbZoneMix;
+            destination.dopplerLevel = template.dopplerLevel;
+            destination.spread = template.spread;
+            destination.rolloffMode = template.rolloffMode;
+            destination.minDistance = template.minDistance;
+            destination.maxDistance = template.maxDistance;
+            destination.ignoreListenerVolume = template.ignoreListenerVolume;
+            destination.ignoreListenerPause = template.ignoreListenerPause;
+            destination.playOnAwake = false;
+            destination.loop = false;
+        }
+        else
+        {
+            destination.playOnAwake = false;
+            destination.loop = false;
+            destination.spatialBlend = 1f;
+            destination.rolloffMode = AudioRolloffMode.Linear;
+            destination.minDistance = 4f;
+            destination.maxDistance = 35f;
+            destination.volume = deathVolume;
+        }
+    }
+
     private Vector3 GetAimPoint(Transform target)
     {
         if (target == null) return transform.position + transform.forward * 10f;
@@ -841,6 +917,8 @@ public class DroneEnemyController : MonoBehaviour
             foreach (Collider col in GetComponentsInChildren<Collider>())
                 col.enabled = false;
         }
+
+        PlayDetachedDeathSound();
 
         if (explosionPrefab != null)
             Instantiate(explosionPrefab, transform.position + explosionOffset, Quaternion.identity);
