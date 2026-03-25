@@ -1,15 +1,17 @@
-using System.Collections;
+using System;
 using System.Collections.Generic;
+using System.Reflection;
 using TMPro;
 using UnityEngine;
 using UnityEngine.Events;
+using UnityEngine.SceneManagement;
 
 /// <summary>
 /// Base/terminal activator that behaves like RecruitPromptUI.
 /// Shows a prompt when the player is within range.
 /// If enemies are active nearby, shows a warning and blocks activation.
 /// After the first successful activation, the ready prompt will never show again.
-/// Enemy scanning continues forever, and can trigger a separate 2-second warning UI after activation.
+/// After activation, if enemies enter the base radius, show the warning and a countdown.
 /// </summary>
 public class BaseActivator : MonoBehaviour
 {
@@ -44,9 +46,13 @@ public class BaseActivator : MonoBehaviour
     [SerializeField] private bool drawDebugGizmos = true;
 
     [Header("Post-Activation Warning UI")]
-    [Tooltip("Optional UI object to show for 2 seconds after the base has already been activated and an enemy is detected in range.")]
+    [Tooltip("Optional UI object shown while this base has already been activated and an enemy is detected in range.")]
     [SerializeField] private GameObject enemyDetectedWarningUI;
-    [SerializeField] private float enemyDetectedWarningDuration = 2f;
+
+    [Header("Post-Activation Countdown")]
+    [Tooltip("Optional TMP text shown as 'Game Over in 59' while this base has already been activated and an enemy is detected in range.")]
+    [SerializeField] private TMP_Text gameOverCountdownText;
+    [SerializeField] private string startScreenSceneName = "StartScreen";
 
     [Header("Activation Audio")]
     [SerializeField] private AudioClip activatedSfx;
@@ -63,13 +69,15 @@ public class BaseActivator : MonoBehaviour
     [SerializeField] private UnityEvent onActivated;
     [SerializeField] private UnityEvent onActivationBlockedByEnemies;
 
+    private const float GameOverCountdownStartSeconds = 59f;
+
     private Transform player;
     private bool playerInRange;
     private bool hasActivated;
     private bool enemyWasDetectedAfterActivation;
     private string lastShownMessage = string.Empty;
-    private Coroutine enemyWarningRoutine;
     private bool enemyWarningVisibleByThisScript;
+    private float gameOverCountdownRemaining = GameOverCountdownStartSeconds;
     private readonly Collider[] overlapResults = new Collider[128];
     private static readonly Dictionary<int, BaseActivator> blockedPromptOwners = new Dictionary<int, BaseActivator>();
 
@@ -82,11 +90,11 @@ public class BaseActivator : MonoBehaviour
         EnsureActivationAudioSource();
         enemyWarningVisibleByThisScript = false;
         SetBlockedPromptVisible(false);
+        ResetPostActivationEnemyUI();
 
         if (capturedByDefault)
         {
             hasActivated = true;
-            enemyWasDetectedAfterActivation = false;
             ClearPromptIfNeeded();
 
             if (invokeActivatedEventOnStart)
@@ -100,6 +108,7 @@ public class BaseActivator : MonoBehaviour
         EnsureActivationAudioSource();
         enemyWarningVisibleByThisScript = false;
         SetBlockedPromptVisible(false);
+        ResetPostActivationEnemyUI();
         RefreshPrompt(false);
     }
 
@@ -108,17 +117,10 @@ public class BaseActivator : MonoBehaviour
         if (playerInRange)
             RecruitPromptUI.Hide();
 
-        if (enemyWarningRoutine != null)
-        {
-            StopCoroutine(enemyWarningRoutine);
-            enemyWarningRoutine = null;
-        }
-
-        HideEnemyWarningOwnedByThisScript();
+        ResetPostActivationEnemyUI();
         SetBlockedPromptVisible(false);
         playerInRange = false;
         lastShownMessage = string.Empty;
-        enemyWasDetectedAfterActivation = false;
     }
 
     private void Update()
@@ -129,7 +131,7 @@ public class BaseActivator : MonoBehaviour
             if (player == null)
             {
                 ClearPromptIfNeeded();
-                HandlePostActivationEnemyWarning(false);
+                HandlePostActivationEnemyUI(false);
                 return;
             }
         }
@@ -149,7 +151,7 @@ public class BaseActivator : MonoBehaviour
         bool enemiesActive = AreEnemiesActiveInArea();
 
         RefreshPrompt(enemiesActive);
-        HandlePostActivationEnemyWarning(enemiesActive);
+        HandlePostActivationEnemyUI(enemiesActive);
 
         if (!playerInRange)
             return;
@@ -183,8 +185,8 @@ public class BaseActivator : MonoBehaviour
         }
 
         hasActivated = true;
-        enemyWasDetectedAfterActivation = false;
         ClearPromptIfNeeded();
+        ResetPostActivationEnemyUI();
         PlayActivatedSfx();
         onActivated?.Invoke();
     }
@@ -216,7 +218,7 @@ public class BaseActivator : MonoBehaviour
         enemyDetectionRadius = Mathf.Max(0f, newRadius);
         bool enemiesActive = AreEnemiesActiveInArea();
         RefreshPrompt(enemiesActive);
-        HandlePostActivationEnemyWarning(enemiesActive);
+        HandlePostActivationEnemyUI(enemiesActive);
     }
 
     private void RefreshPrompt(bool enemiesActive)
@@ -227,10 +229,6 @@ public class BaseActivator : MonoBehaviour
             return;
         }
 
-        // Surgical fix requested by user:
-        // when the player is near this base and an enemy is inside the detection radius,
-        // drive the EnemyNear / blocked UI directly.
-        // This is no longer gated behind the base being uncaptured.
         if (enemiesActive)
         {
             if (blockedPromptText != null)
@@ -242,7 +240,6 @@ public class BaseActivator : MonoBehaviour
             return;
         }
 
-        // After the first successful activation, never show the ready prompt again.
         if (hasActivated)
         {
             ClearPromptIfNeeded();
@@ -253,46 +250,44 @@ public class BaseActivator : MonoBehaviour
         ShowPrompt(readyPromptMessage);
     }
 
-    private void HandlePostActivationEnemyWarning(bool enemiesActive)
+    private void HandlePostActivationEnemyUI(bool enemiesActive)
     {
-        if (!hasActivated)
+        if (!hasActivated || !enemiesActive)
         {
-            enemyWasDetectedAfterActivation = false;
-            HideEnemyWarningOwnedByThisScript();
+            ResetPostActivationEnemyUI();
             return;
         }
 
-        if (!enemiesActive)
+        if (!enemyWasDetectedAfterActivation)
         {
-            enemyWasDetectedAfterActivation = false;
-            HideEnemyWarningOwnedByThisScript();
-            return;
+            enemyWasDetectedAfterActivation = true;
+            gameOverCountdownRemaining = GameOverCountdownStartSeconds;
+            UpdateGameOverCountdownText();
         }
 
-        if (enemyWasDetectedAfterActivation)
-            return;
-
-        enemyWasDetectedAfterActivation = true;
-        ShowEnemyWarningForDuration();
-    }
-
-    private void ShowEnemyWarningForDuration()
-    {
-        if (enemyDetectedWarningUI == null)
-            return;
-
-        if (enemyWarningRoutine != null)
-            StopCoroutine(enemyWarningRoutine);
-
-        enemyWarningRoutine = StartCoroutine(EnemyWarningRoutine());
-    }
-
-    private IEnumerator EnemyWarningRoutine()
-    {
         SetEnemyWarningUIVisible(true);
-        yield return new WaitForSeconds(Mathf.Max(0.01f, enemyDetectedWarningDuration));
+        SetGameOverCountdownVisible(true);
+
+        if (gameOverCountdownRemaining > 0f)
+        {
+            gameOverCountdownRemaining -= Time.deltaTime;
+            if (gameOverCountdownRemaining < 0f)
+                gameOverCountdownRemaining = 0f;
+
+            UpdateGameOverCountdownText();
+
+            if (gameOverCountdownRemaining <= 0f)
+                LoadStartScreenScene();
+        }
+    }
+
+    private void ResetPostActivationEnemyUI()
+    {
+        enemyWasDetectedAfterActivation = false;
+        gameOverCountdownRemaining = GameOverCountdownStartSeconds;
         HideEnemyWarningOwnedByThisScript();
-        enemyWarningRoutine = null;
+        SetGameOverCountdownVisible(false);
+        UpdateGameOverCountdownText();
     }
 
     private void HideEnemyWarningOwnedByThisScript()
@@ -310,6 +305,30 @@ public class BaseActivator : MonoBehaviour
 
         enemyDetectedWarningUI.SetActive(visible);
         enemyWarningVisibleByThisScript = visible;
+    }
+
+    private void SetGameOverCountdownVisible(bool visible)
+    {
+        if (gameOverCountdownText == null)
+            return;
+
+        gameOverCountdownText.gameObject.SetActive(visible);
+    }
+
+    private void UpdateGameOverCountdownText()
+    {
+        if (gameOverCountdownText == null)
+            return;
+
+        gameOverCountdownText.text = "Game Over in " + Mathf.CeilToInt(gameOverCountdownRemaining);
+    }
+
+    private void LoadStartScreenScene()
+    {
+        if (string.IsNullOrWhiteSpace(startScreenSceneName))
+            return;
+
+        SceneManager.LoadScene(startScreenSceneName);
     }
 
     private void ShowPrompt(string message)
@@ -407,7 +426,6 @@ public class BaseActivator : MonoBehaviour
         if (enemyLayers.value != 0)
             return false;
 
-        // Fallback tag scan if no enemy layer mask is configured.
         if (enemyTags == null || enemyTags.Length == 0)
             return false;
 
@@ -424,7 +442,7 @@ public class BaseActivator : MonoBehaviour
                     continue;
 
                 float sqr = (go.transform.position - transform.position).sqrMagnitude;
-                if (sqr <= enemyDetectionRadius * enemyDetectionRadius)
+                if (sqr <= enemyDetectionRadius * enemyDetectionRadius && IsEnemyAlive(go.transform))
                     return true;
             }
         }
@@ -440,19 +458,134 @@ public class BaseActivator : MonoBehaviour
         if (hit.CompareTag(playerTag))
             return false;
 
+        bool matchesEnemy = false;
+
         if (enemyTags != null && enemyTags.Length > 0)
         {
             for (int i = 0; i < enemyTags.Length; i++)
             {
                 string tag = enemyTags[i];
                 if (!string.IsNullOrWhiteSpace(tag) && hit.CompareTag(tag))
-                    return true;
+                {
+                    matchesEnemy = true;
+                    break;
+                }
             }
         }
 
-        if (enemyLayers.value != 0)
-            return ((1 << hit.gameObject.layer) & enemyLayers.value) != 0;
+        if (!matchesEnemy && enemyLayers.value != 0)
+            matchesEnemy = ((1 << hit.gameObject.layer) & enemyLayers.value) != 0;
 
+        if (!matchesEnemy)
+            return false;
+
+        return IsEnemyAlive(hit);
+    }
+
+    private bool IsEnemyAlive(Transform hit)
+    {
+        Transform current = hit;
+
+        while (current != null)
+        {
+            MonoBehaviour[] behaviours = current.GetComponents<MonoBehaviour>();
+            for (int i = 0; i < behaviours.Length; i++)
+            {
+                MonoBehaviour behaviour = behaviours[i];
+                if (behaviour == null)
+                    continue;
+
+                Type type = behaviour.GetType();
+                string typeName = type.Name;
+
+                if (typeName.IndexOf("Enemy", StringComparison.OrdinalIgnoreCase) < 0 &&
+                    typeName.IndexOf("Health", StringComparison.OrdinalIgnoreCase) < 0)
+                    continue;
+
+                if (TryGetBoolMember(type, behaviour, "isDead", out bool isDead) && isDead)
+                    return false;
+
+                if (TryGetBoolMember(type, behaviour, "dead", out bool dead) && dead)
+                    return false;
+
+                if (TryGetFloatMember(type, behaviour, "currentHealth", out float currentHealth) && currentHealth <= 0f)
+                    return false;
+
+                if (TryGetFloatMember(type, behaviour, "health", out float health) && health <= 0f)
+                    return false;
+
+                if (TryGetFloatMember(type, behaviour, "currentHP", out float currentHp) && currentHp <= 0f)
+                    return false;
+
+                if (TryGetFloatMember(type, behaviour, "hp", out float hp) && hp <= 0f)
+                    return false;
+            }
+
+            current = current.parent;
+        }
+
+        return true;
+    }
+
+    private bool TryGetBoolMember(Type type, object instance, string memberName, out bool value)
+    {
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+        FieldInfo field = type.GetField(memberName, flags);
+        if (field != null && field.FieldType == typeof(bool))
+        {
+            value = (bool)field.GetValue(instance);
+            return true;
+        }
+
+        PropertyInfo property = type.GetProperty(memberName, flags);
+        if (property != null && property.PropertyType == typeof(bool) && property.CanRead)
+        {
+            value = (bool)property.GetValue(instance, null);
+            return true;
+        }
+
+        value = false;
+        return false;
+    }
+
+    private bool TryGetFloatMember(Type type, object instance, string memberName, out float value)
+    {
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+        FieldInfo field = type.GetField(memberName, flags);
+        if (field != null)
+        {
+            if (field.FieldType == typeof(float))
+            {
+                value = (float)field.GetValue(instance);
+                return true;
+            }
+
+            if (field.FieldType == typeof(int))
+            {
+                value = (int)field.GetValue(instance);
+                return true;
+            }
+        }
+
+        PropertyInfo property = type.GetProperty(memberName, flags);
+        if (property != null && property.CanRead)
+        {
+            if (property.PropertyType == typeof(float))
+            {
+                value = (float)property.GetValue(instance, null);
+                return true;
+            }
+
+            if (property.PropertyType == typeof(int))
+            {
+                value = (int)property.GetValue(instance, null);
+                return true;
+            }
+        }
+
+        value = 0f;
         return false;
     }
 
