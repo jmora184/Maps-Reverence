@@ -405,7 +405,11 @@ if (enemyHealth != null)
             // Player first (new health system)
             if (playerVitals != null)
             {
-                playerVitals.Damage(dmgInt);
+                Vector3 damageSourcePos = owner != null
+                    ? owner.position
+                    : (transform.position - (transform.forward * 2f));
+
+                playerVitals.Damage(dmgInt, damageSourcePos);
             }
             else if (allyHealth != null)
             {

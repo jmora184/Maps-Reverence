@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
+using TMPro;
 using UnityEngine;
 
 /// <summary>
@@ -10,6 +11,7 @@ using UnityEngine;
 /// and it will listen for PlayerVitals death events.
 ///
 /// On death:
+/// - waits for the respawn delay while showing an optional countdown UI
 /// - teleports player to the chosen respawn point
 /// - restores full health
 /// - refills ammo on the player's weapons
@@ -27,11 +29,33 @@ public class PlayerRespawnController : MonoBehaviour
     [Tooltip("Where the player should respawn after death or off-map recovery.")]
     [SerializeField] private Transform respawnPoint;
 
-    [Tooltip("Delay before respawn. 0 = instant.")]
-    [SerializeField] private float respawnDelay = 0f;
+    [Tooltip("Delay before respawn after death. 0 = instant.")]
+    [SerializeField] private float respawnDelay = 5f;
 
     [Tooltip("If true, match the respawn point rotation too.")]
     [SerializeField] private bool applyRespawnRotation = true;
+
+    [Header("Respawn UI")]
+    [Tooltip("Optional TMP text used to show a respawn countdown, e.g. 'Respawning in 5'.")]
+    [SerializeField] private TMP_Text respawnCountdownText;
+
+    [Tooltip("Format string used for the countdown text. {0} will be replaced by the seconds remaining.")]
+    [SerializeField] private string respawnCountdownFormat = "Respawning in {0}";
+
+    [Tooltip("Hide the countdown text object when not actively counting down.")]
+    [SerializeField] private bool hideCountdownTextWhenIdle = true;
+
+
+    [Header("Audio")]
+    [Tooltip("Optional sound played once when the player dies and the respawn countdown begins.")]
+    [SerializeField] private AudioClip deathSfx;
+
+    [Tooltip("Optional AudioSource used to play the death sound. Leave empty to use an AudioSource on this object or a simple fallback.")]
+    [SerializeField] private AudioSource deathAudioSource;
+
+    [Tooltip("Volume used when playing the death sound.")]
+    [Range(0f, 1f)]
+    [SerializeField] private float deathSfxVolume = 1f;
 
     [Header("Off Map Recovery")]
     [Tooltip("If enabled, respawns the player when they leave the assigned terrain bounds.")]
@@ -61,6 +85,7 @@ public class PlayerRespawnController : MonoBehaviour
 
     private bool isRespawning = false;
     private float lastOffMapRespawnTime = float.NegativeInfinity;
+    private bool cachedPlayerControllerEnabled = true;
 
     private void Reset()
     {
@@ -73,8 +98,13 @@ public class PlayerRespawnController : MonoBehaviour
         if (characterController == null)
             characterController = GetComponent<CharacterController>();
 
+        if (deathAudioSource == null)
+            deathAudioSource = GetComponent<AudioSource>();
+
         if (monitoredTerrain == null)
             monitoredTerrain = Terrain.activeTerrain;
+
+        InitializeCountdownUI();
     }
 
     private void Awake()
@@ -88,8 +118,13 @@ public class PlayerRespawnController : MonoBehaviour
         if (characterController == null)
             characterController = GetComponent<CharacterController>();
 
+        if (deathAudioSource == null)
+            deathAudioSource = GetComponent<AudioSource>();
+
         if (monitoredTerrain == null)
             monitoredTerrain = Terrain.activeTerrain;
+
+        InitializeCountdownUI();
     }
 
     private void OnEnable()
@@ -102,6 +137,9 @@ public class PlayerRespawnController : MonoBehaviour
     {
         if (playerVitals != null)
             playerVitals.OnDied -= HandlePlayerDied;
+
+        SetPlayerControlEnabled(true);
+        HideCountdownUI();
     }
 
     private void Update()
@@ -154,19 +192,106 @@ public class PlayerRespawnController : MonoBehaviour
     private void HandlePlayerDied()
     {
         if (!isRespawning)
+        {
+            PlayDeathSound();
             StartCoroutine(RespawnRoutine());
+        }
     }
 
     private IEnumerator RespawnRoutine()
     {
         isRespawning = true;
+        SetPlayerControlEnabled(false);
 
         if (respawnDelay > 0f)
-            yield return new WaitForSeconds(respawnDelay);
+            yield return StartCoroutine(ShowRespawnCountdown(respawnDelay));
 
         RespawnNow();
+        SetPlayerControlEnabled(true);
 
+        HideCountdownUI();
         isRespawning = false;
+    }
+
+    private IEnumerator ShowRespawnCountdown(float delay)
+    {
+        if (respawnCountdownText == null)
+        {
+            yield return new WaitForSeconds(delay);
+            yield break;
+        }
+
+        if (respawnCountdownText.gameObject != null)
+            respawnCountdownText.gameObject.SetActive(true);
+
+        float timer = delay;
+        int lastShownSeconds = -1;
+
+        while (timer > 0f)
+        {
+            int secondsRemaining = Mathf.CeilToInt(timer);
+            if (secondsRemaining != lastShownSeconds)
+            {
+                respawnCountdownText.text = string.Format(respawnCountdownFormat, secondsRemaining);
+                lastShownSeconds = secondsRemaining;
+            }
+
+            timer -= Time.deltaTime;
+            yield return null;
+        }
+    }
+
+    private void PlayDeathSound()
+    {
+        if (deathSfx == null)
+            return;
+
+        if (deathAudioSource != null)
+        {
+            deathAudioSource.PlayOneShot(deathSfx, Mathf.Clamp01(deathSfxVolume));
+            return;
+        }
+
+        AudioSource.PlayClipAtPoint(deathSfx, transform.position, Mathf.Clamp01(deathSfxVolume));
+    }
+
+    private void InitializeCountdownUI()
+    {
+        if (respawnCountdownText == null)
+            return;
+
+        respawnCountdownText.text = string.Empty;
+
+        if (hideCountdownTextWhenIdle && respawnCountdownText.gameObject != null)
+            respawnCountdownText.gameObject.SetActive(false);
+    }
+
+    private void HideCountdownUI()
+    {
+        if (respawnCountdownText == null)
+            return;
+
+        respawnCountdownText.text = string.Empty;
+
+        if (hideCountdownTextWhenIdle && respawnCountdownText.gameObject != null)
+            respawnCountdownText.gameObject.SetActive(false);
+    }
+
+
+    private void SetPlayerControlEnabled(bool enabledState)
+    {
+        if (playerController == null)
+            return;
+
+        if (!enabledState)
+        {
+            cachedPlayerControllerEnabled = playerController.enabled;
+            playerController.enabled = false;
+            return;
+        }
+
+        if (cachedPlayerControllerEnabled)
+            playerController.enabled = true;
     }
 
     [ContextMenu("Respawn Now")]

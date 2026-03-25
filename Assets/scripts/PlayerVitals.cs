@@ -38,6 +38,21 @@ public class PlayerVitals : MonoBehaviour, IDamageable
     [Tooltip("Optional alternative: Image set to Filled (Horizontal).")]
     [SerializeField] private Image fillImage;
 
+    [Header("Directional Damage UI (Optional)")]
+    [Tooltip("Optional directional damage indicator for left/right/behind bullet hits.")]
+    [SerializeField] private DamageDirectionIndicator damageIndicator;
+
+    [Header("Health Bar Damage Flash (Optional)")]
+    [Tooltip("Optional red Image placed over the player health bar. Script flashes its alpha when damage is taken.")]
+    [SerializeField] private Image healthBarDamageFlashImage;
+
+    [Tooltip("Peak alpha applied to the red health-bar flash image when the player takes damage.")]
+    [Range(0f, 1f)]
+    [SerializeField] private float healthBarFlashPeakAlpha = 0.7f;
+
+    [Tooltip("How quickly the health-bar flash image fades back to transparent.")]
+    [SerializeField] private float healthBarFlashFadeSpeed = 4.5f;
+
     [Header("Debug")]
     [SerializeField] private bool logChanges = false;
 
@@ -70,6 +85,11 @@ public class PlayerVitals : MonoBehaviour, IDamageable
         currentHealth = Mathf.Clamp(currentHealth, 0, maxHealth);
         rechargeHealthFloat = currentHealth;
         rechargeQueued = rechargeEnabled && currentHealth < maxHealth;
+
+        if (damageIndicator == null)
+            damageIndicator = FindFirstObjectByType<DamageDirectionIndicator>();
+
+        SetHealthBarFlashAlpha(0f);
         PushToUI();
     }
 
@@ -77,6 +97,8 @@ public class PlayerVitals : MonoBehaviour, IDamageable
     {
         if (invincTimer > 0f)
             invincTimer -= Time.deltaTime;
+
+        FadeHealthBarFlash();
 
         if (!rechargeEnabled || IsDead || currentHealth >= maxHealth || !rechargeQueued)
             return;
@@ -110,6 +132,26 @@ public class PlayerVitals : MonoBehaviour, IDamageable
 
     public bool Damage(int amount)
     {
+        return DamageInternal(amount, false, default);
+    }
+
+    public bool Damage(int amount, Vector3 sourceWorldPosition)
+    {
+        return DamageInternal(amount, true, sourceWorldPosition);
+    }
+
+    public void TakeDamageFromSource(int amount, Vector3 sourceWorldPosition)
+    {
+        DamageInternal(amount, true, sourceWorldPosition);
+    }
+
+    public void TakeDamageFromSource(float amount, Vector3 sourceWorldPosition)
+    {
+        DamageInternal(Mathf.RoundToInt(amount), true, sourceWorldPosition);
+    }
+
+    private bool DamageInternal(int amount, bool hasSource, Vector3 sourceWorldPosition)
+    {
         if (amount <= 0) return false;
         if (IsDead) return false;
         if (invincTimer > 0f) return false;
@@ -117,6 +159,11 @@ public class PlayerVitals : MonoBehaviour, IDamageable
         currentHealth -= amount;
         currentHealth = Mathf.Clamp(currentHealth, 0, maxHealth);
         rechargeHealthFloat = currentHealth;
+
+        if (hasSource && damageIndicator != null)
+            damageIndicator.FlashFromWorldPosition(sourceWorldPosition);
+
+        TriggerHealthBarFlash();
 
         if (currentHealth <= 0)
         {
@@ -133,7 +180,15 @@ public class PlayerVitals : MonoBehaviour, IDamageable
         }
 
         invincTimer = Mathf.Max(0f, invincibleSeconds);
-        if (logChanges) Debug.Log($"[PlayerVitals] Damage {amount} => {currentHealth}/{maxHealth}", this);
+
+        if (logChanges)
+        {
+            if (hasSource)
+                Debug.Log($"[PlayerVitals] Damage {amount} from {sourceWorldPosition} => {currentHealth}/{maxHealth}", this);
+            else
+                Debug.Log($"[PlayerVitals] Damage {amount} => {currentHealth}/{maxHealth}", this);
+        }
+
         return true;
     }
 
@@ -195,6 +250,37 @@ public class PlayerVitals : MonoBehaviour, IDamageable
 
         OnHealth01Changed?.Invoke(t);
         OnHealthChanged?.Invoke(currentHealth, maxHealth);
+    }
+
+    private void TriggerHealthBarFlash()
+    {
+        if (healthBarDamageFlashImage == null)
+            return;
+
+        SetHealthBarFlashAlpha(Mathf.Clamp01(healthBarFlashPeakAlpha));
+    }
+
+    private void FadeHealthBarFlash()
+    {
+        if (healthBarDamageFlashImage == null)
+            return;
+
+        Color c = healthBarDamageFlashImage.color;
+        if (c.a <= 0f)
+            return;
+
+        c.a = Mathf.MoveTowards(c.a, 0f, Mathf.Max(0f, healthBarFlashFadeSpeed) * Time.deltaTime);
+        healthBarDamageFlashImage.color = c;
+    }
+
+    private void SetHealthBarFlashAlpha(float alpha)
+    {
+        if (healthBarDamageFlashImage == null)
+            return;
+
+        Color c = healthBarDamageFlashImage.color;
+        c.a = Mathf.Clamp01(alpha);
+        healthBarDamageFlashImage.color = c;
     }
 
 #if UNITY_EDITOR
