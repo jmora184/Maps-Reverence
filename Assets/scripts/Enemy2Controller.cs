@@ -304,6 +304,51 @@ public class Enemy2Controller : MonoBehaviour
     public float maxShotPitch = 1.03f;
 
     
+    [Header("Footstep Audio (optional)")]
+    [Tooltip("Recommended: use a separate AudioSource for footsteps so they don't interfere with gunshots. If left empty, we'll try to find one on this enemy or its children.")]
+    public AudioSource footstepAudioSource;
+
+    [Tooltip("One or more footstep clips. If multiple are assigned, one is chosen randomly each step.")]
+    public AudioClip[] footstepSFX;
+
+    [Range(0f, 2f)]
+    [Tooltip("Volume multiplier used with PlayOneShot for footsteps.")]
+    public float footstepVolume = 0.7f;
+
+    [Tooltip("Seconds between footstep sounds while the enemy is moving.")]
+    public float footstepInterval = 0.42f;
+
+    [Tooltip("Minimum movement speed needed before footsteps start playing.")]
+    public float footstepMinMoveSpeed = 0.2f;
+
+    [Tooltip("If true, each footstep gets a slight pitch variation so repeated steps sound less robotic.")]
+    public bool randomizeFootstepPitch = true;
+
+    [Tooltip("Minimum random pitch used when Randomize Footstep Pitch is enabled.")]
+    public float minFootstepPitch = 0.95f;
+
+    [Tooltip("Maximum random pitch used when Randomize Footstep Pitch is enabled.")]
+    public float maxFootstepPitch = 1.05f;
+
+    [Header("Player Aggro Audio (optional)")]
+    [Tooltip("Optional one-time aggro/shoot bark that plays when this enemy first successfully fires at the PLAYER during an engagement. It will not play for ally aggro.")]
+    public AudioClip playerAggroSFX;
+
+    [Range(0f, 2f)]
+    [Tooltip("Volume multiplier used with PlayOneShot for the player aggro bark.")]
+    public float playerAggroVolume = 1f;
+
+    [Tooltip("AudioSource used for the player aggro bark. Leave empty to reuse Shot Audio Source.")]
+    public AudioSource playerAggroAudioSource;
+
+    [Tooltip("If enabled, the player aggro bark gets slight pitch variation.")]
+    public bool randomizePlayerAggroPitch = true;
+
+    [Tooltip("Minimum random pitch used when Randomize Player Aggro Pitch is enabled.")]
+    public float minPlayerAggroPitch = 0.97f;
+
+    [Tooltip("Maximum random pitch used when Randomize Player Aggro Pitch is enabled.")]
+    public float maxPlayerAggroPitch = 1.03f;
 
 [Header("Bullet Damage Factions")]
 [Tooltip("If true, this enemy's bullets can damage AnimalHealth targets.")]
@@ -368,6 +413,8 @@ public string bulletsAnimalTag = "Animal";
     private float shotWaitCounter;
     private float shootTimeCounter;
 
+    private float _footstepTimer;
+    private bool _playedPlayerAggroSfxThisEngagement;
 
     private float _damageAggroUntil = -1f;
 
@@ -421,6 +468,9 @@ public string bulletsAnimalTag = "Animal";
 
         ResolveShotAudioSourceIfNeeded();
 
+        ResolveFootstepAudioSourceIfNeeded();
+        ResolvePlayerAggroAudioSourceIfNeeded();
+
         // Root motion can move the character even when agent is stopped.
         if (anim != null) anim.applyRootMotion = false;
 
@@ -466,6 +516,7 @@ public string bulletsAnimalTag = "Animal";
         // Ally-style pause cycle (used by ChaseAndFightLikeAlly).
         _combatPauseTimer = 0f;
         _combatMoveBurstTimer = 0f;
+        _playedPlayerAggroSfxThisEngagement = false;
 
         // When we newly aggro (damage/orders), stay active for a bit (don't immediately enter stand-still pause).
         _forceStrafeUntilTime = Time.time + Mathf.Max(0f, forceStrafeAfterAggroSeconds);
@@ -711,6 +762,9 @@ public void SetWaterSlow(bool inWater, float speedMultiplier)
         // Apply water slow (if any) before movement decisions.
         ApplyWaterSlowToAgent();
 
+        // Footstep timing uses actual NavMeshAgent movement and resets itself when stopped.
+        HandleFootstepAudio();
+
         // Team leash: keep members from wandering too far from their EnemyTeam anchor/centroid.
         // If this returns true, we are currently returning to the team and should skip normal combat logic this frame.
         if (UpdateTeamLeash())
@@ -844,6 +898,7 @@ public void SetWaterSlow(bool inWater, float speedMultiplier)
         }
         if (!chasing)
         {
+            _playedPlayerAggroSfxThisEngagement = false;
             StopAgent();
             SetMovingAnim(false);
             UpdateSpeedParam();
@@ -1574,6 +1629,8 @@ void HandleShooting(Transform target)
             }
         }
 
+        TriggerPlayerAggroSoundIfNeeded(target);
+
         GameObject spawned = Instantiate(bullet, firePoint.position, firePoint.rotation);
 
         // Tag ownership so whoever we hit can aggro the correct attacker.
@@ -1630,6 +1687,82 @@ if (!string.IsNullOrEmpty(bulletsAnimalTag))
         shotAudioSource.PlayOneShot(shotSFX, Mathf.Max(0f, shotVolume));
     }
 
+
+    private void ResolveFootstepAudioSourceIfNeeded()
+    {
+        if (footstepAudioSource != null) return;
+
+        // Prefer a different AudioSource than the gunshot source when possible.
+        AudioSource[] sources = GetComponentsInChildren<AudioSource>(true);
+        for (int i = 0; i < sources.Length; i++)
+        {
+            if (sources[i] != null && sources[i] != shotAudioSource)
+            {
+                footstepAudioSource = sources[i];
+                footstepAudioSource.playOnAwake = false;
+                return;
+            }
+        }
+
+        // Fallback: reuse the same source if this enemy only has one.
+        footstepAudioSource = GetComponent<AudioSource>();
+        if (footstepAudioSource == null)
+            footstepAudioSource = GetComponentInChildren<AudioSource>();
+
+        if (footstepAudioSource != null)
+            footstepAudioSource.playOnAwake = false;
+    }
+
+    private void HandleFootstepAudio()
+    {
+        if (agent == null)
+        {
+            _footstepTimer = 0f;
+            return;
+        }
+
+        bool isActuallyMoving = !agent.isStopped &&
+                                Mathf.Max(agent.velocity.magnitude, agent.desiredVelocity.magnitude) >
+                                Mathf.Max(0.01f, footstepMinMoveSpeed);
+
+        if (!isActuallyMoving)
+        {
+            _footstepTimer = 0f;
+            return;
+        }
+
+        if (footstepSFX == null || footstepSFX.Length == 0)
+            return;
+
+        ResolveFootstepAudioSourceIfNeeded();
+        if (footstepAudioSource == null)
+            return;
+
+        _footstepTimer -= Time.deltaTime;
+        if (_footstepTimer > 0f)
+            return;
+
+        AudioClip clip = footstepSFX[Random.Range(0, footstepSFX.Length)];
+        if (clip == null)
+        {
+            _footstepTimer = Mathf.Max(0.05f, footstepInterval);
+            return;
+        }
+
+        if (randomizeFootstepPitch)
+        {
+            float min = Mathf.Min(minFootstepPitch, maxFootstepPitch);
+            float max = Mathf.Max(minFootstepPitch, maxFootstepPitch);
+            footstepAudioSource.pitch = Random.Range(min, max);
+        }
+        else
+        {
+            footstepAudioSource.pitch = 1f;
+        }
+
+        footstepAudioSource.PlayOneShot(clip, Mathf.Max(0f, footstepVolume));
+        _footstepTimer = Mathf.Max(0.05f, footstepInterval);
+    }
 
     private void StopAgent()
     {
@@ -1863,6 +1996,7 @@ if (!string.IsNullOrEmpty(bulletsAnimalTag))
         chaseCounter = 0f;
 
         // Stop shooting immediately
+        _playedPlayerAggroSfxThisEngagement = false;
         shootTimeCounter = 0f;
         shotWaitCounter = 0f;
         fireCount = 0f;
@@ -1904,6 +2038,54 @@ if (!string.IsNullOrEmpty(bulletsAnimalTag))
         return false;
     }
 
+
+    private bool IsPlayerTransform(Transform t)
+    {
+        if (t == null) return false;
+        if (_playerFallback != null)
+        {
+            if (t == _playerFallback || t.IsChildOf(_playerFallback) || _playerFallback.IsChildOf(t))
+                return true;
+        }
+
+        return t.CompareTag("Player") || (t.root != null && t.root.CompareTag("Player"));
+    }
+
+    private void ResolvePlayerAggroAudioSourceIfNeeded()
+    {
+        if (playerAggroAudioSource != null) return;
+        if (shotAudioSource != null)
+        {
+            playerAggroAudioSource = shotAudioSource;
+            return;
+        }
+
+        playerAggroAudioSource = GetComponent<AudioSource>();
+        if (playerAggroAudioSource == null)
+            playerAggroAudioSource = GetComponentInChildren<AudioSource>();
+    }
+
+    private void TriggerPlayerAggroSoundIfNeeded(Transform target)
+    {
+        if (_playedPlayerAggroSfxThisEngagement) return;
+        if (playerAggroSFX == null) return;
+        if (!IsPlayerTransform(target)) return;
+
+        ResolvePlayerAggroAudioSourceIfNeeded();
+        if (playerAggroAudioSource == null) return;
+
+        float oldPitch = playerAggroAudioSource.pitch;
+        if (randomizePlayerAggroPitch)
+        {
+            float min = Mathf.Min(minPlayerAggroPitch, maxPlayerAggroPitch);
+            float max = Mathf.Max(minPlayerAggroPitch, maxPlayerAggroPitch);
+            playerAggroAudioSource.pitch = Random.Range(min, max);
+        }
+
+        playerAggroAudioSource.PlayOneShot(playerAggroSFX, playerAggroVolume);
+        playerAggroAudioSource.pitch = oldPitch;
+        _playedPlayerAggroSfxThisEngagement = true;
+    }
 
     private void TriggerMuzzleFlashSimple()
     {

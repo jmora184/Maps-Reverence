@@ -23,6 +23,11 @@ public class PlayerWeaponReloadAnimation : MonoBehaviour
     [Tooltip("Magazine GameObject to hide/show (ex: AR_A_Mag). If left null, we will try to auto-find a child named 'AR_A_Mag' under the weapon visual.")]
     public GameObject magazineObject;
 
+    [Header("Reload Audio (optional)")]
+    public AudioClip reloadSFX;
+    public AudioSource reloadAudioSource;
+    [Range(0f, 1f)] public float reloadVolume = 1f;
+
     [Header("Motion (per-weapon values)")]
     public Vector3 reloadLocalOffset = new Vector3(0.05f, -0.08f, 0.22f);
     public Vector3 reloadLocalEuler = new Vector3(-18f, 6f, 0f);
@@ -177,6 +182,8 @@ public class PlayerWeaponReloadAnimation : MonoBehaviour
         if (!_weaponCached)
             CacheWeaponStart();
 
+        PlayReloadSound();
+
         Vector3 localOffset = reloadLocalOffset;
         Vector3 localEuler = reloadLocalEuler;
         float moveDur = Mathf.Max(0.001f, reloadMoveDuration);
@@ -289,6 +296,27 @@ public class PlayerWeaponReloadAnimation : MonoBehaviour
             magazineObject.SetActive(true);
             magShownAgain = true;
         }
+    }
+
+    void PlayReloadSound()
+    {
+        if (reloadSFX == null) return;
+
+        AudioSource src = ResolveReloadAudioSourceIfNeeded();
+        if (src == null) return;
+
+        src.PlayOneShot(reloadSFX, Mathf.Clamp01(reloadVolume));
+    }
+
+    AudioSource ResolveReloadAudioSourceIfNeeded()
+    {
+        if (reloadAudioSource != null) return reloadAudioSource;
+
+        reloadAudioSource = GetComponent<AudioSource>();
+        if (reloadAudioSource != null) return reloadAudioSource;
+
+        reloadAudioSource = GetComponentInParent<AudioSource>();
+        return reloadAudioSource;
     }
 
     void RestorePlayerShootBlock()

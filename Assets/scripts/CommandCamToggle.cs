@@ -21,6 +21,8 @@ public class CommandCamToggle : MonoBehaviour
     public CommandExecutor executor;   // drag your CommandExecutor (or it will auto-find)
 
     [Header("Keys")]
+    public bool useSingleToggleKey = true;
+    public KeyCode toggleCommandKey = KeyCode.Tab;
     public KeyCode enterCommandKey = KeyCode.K;
     public KeyCode exitCommandKey = KeyCode.L;
 
@@ -74,11 +76,19 @@ public class CommandCamToggle : MonoBehaviour
 
     private void Update()
     {
-        if (!isCommandMode && Input.GetKeyDown(enterCommandKey))
-            SetCommandMode(true);
+        if (useSingleToggleKey)
+        {
+            if (Input.GetKeyDown(toggleCommandKey))
+                SetCommandMode(!isCommandMode);
+        }
+        else
+        {
+            if (!isCommandMode && Input.GetKeyDown(enterCommandKey))
+                SetCommandMode(true);
 
-        if (isCommandMode && Input.GetKeyDown(exitCommandKey))
-            SetCommandMode(false);
+            if (isCommandMode && Input.GetKeyDown(exitCommandKey))
+                SetCommandMode(false);
+        }
 
         RefreshLegendVisibility(isCommandMode);
     }

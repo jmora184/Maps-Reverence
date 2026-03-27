@@ -1,20 +1,3 @@
-// CommandCameraZoomPan.cs
-// Drop this onto your CommandCamera GameObject.
-//
-// Zoom (H): cycles through the zoomLevels array.
-// Rule requested:
-// - When zoom index == 0 (full/default zoom), force X back to 250.
-// - When zoom index == 0 (full/default zoom), force Z back to 487.
-// - When zoom index == 0, camera size is the Element 0 size (default 1350).
-// - Zoomed-in levels still center on the player.
-//
-// Panning (only when zoomed in, unless allowPanningAtFullMap = true):
-//   W = +Z (up on screen)
-//   A = -X (left on screen)
-//   S = -Z (down on screen)
-//   D = +X (right on screen)
-// Arrow keys follow the same screen-space mapping.
-
 using UnityEngine;
 
 [DisallowMultipleComponent]
@@ -31,8 +14,17 @@ public class CommandCameraZoomPan : MonoBehaviour
     public Terrain terrainBounds;
 
     [Header("Zoom")]
-    [Tooltip("Key to cycle zoom levels.")]
+    [Tooltip("Optional keyboard key to cycle zoom levels.")]
     public KeyCode zoomKey = KeyCode.H;
+
+    [Tooltip("If true, the zoomKey above still works.")]
+    public bool allowZoomKey = true;
+
+    [Tooltip("If true, mouse wheel zoom is enabled.")]
+    public bool useMouseWheelZoom = true;
+
+    [Tooltip("Minimum scroll amount before a zoom step is triggered.")]
+    public float mouseWheelThreshold = 0.01f;
 
     [Tooltip("Orthographic sizes to cycle through. Element 0 is the default/full zoom.")]
     public float[] zoomLevels = new float[] { 1350f, 1100f, 700f, 500f };
@@ -93,6 +85,10 @@ public class CommandCameraZoomPan : MonoBehaviour
     void Reset()
     {
         commandCamera = GetComponent<Camera>();
+        zoomKey = KeyCode.H;
+        allowZoomKey = true;
+        useMouseWheelZoom = true;
+        mouseWheelThreshold = 0.01f;
         zoomLevels = new float[] { 1350f, 1100f, 700f, 500f };
         startZoomIndex = 0;
 
@@ -114,6 +110,7 @@ public class CommandCameraZoomPan : MonoBehaviour
         if (panSpeedAt700 < 0f) panSpeedAt700 = 0f;
         if (boundsPadding < 0f) boundsPadding = 0f;
         if (commandModeEntryOrthoSize < 1f) commandModeEntryOrthoSize = 1f;
+        if (mouseWheelThreshold < 0.0001f) mouseWheelThreshold = 0.0001f;
 
         EnsureZoomLevelsValid();
     }
@@ -151,18 +148,49 @@ public class CommandCameraZoomPan : MonoBehaviour
     {
         if (zoomLevels == null || zoomLevels.Length == 0) return;
 
-        if (Input.GetKeyDown(zoomKey))
-            CycleZoom();
+        if (allowZoomKey && Input.GetKeyDown(zoomKey))
+            CycleZoomIn();
 
+        HandleMouseWheelZoom();
         HandlePanning_CustomAxes();
 
         if (_zoomIndex == 0)
             ApplyZoomIndexZeroRule();
     }
 
-    private void CycleZoom()
+    private void HandleMouseWheelZoom()
     {
-        _zoomIndex = (_zoomIndex + 1) % zoomLevels.Length;
+        if (!useMouseWheelZoom) return;
+
+        float scroll = Input.GetAxis("Mouse ScrollWheel");
+        if (scroll > mouseWheelThreshold)
+        {
+            // Mouse wheel forward = zoom in.
+            StepZoom(+1);
+        }
+        else if (scroll < -mouseWheelThreshold)
+        {
+            // Mouse wheel backward = zoom out.
+            StepZoom(-1);
+        }
+    }
+
+    private void CycleZoomIn()
+    {
+        int nextIndex = (_zoomIndex + 1) % zoomLevels.Length;
+        ApplyZoomIndex(nextIndex);
+    }
+
+    private void StepZoom(int delta)
+    {
+        int nextIndex = Mathf.Clamp(_zoomIndex + delta, 0, zoomLevels.Length - 1);
+        if (nextIndex == _zoomIndex) return;
+        ApplyZoomIndex(nextIndex);
+    }
+
+    private void ApplyZoomIndex(int newIndex)
+    {
+        _zoomIndex = Mathf.Clamp(newIndex, 0, zoomLevels.Length - 1);
 
         bool isDefaultZoom = (_zoomIndex == 0);
         ApplyZoom(_zoomIndex, centerOnPlayer: !isDefaultZoom);

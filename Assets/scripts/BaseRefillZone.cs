@@ -8,7 +8,7 @@ using UnityEngine;
 /// When something enters:
 /// - Player: refills health + ammo + grenades
 /// - Allies: refills health (no AllyController edits required)
-///
+/// 
 /// IMPORTANT (Unity trigger rule):
 /// OnTriggerEnter/Stay requires at least ONE of the two colliders to have a Rigidbody (can be kinematic),
 /// OR a CharacterController. If your allies have only colliders + NavMeshAgent, add a kinematic Rigidbody to ally root.
@@ -49,6 +49,17 @@ public class BaseRefillZone : MonoBehaviour
 
     [Tooltip("Log what it refilled (useful while testing).")]
     public bool debugLogs = false;
+
+    [Header("Audio")]
+    [Tooltip("Optional sound to play each time the player refill is triggered.")]
+    public AudioClip playerRefillSfx;
+
+    [Tooltip("Volume for the player refill sound.")]
+    [Range(0f, 1f)]
+    public float playerRefillSfxVolume = 1f;
+
+    [Tooltip("Optional AudioSource override. If left empty, the script uses PlayClipAtPoint.")]
+    public AudioSource playerRefillAudioSource;
 
     private float _nextAllowedTime = 0f;
 
@@ -162,9 +173,28 @@ public class BaseRefillZone : MonoBehaviour
         var player = ResolvePlayer(other);
         if (player == null) return;
 
-        if (refillHealth) RefillPlayerHealth(player);
-        if (refillAmmo) RefillPlayerAmmo(player);
-        if (refillGrenades) RefillPlayerGrenades(player);
+        bool didAnyPlayerRefill = false;
+
+        if (refillHealth)
+        {
+            RefillPlayerHealth(player);
+            didAnyPlayerRefill = true;
+        }
+
+        if (refillAmmo)
+        {
+            RefillPlayerAmmo(player);
+            didAnyPlayerRefill = true;
+        }
+
+        if (refillGrenades)
+        {
+            RefillPlayerGrenades(player);
+            didAnyPlayerRefill = true;
+        }
+
+        if (didAnyPlayerRefill)
+            PlayPlayerRefillSfx(player.transform.position);
 
         _nextAllowedTime = Time.time + Mathf.Max(0.05f, repeatCooldown);
 
@@ -176,6 +206,19 @@ public class BaseRefillZone : MonoBehaviour
             if (refillGrenades) parts.Add("grenades");
             Debug.Log($"[BaseRefillZone] Refilled {string.Join(" + ", parts)} for {player.name} ({(entering ? "enter" : "stay")}).", this);
         }
+    }
+
+    private void PlayPlayerRefillSfx(Vector3 worldPosition)
+    {
+        if (playerRefillSfx == null) return;
+
+        if (playerRefillAudioSource != null)
+        {
+            playerRefillAudioSource.PlayOneShot(playerRefillSfx, playerRefillSfxVolume);
+            return;
+        }
+
+        AudioSource.PlayClipAtPoint(playerRefillSfx, worldPosition, playerRefillSfxVolume);
     }
 
     private GameObject ResolvePlayer(Collider other)

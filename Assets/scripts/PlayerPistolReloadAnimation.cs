@@ -34,6 +34,11 @@ public class PlayerPistolReloadAnimation : MonoBehaviour
     [Tooltip("Magazine Transform to slide in/out (pistol mag). If null, we try to auto-find a child named 'Magazine' under the weapon visual.")]
     public Transform magazineTransform;
 
+    [Header("Reload Audio (optional)")]
+    public AudioClip reloadSFX;
+    public AudioSource reloadAudioSource;
+    [Range(0f, 1f)] public float reloadVolume = 1f;
+
     [Header("Motion (per-weapon values)")]
     public Vector3 reloadLocalOffset = new Vector3(0.05f, -0.08f, 0.22f);
     public Vector3 reloadLocalEuler = new Vector3(-18f, 6f, 0f);
@@ -82,6 +87,20 @@ public class PlayerPistolReloadAnimation : MonoBehaviour
 
     private Coroutine _magSlideCo;
 
+    private Player2Controller _blockedPlayerController;
+    private bool _capturedPrevShootBlock;
+    private bool _prevPlayerShootBlock;
+
+    private void OnDisable()
+    {
+        CancelReloadAndReset();
+    }
+
+    private void OnDestroy()
+    {
+        CancelReloadAndReset();
+    }
+
     void Update()
     {
         if (Input.GetKeyDown(reloadKey))
@@ -97,8 +116,56 @@ public class PlayerPistolReloadAnimation : MonoBehaviour
 
         ResolveMagazineTransform();
 
-        if (_reloadCo != null) StopCoroutine(_reloadCo);
+        if (_reloadCo != null)
+            StopCoroutine(_reloadCo);
+
         _reloadCo = StartCoroutine(ReloadRoutine());
+    }
+
+    /// <summary>
+    /// Call this from weapon-switch code if you want an explicit cleanup before deactivating the weapon.
+    /// </summary>
+    public void CancelReload()
+    {
+        CancelReloadAndReset();
+    }
+
+    private void CancelReloadAndReset()
+    {
+        if (_reloadCo != null)
+        {
+            StopCoroutine(_reloadCo);
+            _reloadCo = null;
+        }
+
+        if (_magSlideCo != null)
+        {
+            StopCoroutine(_magSlideCo);
+            _magSlideCo = null;
+        }
+
+        if (_weaponVisual != null)
+        {
+            if (_weaponCached)
+            {
+                _weaponVisual.localPosition = _weaponStartPos;
+                _weaponVisual.localRotation = _weaponStartRot;
+            }
+            else
+            {
+                _weaponVisual.localPosition = Vector3.zero;
+                _weaponVisual.localRotation = Quaternion.identity;
+            }
+        }
+
+        if (magazineTransform != null)
+        {
+            SetMagazineLocalX(insertedLocalX, instant: true);
+        }
+
+        RestorePlayerShootBlock();
+
+        _isReloading = false;
     }
 
     void ResolveWeaponVisual()
@@ -159,10 +226,13 @@ public class PlayerPistolReloadAnimation : MonoBehaviour
         if (_weaponVisual == null)
         {
             _isReloading = false;
+            _reloadCo = null;
             yield break;
         }
 
         if (!_weaponCached) CacheWeaponStart();
+
+        PlayReloadSound();
 
         Vector3 localOffset = reloadLocalOffset;
         Vector3 localEuler = reloadLocalEuler;
@@ -179,16 +249,14 @@ public class PlayerPistolReloadAnimation : MonoBehaviour
         }
 
         // Also block the Player2Controller shooting loop.
-        bool prevPlayerShootBlock = false;
-        bool capturedPrevBlock = false;
         if (blockPlayerControllerShooting)
         {
-            var pc = FindPlayerController();
-            if (pc != null)
+            _blockedPlayerController = FindPlayerController();
+            if (_blockedPlayerController != null)
             {
-                prevPlayerShootBlock = pc.blockShooting;
-                capturedPrevBlock = true;
-                pc.blockShooting = true;
+                _prevPlayerShootBlock = _blockedPlayerController.blockShooting;
+                _capturedPrevShootBlock = true;
+                _blockedPlayerController.blockShooting = true;
             }
         }
 
@@ -207,6 +275,8 @@ public class PlayerPistolReloadAnimation : MonoBehaviour
         float t = 0f;
         while (t < 1f)
         {
+            if (_weaponVisual == null) break;
+
             t += Time.deltaTime / moveDur;
             float s = Smooth01(t);
             _weaponVisual.localPosition = Vector3.Lerp(fromPos, toPos, s);
@@ -223,6 +293,8 @@ public class PlayerPistolReloadAnimation : MonoBehaviour
             float holdT = 0f;
             while (holdT < hold)
             {
+                if (_weaponVisual == null) break;
+
                 holdT += Time.deltaTime;
 
                 elapsed += Time.deltaTime;
@@ -235,6 +307,8 @@ public class PlayerPistolReloadAnimation : MonoBehaviour
         t = 0f;
         while (t < 1f)
         {
+            if (_weaponVisual == null) break;
+
             t += Time.deltaTime / moveDur;
             float s = Smooth01(t);
             _weaponVisual.localPosition = Vector3.Lerp(toPos, fromPos, s);
@@ -246,18 +320,16 @@ public class PlayerPistolReloadAnimation : MonoBehaviour
         }
 
         // Ensure we end cleanly.
-        _weaponVisual.localPosition = fromPos;
-        _weaponVisual.localRotation = fromRot;
+        if (_weaponVisual != null)
+        {
+            _weaponVisual.localPosition = fromPos;
+            _weaponVisual.localRotation = fromRot;
+        }
 
         // Ensure mag ends "inserted"
         SetMagazineLocalX(insertedLocalX, instant: true);
 
-        // Restore previous shooting block state if we changed it.
-        if (capturedPrevBlock)
-        {
-            var pc = FindPlayerController();
-            if (pc != null) pc.blockShooting = prevPlayerShootBlock;
-        }
+        RestorePlayerShootBlock();
 
         _isReloading = false;
         _reloadCo = null;
@@ -322,6 +394,39 @@ public class PlayerPistolReloadAnimation : MonoBehaviour
 
         magazineTransform.localPosition = end;
         _magSlideCo = null;
+    }
+
+    void PlayReloadSound()
+    {
+        if (reloadSFX == null) return;
+
+        AudioSource src = ResolveReloadAudioSourceIfNeeded();
+        if (src == null) return;
+
+        src.PlayOneShot(reloadSFX, Mathf.Clamp01(reloadVolume));
+    }
+
+    AudioSource ResolveReloadAudioSourceIfNeeded()
+    {
+        if (reloadAudioSource != null) return reloadAudioSource;
+
+        reloadAudioSource = GetComponent<AudioSource>();
+        if (reloadAudioSource != null) return reloadAudioSource;
+
+        reloadAudioSource = GetComponentInParent<AudioSource>();
+        return reloadAudioSource;
+    }
+
+    void RestorePlayerShootBlock()
+    {
+        if (_capturedPrevShootBlock && _blockedPlayerController != null)
+        {
+            _blockedPlayerController.blockShooting = _prevPlayerShootBlock;
+        }
+
+        _blockedPlayerController = null;
+        _capturedPrevShootBlock = false;
+        _prevPlayerShootBlock = false;
     }
 
     static float Smooth01(float t)
