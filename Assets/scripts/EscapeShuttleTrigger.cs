@@ -14,17 +14,29 @@ public class EscapeShuttleTrigger : MonoBehaviour
     [Tooltip("Hide the UI at startup.")]
     public bool hideUIAtStart = true;
 
+    [Header("Cursor")]
+    [Tooltip("Unlock and show the mouse cursor while the end game UI is visible.")]
+    public bool unlockCursorWhenUIVisible = true;
+
     private bool playerInRange = false;
 
     private void Start()
     {
         if (hideUIAtStart && endGameUI != null)
             endGameUI.SetActive(false);
+
+        ApplyCursorState();
     }
 
     private void OnEnable()
     {
         RefreshUI();
+    }
+
+    private void OnDisable()
+    {
+        if (unlockCursorWhenUIVisible)
+            SetCursorLocked(true);
     }
 
     private void OnTriggerEnter(Collider other)
@@ -56,6 +68,25 @@ public class EscapeShuttleTrigger : MonoBehaviour
         if (endGameUI == null) return;
 
         bool shuttleUnlocked = EnemyDestroyTracker.Instance != null && EnemyDestroyTracker.Instance.ShuttleUnlocked;
-        endGameUI.SetActive(playerInRange && shuttleUnlocked);
+        bool shouldShow = playerInRange && shuttleUnlocked;
+
+        if (endGameUI.activeSelf != shouldShow)
+            endGameUI.SetActive(shouldShow);
+
+        ApplyCursorState();
+    }
+
+    private void ApplyCursorState()
+    {
+        if (!unlockCursorWhenUIVisible) return;
+
+        bool uiVisible = endGameUI != null && endGameUI.activeInHierarchy;
+        SetCursorLocked(!uiVisible);
+    }
+
+    private void SetCursorLocked(bool locked)
+    {
+        Cursor.lockState = locked ? CursorLockMode.Locked : CursorLockMode.None;
+        Cursor.visible = !locked;
     }
 }

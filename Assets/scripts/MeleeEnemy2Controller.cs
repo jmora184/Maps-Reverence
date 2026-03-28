@@ -539,9 +539,8 @@ private void CombatTick()
     public void GetShot(Transform attacker)
     {
         if (isDead) return;
-        if (attacker == null) return;
-        if (shotAggroDistance <= 0f || Vector3.Distance(transform.position, attacker.position) <= shotAggroDistance)
-            SetCombatTarget(attacker);
+        if (!ShouldAggroFromShotAttacker(attacker)) return;
+        SetCombatTarget(attacker);
     }
 
     public void TakeDamage(float damage)
@@ -654,6 +653,20 @@ private void CombatTick()
     {
         yield return new WaitForSeconds(seconds);
         Destroy(gameObject);
+    }
+
+    private bool ShouldAggroFromShotAttacker(Transform attacker)
+    {
+        if (attacker == null) return false;
+
+        // Surgical fix: ignore accidental bullet hits from other Enemy-tagged units.
+        if (attacker.CompareTag("Enemy"))
+            return false;
+
+        if (shotAggroDistance > 0f && Vector3.Distance(transform.position, attacker.position) > shotAggroDistance)
+            return false;
+
+        return true;
     }
 
     public void ClearCombatTarget() => EndCombatAndReturnToPatrol();

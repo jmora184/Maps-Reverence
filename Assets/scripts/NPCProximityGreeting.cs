@@ -174,6 +174,25 @@ public class NPCProximityGreeting : MonoBehaviour
     [Tooltip("Drag the character's weapon GameObject here (e.g., NPC w_usp45). DO NOT set this to Player.")]
     public GameObject weaponObject;
 
+
+[Header("Audio / SFX")]
+[Tooltip("Optional AudioSource used to play UI/talk SFX. If left empty, we will try GetComponent<AudioSource>() and (if needed) add one at runtime when a clip is assigned.")]
+[SerializeField] private AudioSource sfxSource;
+
+[Tooltip("Plays when the dialog opens (auto-open or press-key).")]
+public AudioClip dialogOpenSfx;
+
+[Tooltip("Optional: plays when the 'Press P to talk' prompt appears (press-key mode).")]
+public AudioClip promptShowSfx;
+
+[Range(0f, 1f)]
+[Tooltip("Volume multiplier for SFX played by this script.")]
+public float sfxVolume = 1f;
+
+[Tooltip("Minimum time (seconds) between SFX plays to prevent rapid retriggers.")]
+public float sfxCooldownSeconds = 0.12f;
+
+
     [Header("Debug")]
     public bool debugLogs = false;
 
@@ -189,6 +208,8 @@ public class NPCProximityGreeting : MonoBehaviour
     private string _lastShownPrompt;
 
     private readonly Dictionary<string, bool> _externalConditionFlags = new Dictionary<string, bool>();
+
+    private float _nextAllowedSfxTime;
 
     // Animator param caches
     private int _talkingHash;
@@ -256,6 +277,43 @@ public class NPCProximityGreeting : MonoBehaviour
         var go = GameObject.FindGameObjectWithTag(playerTag);
         return go ? go.transform : null;
     }
+
+
+
+private void EnsureSfxSource()
+{
+    if (sfxSource != null) return;
+
+    sfxSource = GetComponent<AudioSource>();
+
+    // Only auto-add a source if you actually assigned at least one clip.
+    if (sfxSource == null && (dialogOpenSfx != null || promptShowSfx != null))
+    {
+        sfxSource = gameObject.AddComponent<AudioSource>();
+        sfxSource.playOnAwake = false;
+
+        // Default to 3D-ish audio so it feels like it comes from the NPC.
+        // Feel free to tweak these in the inspector on the AudioSource if you assign one manually.
+        sfxSource.spatialBlend = 1f;
+        sfxSource.rolloffMode = AudioRolloffMode.Linear;
+        sfxSource.minDistance = 1f;
+        sfxSource.maxDistance = 15f;
+    }
+}
+
+private void PlaySfx(AudioClip clip)
+{
+    if (clip == null) return;
+
+    // Throttle to avoid spam if something toggles rapidly.
+    if (Time.time < _nextAllowedSfxTime) return;
+
+    EnsureSfxSource();
+    if (sfxSource == null) return;
+
+    sfxSource.PlayOneShot(clip, Mathf.Clamp01(sfxVolume));
+    _nextAllowedSfxTime = Time.time + Mathf.Max(0f, sfxCooldownSeconds);
+}
 
     private void Update()
     {
@@ -364,6 +422,7 @@ public class NPCProximityGreeting : MonoBehaviour
         {
             _lastShownPrompt = ResolvePromptMessage();
             RecruitPromptUI.Show(_lastShownPrompt);
+            PlaySfx(promptShowSfx);
             _promptShown = true;
         }
     }
@@ -382,6 +441,7 @@ public class NPCProximityGreeting : MonoBehaviour
     {
         _lastShownGreeting = ResolveGreetingMessage();
         dialogUI.Show(_lastShownGreeting);
+        PlaySfx(dialogOpenSfx);
         _dialogOpen = true;
         SetTalking(true);
     }

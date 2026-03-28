@@ -11,6 +11,9 @@ public class CommandCamToggle : MonoBehaviour
     public GameObject commandUIRoot;
     public GameObject commandLegendPanel;
 
+    [Header("Optional: hide shared NPC dialog while in Command Mode")]
+    public NPCDialogBoxUI npcDialogBoxUI; // drag NPCDialogBox here (or leave blank to auto-find)
+
     [Header("Optional: overlay to refresh when entering command mode")]
     public CommandOverlayUI overlayUI; // drag MiniUI (has CommandOverlayUI)
 
@@ -52,6 +55,7 @@ public class CommandCamToggle : MonoBehaviour
         Instance = this;
 
         if (executor == null) executor = FindObjectOfType<CommandExecutor>();
+        if (npcDialogBoxUI == null) npcDialogBoxUI = FindFirstObjectByType<NPCDialogBoxUI>(FindObjectsInactive.Include);
         CacheZoomPan();
 
         // Keep the UI object active so its scripts always initialize;
@@ -106,6 +110,9 @@ public class CommandCamToggle : MonoBehaviour
     {
         if (pauseGameInCommandMode)
             Time.timeScale = on ? commandModeTimeScale : fpsTimeScale;
+
+        if (on && npcDialogBoxUI != null)
+            npcDialogBoxUI.Hide();
 
         // UI visibility
         if (commandUIRoot != null)

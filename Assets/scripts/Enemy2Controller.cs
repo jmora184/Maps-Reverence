@@ -497,6 +497,11 @@ public string bulletsAnimalTag = "Animal";
             deathController.OnDied -= HandleDeathControllerDied;
     }
 
+    private void OnDisable()
+    {
+        DisableMuzzleFlashImmediate();
+    }
+
     void Start()
     {
         shootTimeCounter = timeToShoot;
@@ -1873,6 +1878,7 @@ if (!string.IsNullOrEmpty(bulletsAnimalTag))
     {
         // DeathController was triggered (usually by EnemyHealthController). Make sure this AI cannot keep acting.
         _isDead = true;
+        DisableMuzzleFlashImmediate();
 
         if (agent != null)
         {
@@ -1902,6 +1908,7 @@ if (!string.IsNullOrEmpty(bulletsAnimalTag))
     {
         if (_isDead) return;
         _isDead = true;
+        DisableMuzzleFlashImmediate();
 
         // Stop movement immediately.
         if (agent != null)
@@ -2085,6 +2092,21 @@ if (!string.IsNullOrEmpty(bulletsAnimalTag))
         playerAggroAudioSource.PlayOneShot(playerAggroSFX, playerAggroVolume);
         playerAggroAudioSource.pitch = oldPitch;
         _playedPlayerAggroSfxThisEngagement = true;
+    }
+
+    private void DisableMuzzleFlashImmediate()
+    {
+        if (_muzzleFlashRoutine != null)
+        {
+            StopCoroutine(_muzzleFlashRoutine);
+            _muzzleFlashRoutine = null;
+        }
+
+        if (muzzleFlashObject != null && muzzleFlashObject.activeSelf)
+        {
+            muzzleFlashObject.SetActive(false);
+            if (debugMuzzleFlash) Debug.Log($"[Enemy2Controller] MuzzleFlash FORCE OFF: {muzzleFlashObject.name}", muzzleFlashObject);
+        }
     }
 
     private void TriggerMuzzleFlashSimple()

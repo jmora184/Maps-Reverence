@@ -50,7 +50,7 @@ public class BaseActivator : MonoBehaviour
     [SerializeField] private GameObject enemyDetectedWarningUI;
 
     [Header("Post-Activation Countdown")]
-    [Tooltip("Optional TMP text shown as 'Game Over in 59' while this base has already been activated and an enemy is detected in range.")]
+    [Tooltip("Optional TMP text shown as 'Game Over in 120' while this base has already been activated and an enemy is detected in range.")]
     [SerializeField] private TMP_Text gameOverCountdownText;
     [SerializeField] private string startScreenSceneName = "StartScreen";
 
@@ -69,7 +69,7 @@ public class BaseActivator : MonoBehaviour
     [SerializeField] private UnityEvent onActivated;
     [SerializeField] private UnityEvent onActivationBlockedByEnemies;
 
-    private const float GameOverCountdownStartSeconds = 59f;
+    private const float GameOverCountdownStartSeconds = 120f;
 
     private Transform player;
     private bool playerInRange;
@@ -80,6 +80,8 @@ public class BaseActivator : MonoBehaviour
     private float gameOverCountdownRemaining = GameOverCountdownStartSeconds;
     private readonly Collider[] overlapResults = new Collider[128];
     private static readonly Dictionary<int, BaseActivator> blockedPromptOwners = new Dictionary<int, BaseActivator>();
+    private static readonly Dictionary<int, BaseActivator> enemyWarningUIOwners = new Dictionary<int, BaseActivator>();
+    private static readonly Dictionary<int, BaseActivator> gameOverCountdownOwners = new Dictionary<int, BaseActivator>();
 
     public bool IsActivated => hasActivated;
     public bool AreEnemiesDetectedInArea => AreEnemiesActiveInArea();
@@ -303,8 +305,22 @@ public class BaseActivator : MonoBehaviour
         if (enemyDetectedWarningUI == null)
             return;
 
-        enemyDetectedWarningUI.SetActive(visible);
-        enemyWarningVisibleByThisScript = visible;
+        int key = enemyDetectedWarningUI.GetInstanceID();
+
+        if (visible)
+        {
+            enemyWarningUIOwners[key] = this;
+            enemyDetectedWarningUI.SetActive(true);
+            enemyWarningVisibleByThisScript = true;
+            return;
+        }
+
+        if (enemyWarningUIOwners.TryGetValue(key, out BaseActivator owner) && owner != this)
+            return;
+
+        enemyWarningUIOwners.Remove(key);
+        enemyDetectedWarningUI.SetActive(false);
+        enemyWarningVisibleByThisScript = false;
     }
 
     private void SetGameOverCountdownVisible(bool visible)
@@ -312,12 +328,37 @@ public class BaseActivator : MonoBehaviour
         if (gameOverCountdownText == null)
             return;
 
-        gameOverCountdownText.gameObject.SetActive(visible);
+        int key = gameOverCountdownText.gameObject.GetInstanceID();
+
+        if (visible)
+        {
+            gameOverCountdownOwners[key] = this;
+            gameOverCountdownText.gameObject.SetActive(true);
+            return;
+        }
+
+        if (gameOverCountdownOwners.TryGetValue(key, out BaseActivator owner) && owner != this)
+            return;
+
+        gameOverCountdownOwners.Remove(key);
+        gameOverCountdownText.gameObject.SetActive(false);
+    }
+
+    private bool IsGameOverCountdownOwnedByThisScript()
+    {
+        if (gameOverCountdownText == null)
+            return false;
+
+        int key = gameOverCountdownText.gameObject.GetInstanceID();
+        return gameOverCountdownText.gameObject.activeSelf && (!gameOverCountdownOwners.TryGetValue(key, out BaseActivator owner) || owner == this);
     }
 
     private void UpdateGameOverCountdownText()
     {
         if (gameOverCountdownText == null)
+            return;
+
+        if (gameOverCountdownText.gameObject.activeSelf && !IsGameOverCountdownOwnedByThisScript())
             return;
 
         gameOverCountdownText.text = "Game Over in " + Mathf.CeilToInt(gameOverCountdownRemaining);
