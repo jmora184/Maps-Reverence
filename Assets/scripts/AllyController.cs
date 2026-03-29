@@ -44,6 +44,34 @@ public class AllyController : MonoBehaviour
     private float travelFollowTimer;
     public float distanceToChase = 10f, distanceToLose = 15f, distanceToStop = 2f;
 
+    [Header("Follower Long-Range Combat")]
+    [Tooltip("If true, allies actively following a PlayerSquadFollowSystem slot use the long-range combat values below.")]
+    public bool enableFollowerLongRangeCombat = true;
+
+    [Tooltip("Auto-acquire enemies out to this distance while actively following the player.")]
+    public float followerDistanceToChase = 150f;
+
+    [Tooltip("Keep chasing / fighting enemies out to this distance while actively following the player.")]
+    public float followerDistanceToLose = 170f;
+
+    [Tooltip("Preferred combat distance while actively following the player when NOT using the follower min/max band.")]
+    public float followerDesiredAttackRange = 110f;
+
+    [Tooltip("If true, followers use a separate min/max desired attack range band while actively following the player.")]
+    public bool enableFollowerDesiredAttackRangeBand = true;
+
+    [Tooltip("Follower combat band minimum while actively following the player.")]
+    public float followerDesiredAttackRangeMin = 80f;
+
+    [Tooltip("Follower combat band maximum while actively following the player.")]
+    public float followerDesiredAttackRangeMax = 150f;
+
+
+
+    [SerializeField, HideInInspector]
+    private int _followerLongRangeDefaultsVersion = 0;
+    private const int FOLLOWER_LONG_RANGE_DEFAULTS_VERSION_CURRENT = 2;
+
     [Header("Commanded Attack Chase Override")]
     [Tooltip("If true, a direct Attack order will keep chasing the target even if it's beyond distanceToLose.")]
     public bool allowCommandedAttackChaseBeyondLose = true;
@@ -329,6 +357,54 @@ public class AllyController : MonoBehaviour
     private Vector3 resumeDestination;
     private bool hasResumeDestination;
     private bool resumeWasFollowing;
+
+
+#if UNITY_EDITOR
+    private void OnValidate()
+    {
+        if (_followerLongRangeDefaultsVersion >= FOLLOWER_LONG_RANGE_DEFAULTS_VERSION_CURRENT)
+            return;
+
+        bool changed = false;
+
+        // One-time migration: if this component still has the ORIGINAL long-range follower defaults,
+        // update them to the newer halved defaults. Custom inspector values are left untouched.
+        if (Mathf.Approximately(followerDistanceToChase, 300f))
+        {
+            followerDistanceToChase = 150f;
+            changed = true;
+        }
+
+        if (Mathf.Approximately(followerDistanceToLose, 340f))
+        {
+            followerDistanceToLose = 170f;
+            changed = true;
+        }
+
+        if (Mathf.Approximately(followerDesiredAttackRange, 220f))
+        {
+            followerDesiredAttackRange = 110f;
+            changed = true;
+        }
+
+        if (Mathf.Approximately(followerDesiredAttackRangeMin, 160f))
+        {
+            followerDesiredAttackRangeMin = 80f;
+            changed = true;
+        }
+
+        if (Mathf.Approximately(followerDesiredAttackRangeMax, 300f))
+        {
+            followerDesiredAttackRangeMax = 150f;
+            changed = true;
+        }
+
+        _followerLongRangeDefaultsVersion = FOLLOWER_LONG_RANGE_DEFAULTS_VERSION_CURRENT;
+
+        if (changed && !Application.isPlaying)
+            UnityEditor.EditorUtility.SetDirty(this);
+    }
+#endif
 
     private void Awake()
     {
@@ -642,7 +718,7 @@ public class AllyController : MonoBehaviour
                     }
                 }
 
-                if (dist > distanceToLose && !ShouldIgnoreLoseDistance(currentEnemy))
+                if (dist > GetEffectiveDistanceToLose() && !ShouldIgnoreLoseDistance(currentEnemy))
                 {
                     StopChasingAndResume();
                 }
@@ -763,6 +839,7 @@ public class AllyController : MonoBehaviour
 
         Transform best = null;
         float bestDist = float.MaxValue;
+        float chaseDistance = GetEffectiveDistanceToChase();
 
         // 1) Team focus-fire: if a nearby teammate is already chasing something, prefer that target (with cooldown).
         if (enableTeamFocusFire && Time.time >= _nextFocusFireTime && TeamManager.Instance != null)
@@ -785,7 +862,7 @@ public class AllyController : MonoBehaviour
                     if (TargetIsDeadOrInvalid(enemy)) continue;
 
                     float d = Vector3.Distance(transform.position, enemy.position);
-                    if (d > distanceToChase) continue;
+                    if (d > chaseDistance) continue;
                     if (d > maxTargetDist) continue;
                     if (d >= bestDist) continue;
 
@@ -819,7 +896,7 @@ public class AllyController : MonoBehaviour
                 Transform t = go.transform;
                 if (TargetIsDeadOrInvalid(t)) continue;
                 float d = Vector3.Distance(transform.position, t.position);
-                if (d >= distanceToChase) continue;
+                if (d >= chaseDistance) continue;
                 if (d >= bestDist) continue;
 
                 if (enableManualHoldZone && _hasManualHold && IsSettledAtManualHoldPoint())
@@ -1417,10 +1494,35 @@ public class AllyController : MonoBehaviour
         return clamped;
     }
 
+    private bool IsFollowingPlayerFollowSlot()
+    {
+        return target != null && target.name.StartsWith("FollowSlot_", StringComparison.Ordinal);
+    }
+
+    private bool UseFollowerLongRangeCombat()
+    {
+        return enableFollowerLongRangeCombat && IsFollowingPlayerFollowSlot();
+    }
+
+    private float GetEffectiveDistanceToChase()
+    {
+        return UseFollowerLongRangeCombat() ? Mathf.Max(0.1f, followerDistanceToChase) : Mathf.Max(0.1f, distanceToChase);
+    }
+
+    private float GetEffectiveDistanceToLose()
+    {
+        return UseFollowerLongRangeCombat() ? Mathf.Max(0.1f, followerDistanceToLose) : Mathf.Max(0.1f, distanceToLose);
+    }
+
+    private float GetEffectiveDesiredAttackRangeBase()
+    {
+        return UseFollowerLongRangeCombat() ? Mathf.Max(0.5f, followerDesiredAttackRange) : Mathf.Max(0.5f, desiredAttackRange);
+    }
+
     // -------------------- DYNAMIC DESIRED RANGE --------------------
     private void InitializeDesiredAttackRangeRuntime()
     {
-        _currentDesiredAttackRangeRuntime = Mathf.Max(0.5f, desiredAttackRange);
+        _currentDesiredAttackRangeRuntime = GetEffectiveDesiredAttackRangeBase();
         _nextDesiredAttackRangeUpdateTime = Time.time + GetNextDesiredRangeInterval();
     }
 
@@ -1445,7 +1547,7 @@ public class AllyController : MonoBehaviour
     {
         if (!enableDynamicDesiredAttackRange)
         {
-            _currentDesiredAttackRangeRuntime = Mathf.Max(0.5f, desiredAttackRange);
+            _currentDesiredAttackRangeRuntime = GetEffectiveDesiredAttackRangeBase();
             return;
         }
 
@@ -1463,7 +1565,7 @@ public class AllyController : MonoBehaviour
         }
         else
         {
-            float baseRange = Mathf.Max(0.5f, desiredAttackRange);
+            float baseRange = GetEffectiveDesiredAttackRangeBase();
             float j = Mathf.Max(0f, desiredAttackRangeJitter);
             _currentDesiredAttackRangeRuntime = Mathf.Max(0.5f, baseRange + Random.Range(-j, j));
         }
@@ -1471,7 +1573,7 @@ public class AllyController : MonoBehaviour
 
     private float GetCurrentDesiredAttackRange(bool useBand, float bandMin, float bandMax)
     {
-        float r = enableDynamicDesiredAttackRange ? _currentDesiredAttackRangeRuntime : desiredAttackRange;
+        float r = enableDynamicDesiredAttackRange ? _currentDesiredAttackRangeRuntime : GetEffectiveDesiredAttackRangeBase();
         r = Mathf.Max(0.5f, r);
         if (useBand) r = Mathf.Clamp(r, bandMin, bandMax);
         return r;
@@ -1480,6 +1582,19 @@ public class AllyController : MonoBehaviour
     private bool TryGetCombatRangeBand(out float minRange, out float maxRange)
     {
         // Returns true if the min/max range band is valid and enabled.
+        if (UseFollowerLongRangeCombat())
+        {
+            minRange = Mathf.Max(0.5f, followerDesiredAttackRangeMin);
+            maxRange = Mathf.Max(minRange, followerDesiredAttackRangeMax);
+
+            if (!enableFollowerDesiredAttackRangeBand) return false;
+
+            // Require a meaningful band.
+            if (maxRange <= minRange + 0.01f) return false;
+
+            return true;
+        }
+
         minRange = Mathf.Max(0.5f, desiredAttackRangeMin);
         maxRange = Mathf.Max(minRange, desiredAttackRangeMax);
 
@@ -1554,7 +1669,7 @@ public class AllyController : MonoBehaviour
         bool useDynamicRange = enableDynamicDesiredAttackRange;
 
         // Desired range (single value or derived from band)
-        float range = desiredAttackRange;
+        float range = GetEffectiveDesiredAttackRangeBase();
 
         // Distance is re-evaluated later too, but we initialize it here for movement logic.
         float dist = Vector3.Distance(transform.position, targetPoint);

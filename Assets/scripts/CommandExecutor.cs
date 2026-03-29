@@ -98,6 +98,10 @@ public class CommandExecutor : MonoBehaviour
     [Tooltip("If true, when a move is considered complete (pins cleared), we also stop agents and clear their paths to prevent 'running in place' from crowding/avoidance.")]
     public bool stopAgentsOnArrival = true;
 
+    [Header("Attack Cleanup")]
+    [Tooltip("If true, when a direct ATTACK target dies, the ordered agents are stopped and their stale combat paths are cleared immediately. This prevents teams from continuing to crowd into the dead target's center point.")]
+    public bool stopAgentsWhenCombatTargetGone = true;
+
 
     [Header("Join Settings")]
     [Tooltip("Desired spacing (meters) from the team leader (the last-clicked ally) when joining. Larger = more spread.")]
@@ -400,9 +404,11 @@ private void ClearPlannedDestinationForTeams(List<GameObject> expandedSelection)
                 }
             }
 
-            // Clear the destination pin when the target is destroyed, so attack/follow pins don't linger.
+            // Combat cleanup: when the target dies, clear pins and stop stale combat paths so teams do not collapse into the dead target's center point.
             if (TeamManager.Instance != null && TryGetSingleTeamForSelection(expanded, out Team atkTeam) && atkTeam != null)
-                StartFollowPinClearRoutine_Team(atkTeam, targetT);
+                StartCombatTargetCleanupRoutine_Team(atkTeam, targetT);
+            else
+                StartCombatTargetCleanupRoutine_Units(expanded, targetT);
 
             if (showMoveHints)
                 HintSystem.Show("Attacking target.", moveHintDuration);
@@ -1039,6 +1045,24 @@ private void ClearPlannedDestinationForTeams(List<GameObject> expandedSelection)
         }
     }
 
+    private void StartCombatTargetCleanupRoutine_Team(Team team, Transform targetT)
+    {
+        if (team == null) return;
+        if (targetT == null) return;
+
+        StopPinClearRoutine();
+        pinClearRoutine = StartCoroutine(ClearCombatTargetGone_TeamRoutine(team, targetT));
+    }
+
+    private void StartCombatTargetCleanupRoutine_Units(List<GameObject> units, Transform targetT)
+    {
+        if (units == null || units.Count == 0) return;
+        if (targetT == null) return;
+
+        StopPinClearRoutine();
+        pinClearRoutine = StartCoroutine(ClearCombatTargetGone_UnitsRoutine(new List<GameObject>(units), targetT));
+    }
+
     private void StartFollowPinClearRoutine_Team(Team team, Transform targetT)
     {
         if (!clearDestinationPinsOnTargetDestroyed) return;
@@ -1101,6 +1125,89 @@ private void ClearPlannedDestinationForTeams(List<GameObject> expandedSelection)
 
         while (targetT != null)
             yield return new WaitForSeconds(interval);
+
+        if (MoveDestinationMarkerSystem.Instance != null && units != null && units.Count > 0)
+            MoveDestinationMarkerSystem.Instance.ClearForUnits(units.ToArray());
+
+        pinClearRoutine = null;
+    }
+
+    private bool IsFollowTargetGone(Transform targetT)
+    {
+        if (targetT == null) return true;
+        if (!targetT.gameObject.activeInHierarchy) return true;
+
+        var dc = targetT.GetComponentInParent<MnR.DeathController>();
+        if (dc != null && dc.IsDead) return true;
+
+        var e2 = targetT.GetComponentInParent<Enemy2Controller>();
+        if (e2 != null && e2.IsDead) return true;
+
+        var eh = targetT.GetComponentInParent<EnemyHealthController>();
+        if (eh != null && eh.IsDead) return true;
+
+        return false;
+    }
+
+    private List<NavMeshAgent> GatherAgentsForTeam(Team team)
+    {
+        List<GameObject> gos = new List<GameObject>();
+        if (team != null && team.Members != null)
+        {
+            for (int i = 0; i < team.Members.Count; i++)
+            {
+                var tr = team.Members[i];
+                if (tr == null) continue;
+                gos.Add(tr.gameObject);
+            }
+        }
+
+        return GatherAgents(gos);
+    }
+
+    private IEnumerator ClearCombatTargetGone_TeamRoutine(Team team, Transform targetT)
+    {
+        if (team == null) yield break;
+
+        float interval = Mathf.Max(0.05f, pinArrivalCheckInterval);
+
+        while (!IsFollowTargetGone(targetT))
+            yield return new WaitForSeconds(interval);
+
+        if (stopAgentsWhenCombatTargetGone)
+            StopAgents(GatherAgentsForTeam(team));
+
+        if (MoveDestinationMarkerSystem.Instance != null)
+        {
+            MoveDestinationMarkerSystem.Instance.ClearForTeam(team);
+
+            if (team.Members != null && team.Members.Count > 0)
+            {
+                List<GameObject> gos = new List<GameObject>(team.Members.Count);
+                for (int i = 0; i < team.Members.Count; i++)
+                {
+                    var tr = team.Members[i];
+                    if (tr == null) continue;
+                    gos.Add(tr.gameObject);
+                }
+
+                if (gos.Count > 0)
+                    MoveDestinationMarkerSystem.Instance.ClearForUnits(gos.ToArray());
+            }
+        }
+
+        pinClearRoutine = null;
+    }
+
+    private IEnumerator ClearCombatTargetGone_UnitsRoutine(List<GameObject> units, Transform targetT)
+    {
+        float interval = Mathf.Max(0.05f, pinArrivalCheckInterval);
+
+        while (!IsFollowTargetGone(targetT))
+            yield return new WaitForSeconds(interval);
+
+        if (stopAgentsWhenCombatTargetGone)
+            StopAgents(GatherAgents(units));
 
         if (MoveDestinationMarkerSystem.Instance != null && units != null && units.Count > 0)
             MoveDestinationMarkerSystem.Instance.ClearForUnits(units.ToArray());

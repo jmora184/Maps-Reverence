@@ -19,7 +19,7 @@ public class PlayerVitals : MonoBehaviour, IDamageable
 
     [Header("Invincibility")]
     [Tooltip("Seconds of invincibility after taking damage. 0 = none.")]
-    [SerializeField] private float invincibleSeconds = 1f;
+    [SerializeField] private float invincibleSeconds = 0f;// set to 0 to allow simultaneous hits to stack
 
     [Header("Auto Recharge")]
     [Tooltip("If enabled, the player begins recharging health after going this many seconds without taking damage.")]
