@@ -11,7 +11,7 @@ using UnityEngine;
 /// - Assign your EnemyDestroyTracker (or leave blank to use EnemyDestroyTracker.Instance).
 /// - Assign a disabled mech GameObject.
 /// - Assign a disabled boss health bar root GameObject (optional).
-/// - Optional: assign a TMP popup text object to show "Boss Has Arrived!".
+/// - Optional: assign a TMP popup text object to show the mech spawn message.
 /// </summary>
 public class MechSpawnAfterKills : MonoBehaviour
 {
@@ -30,18 +30,24 @@ public class MechSpawnAfterKills : MonoBehaviour
     [Tooltip("Optional existing boss health bar root on the Canvas. Usually disabled at start.")]
     public GameObject mechHealthBarObject;
 
+    [Tooltip("Optional existing boss icon object under the MiniUI/Canvas. Usually disabled at start.")]
+    public GameObject bossIconObject;
+
     [Tooltip("If true, force the mech off at startup until the kill threshold is reached.")]
     public bool disableMechAtStart = true;
 
     [Tooltip("If true, force the boss health bar off at startup until the kill threshold is reached.")]
     public bool disableHealthBarAtStart = true;
 
+    [Tooltip("If true, force the boss icon off at startup until the kill threshold is reached.")]
+    public bool disableBossIconAtStart = true;
+
     [Header("Spawn Popup")]
     [Tooltip("Optional TMP text object used as a temporary spawn popup.")]
     public TMP_Text spawnPopupText;
 
     [TextArea]
-    public string spawnPopupMessage = "Boss Has Arrived!";
+    public string spawnPopupMessage = "<color=#cc0000>General Hux Speaking:</color> All Units, attack the Human bases. Leave it to me to cut the head off this Army's last officer.";
 
     [Min(0f)]
     public float spawnPopupDuration = 4f;
@@ -62,6 +68,9 @@ public class MechSpawnAfterKills : MonoBehaviour
 
         if (disableHealthBarAtStart && mechHealthBarObject != null)
             mechHealthBarObject.SetActive(false);
+
+        if (disableBossIconAtStart && bossIconObject != null)
+            bossIconObject.SetActive(false);
 
         if (hidePopupAtStart && spawnPopupText != null)
             spawnPopupText.gameObject.SetActive(false);
@@ -98,6 +107,9 @@ public class MechSpawnAfterKills : MonoBehaviour
 
         if (mechHealthBarObject != null)
             mechHealthBarObject.SetActive(true);
+
+        if (bossIconObject != null)
+            bossIconObject.SetActive(true);
 
         ShowSpawnPopup();
 
@@ -155,6 +167,9 @@ public class MechSpawnAfterKills : MonoBehaviour
 
             if (mechHealthBarObject != null)
                 mechHealthBarObject.SetActive(false);
+
+            if (bossIconObject != null)
+                bossIconObject.SetActive(false);
 
             if (spawnPopupText != null)
                 spawnPopupText.gameObject.SetActive(false);

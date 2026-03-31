@@ -13,6 +13,7 @@
 //     HealthBar   <-- (empty GameObject positioned above head; add this script here)
 //       Bar       <-- SpriteRenderer using your green bar sprite (pivot ideally left-center)
 //       (Optional) Background <-- SpriteRenderer not scaled
+//       (Optional) DirectionalBonus2x <-- SpriteRenderer for the temporary 2x icon
 //
 // Notes:
 // - This script POLLS health (no events needed).
@@ -21,6 +22,7 @@
 //
 // Works with: MeleeEnemyHealthController (maxHealth/currentHealth, IsDead) from your project.
 
+using System.Collections;
 using UnityEngine;
 
 [DisallowMultipleComponent]
@@ -32,6 +34,9 @@ public class MeleeEnemyWorldHealthBar : MonoBehaviour
 
     [Tooltip("Optional: background sprite (not scaled).")]
     [SerializeField] private SpriteRenderer backgroundSprite;
+
+    [Tooltip("Optional: sprite used to briefly show a 2x bonus damage icon.")]
+    [SerializeField] private SpriteRenderer directionalBonus2xSprite;
 
     [Tooltip("If set, this transform will be billboarding instead of this GameObject's transform.")]
     [SerializeField] private Transform billboardRoot;
@@ -56,6 +61,13 @@ public class MeleeEnemyWorldHealthBar : MonoBehaviour
     [Tooltip("Hide when dead / health <= 0.")]
     [SerializeField] private bool hideWhenZero = true;
 
+    [Header("Directional Bonus UI")]
+    [Tooltip("How long the 2x icon stays visible.")]
+    [Min(0f)] [SerializeField] private float directionalBonusShowTime = 0.6f;
+
+    [Tooltip("If true, hides the 2x icon automatically on Awake/OnEnable.")]
+    [SerializeField] private bool hideDirectionalBonusOnStart = true;
+
     [Header("Billboard")]
     [Tooltip("If true, the health bar always faces the camera.")]
     [SerializeField] private bool faceCamera = true;
@@ -78,11 +90,13 @@ public class MeleeEnemyWorldHealthBar : MonoBehaviour
     private float _barBaseSizeX;
 
     private float _nextRefreshTime;
+    private Coroutine _directionalBonusRoutine;
 
     private void Reset()
     {
         billboardRoot = transform;
         TryAutoWire();
+        HideDirectionalBonusImmediate();
     }
 
     private void Awake()
@@ -97,12 +111,31 @@ public class MeleeEnemyWorldHealthBar : MonoBehaviour
             _barBaseLocalPos = barSprite.transform.localPosition;
             _barBaseSizeX = barSprite.size.x;
         }
+
+        if (hideDirectionalBonusOnStart)
+            HideDirectionalBonusImmediate();
     }
 
     private void OnEnable()
     {
         _nextRefreshTime = 0f;
+
+        if (hideDirectionalBonusOnStart)
+            HideDirectionalBonusImmediate();
+
         RedrawImmediate();
+    }
+
+    private void OnDisable()
+    {
+        if (_directionalBonusRoutine != null)
+        {
+            StopCoroutine(_directionalBonusRoutine);
+            _directionalBonusRoutine = null;
+        }
+
+        if (hideDirectionalBonusOnStart)
+            HideDirectionalBonusImmediate();
     }
 
     private void LateUpdate()
@@ -121,12 +154,53 @@ public class MeleeEnemyWorldHealthBar : MonoBehaviour
         }
     }
 
+    public void ShowDirectionalBonus2x()
+    {
+        if (directionalBonus2xSprite == null)
+            TryAutoWire();
+
+        if (directionalBonus2xSprite == null)
+            return;
+
+        directionalBonus2xSprite.enabled = true;
+
+        if (_directionalBonusRoutine != null)
+            StopCoroutine(_directionalBonusRoutine);
+
+        if (directionalBonusShowTime <= 0f)
+        {
+            HideDirectionalBonusImmediate();
+            return;
+        }
+
+        _directionalBonusRoutine = StartCoroutine(HideDirectionalBonusAfterDelay());
+    }
+
+    private IEnumerator HideDirectionalBonusAfterDelay()
+    {
+        yield return new WaitForSeconds(directionalBonusShowTime);
+        HideDirectionalBonusImmediate();
+        _directionalBonusRoutine = null;
+    }
+
+    private void HideDirectionalBonusImmediate()
+    {
+        if (directionalBonus2xSprite != null)
+            directionalBonus2xSprite.enabled = false;
+    }
+
     private void TryAutoWire()
     {
         if (barSprite == null)
         {
             var t = transform.Find("Bar");
             if (t != null) barSprite = t.GetComponent<SpriteRenderer>();
+        }
+
+        if (directionalBonus2xSprite == null)
+        {
+            var bonus = transform.Find("DirectionalBonus2x");
+            if (bonus != null) directionalBonus2xSprite = bonus.GetComponent<SpriteRenderer>();
         }
 
         if (health == null)
@@ -165,6 +239,7 @@ public class MeleeEnemyWorldHealthBar : MonoBehaviour
 
         if (backgroundSprite != null) backgroundSprite.enabled = shouldShow;
         if (barSprite != null) barSprite.enabled = shouldShow;
+        if (!shouldShow) HideDirectionalBonusImmediate();
 
         if (!shouldShow || barSprite == null) return;
 

@@ -29,6 +29,21 @@ public class MeleeEnemyHealthController : MonoBehaviour, IDamageable
     [Tooltip("Optional: your melee enemy controller (any type). If empty, we auto-find one on this GameObject.")]
     public MonoBehaviour meleeController;
 
+    [Header("Directional Bonus UI (optional)")]
+    [Tooltip("Optional world health bar used to briefly show a 2x sprite when directional bonus damage is applied.")]
+    [SerializeField] private MeleeEnemyWorldHealthBar directionalDamageUI;
+
+    [Header("Directional Damage (optional)")]
+    [Tooltip("If true, hits from outside the front cone deal bonus damage and show the 2x icon.")]
+    public bool enableDirectionalDamageBonus = true;
+
+    [Tooltip("Damage multiplier applied when the hit comes from outside the front cone.")]
+    public float sideOrBackDamageMultiplier = 2f;
+
+    [Tooltip("Half-angle of the FRONT cone in degrees. Hits inside this cone deal normal damage. Hits outside it get the side/back multiplier.")]
+    [Range(0f, 180f)]
+    public float frontDamageHalfAngle = 60f;
+
     [Header("Animator Params (optional)")]
     public string hitReactTrigger = "take_damage";
 
@@ -75,22 +90,51 @@ public class MeleeEnemyHealthController : MonoBehaviour, IDamageable
         if (!meleeController)
             meleeController = AutoFindController();
 
+        if (directionalDamageUI == null)
+            directionalDamageUI = GetComponentInChildren<MeleeEnemyWorldHealthBar>(true);
+
         // If we start dead (e.g., prefab misconfigured), clean up consistently.
         if (_dead)
             HandleDeathSideEffects();
     }
 
     // --- IDamageable ---
-    public void TakeDamage(float amount) => Apply(amount);
+    public void TakeDamage(float amount) => ApplyDamageInternal(Mathf.Max(1, Mathf.RoundToInt(amount)));
 
     // Convenience for older callers
-    public void TakeDamage(int amount) => Apply(amount);
-    public void ApplyDamage(float amount) => Apply(amount);
-    public void ApplyDamage(int amount) => Apply(amount);
-    public void ReceiveDamage(float amount) => Apply(amount);
-    public void ReceiveDamage(int amount) => Apply(amount);
+    public void TakeDamage(int amount) => ApplyDamageInternal(amount);
+    public void ApplyDamage(float amount) => ApplyDamageInternal(Mathf.Max(1, Mathf.RoundToInt(amount)));
+    public void ApplyDamage(int amount) => ApplyDamageInternal(amount);
+    public void ReceiveDamage(float amount) => ApplyDamageInternal(Mathf.Max(1, Mathf.RoundToInt(amount)));
+    public void ReceiveDamage(int amount) => ApplyDamageInternal(amount);
+
+    // Matches EnemyHealthController-style entry points so bullet scripts can pass hit direction.
+    public void DamageEnemy(int damageAmount)
+    {
+        ApplyDamageInternal(damageAmount);
+    }
+
+    public void DamageEnemy(int damageAmount, Vector3 incomingDirectionWorld)
+    {
+        bool appliedDirectionalBonus;
+        int finalDamage = ApplyDirectionalDamageMultiplier(damageAmount, incomingDirectionWorld, out appliedDirectionalBonus);
+
+        if (appliedDirectionalBonus)
+            ShowDirectionalDamageBonusUI();
+
+        ApplyDamageInternal(finalDamage);
+    }
 
     public bool IsDead => _dead;
+
+    public void ShowDirectionalDamageBonusUI()
+    {
+        if (directionalDamageUI == null)
+            directionalDamageUI = GetComponentInChildren<MeleeEnemyWorldHealthBar>(true);
+
+        if (directionalDamageUI != null)
+            directionalDamageUI.ShowDirectionalBonus2x();
+    }
 
     public void Heal(int amount)
     {
@@ -100,22 +144,60 @@ public class MeleeEnemyHealthController : MonoBehaviour, IDamageable
         currentHealth = Mathf.Clamp(currentHealth + amount, 0, maxHealth);
     }
 
-    private void Apply(float amount)
+    private int ApplyDirectionalDamageMultiplier(int damageAmount, Vector3 incomingDirectionWorld, out bool appliedDirectionalBonus)
     {
-        if (amount <= 0f) return;
+        appliedDirectionalBonus = false;
+
+        if (!enableDirectionalDamageBonus)
+            return damageAmount;
+
+        if (damageAmount <= 0)
+            return damageAmount;
+
+        Vector3 incoming = incomingDirectionWorld;
+        incoming.y = 0f;
+        if (incoming.sqrMagnitude <= 0.0001f)
+            return damageAmount;
+
+        Vector3 forward = transform.forward;
+        forward.y = 0f;
+        if (forward.sqrMagnitude <= 0.0001f)
+            return damageAmount;
+
+        incoming.Normalize();
+        forward.Normalize();
+
+        float frontDotThreshold = Mathf.Cos(Mathf.Clamp(frontDamageHalfAngle, 0f, 180f) * Mathf.Deg2Rad);
+        float dot = Vector3.Dot(forward, incoming);
+        bool isFrontHit = dot >= frontDotThreshold;
+
+        if (isFrontHit)
+            return damageAmount;
+
+        float multiplier = Mathf.Max(1f, sideOrBackDamageMultiplier);
+        if (multiplier <= 1f)
+            return damageAmount;
+
+        appliedDirectionalBonus = true;
+        float multiplied = damageAmount * multiplier;
+        return Mathf.Max(1, Mathf.RoundToInt(multiplied));
+    }
+
+    private void ApplyDamageInternal(int damageAmount)
+    {
+        if (damageAmount <= 0) return;
         if (lockAfterDeath && _dead) return;
 
-        int dmg = Mathf.Max(1, Mathf.RoundToInt(amount));
-        currentHealth = Mathf.Clamp(currentHealth - dmg, 0, maxHealth);
+        currentHealth = Mathf.Clamp(currentHealth - damageAmount, 0, maxHealth);
 
         if (debugLogs)
-            Debug.Log($"[MeleeEnemyHealthController] {name} took {dmg}. HP {currentHealth}/{maxHealth}");
+            Debug.Log($"[MeleeEnemyHealthController] {name} took {damageAmount}. HP {currentHealth}/{maxHealth}");
 
         // Hit react
         if (animator && !_dead && !string.IsNullOrEmpty(hitReactTrigger))
             TrySetTriggerSafe(animator, hitReactTrigger);
 
-        NotifyControllerDamaged(dmg);
+        NotifyControllerDamaged(damageAmount);
 
         if (currentHealth <= 0 && !_dead)
         {

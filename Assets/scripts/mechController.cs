@@ -387,8 +387,16 @@ public string bulletsAnimalTag = "Animal";
     [Tooltip("If true, this Enemy2Controller disables itself after death so no AI logic continues running.")]
     public bool disableThisAIOnDeath = true;
 
+    [Header("Death Explosion (optional)")]
+    [Tooltip("Optional explosion prefab spawned once when the mech dies.")]
+    public GameObject deathExplosionPrefab;
+
+    [Tooltip("World-space offset applied when spawning the death explosion.")]
+    public Vector3 deathExplosionOffset = new Vector3(0f, 1.2f, 0f);
+
     public bool IsDead => _isDead || (deathController != null && deathController.IsDead);
     private bool _isDead;
+    private bool _deathExplosionSpawned;
 
 
     [Header("Shooting")]
@@ -1888,6 +1896,15 @@ void HandleShooting(Transform target)
         return false;
     }
 
+    private void SpawnDeathExplosionIfNeeded()
+    {
+        if (_deathExplosionSpawned) return;
+        if (deathExplosionPrefab == null) return;
+
+        Instantiate(deathExplosionPrefab, transform.position + deathExplosionOffset, Quaternion.identity);
+        _deathExplosionSpawned = true;
+    }
+
     private void OnDrawGizmosSelected()
     {
         // Helpful debug rings
@@ -1900,6 +1917,7 @@ void HandleShooting(Transform target)
         // DeathController was triggered (usually by EnemyHealthController). Make sure this AI cannot keep acting.
         _isDead = true;
         DisableMuzzleFlashImmediate();
+        SpawnDeathExplosionIfNeeded();
 
         if (agent != null)
         {
@@ -1930,6 +1948,7 @@ void HandleShooting(Transform target)
         if (_isDead) return;
         _isDead = true;
         DisableMuzzleFlashImmediate();
+        SpawnDeathExplosionIfNeeded();
 
         // Stop movement immediately.
         if (agent != null)

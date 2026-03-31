@@ -15,6 +15,7 @@
 //
 // Drop this script on the HealthBar object.
 
+using System.Collections;
 using UnityEngine;
 
 [DisallowMultipleComponent]
@@ -29,6 +30,13 @@ public class EnemyWorldHealthBar : MonoBehaviour
 
     [Tooltip("If set, this transform will be billboarding instead of this GameObject's transform.")]
     [SerializeField] private Transform billboardRoot;
+
+    [Header("Directional Bonus 2x")]
+    [Tooltip("Optional sprite shown briefly when directional bonus damage (2x) is applied.")]
+    [SerializeField] private SpriteRenderer directionalBonus2xSprite;
+
+    [Tooltip("How long the 2x sprite stays visible after being triggered.")]
+    [SerializeField] private float directionalBonus2xShowSeconds = 0.5f;
 
     [Header("Binding")]
     [Tooltip("If empty, auto-finds EnemyHealthController in parents/children of this object.")]
@@ -67,6 +75,7 @@ public class EnemyWorldHealthBar : MonoBehaviour
     private Vector3 _barBaseLocalPos;
     private float _barBaseSizeX;
     private bool _isBound;
+    private Coroutine _directionalBonusRoutine;
 
     private void Reset()
     {
@@ -85,16 +94,26 @@ public class EnemyWorldHealthBar : MonoBehaviour
             _barBaseLocalPos = barSprite.transform.localPosition;
             _barBaseSizeX = barSprite.size.x;
         }
+
+        HideDirectionalBonus2xImmediate();
     }
 
     private void OnEnable()
     {
+        HideDirectionalBonus2xImmediate();
         BindIfNeeded();
         RedrawImmediate();
     }
 
     private void OnDisable()
     {
+        if (_directionalBonusRoutine != null)
+        {
+            StopCoroutine(_directionalBonusRoutine);
+            _directionalBonusRoutine = null;
+        }
+
+        HideDirectionalBonus2xImmediate();
         Unbind();
     }
 
@@ -116,6 +135,12 @@ public class EnemyWorldHealthBar : MonoBehaviour
         {
             enemyHealth = GetComponentInParent<EnemyHealthController>();
             if (enemyHealth == null) enemyHealth = GetComponentInChildren<EnemyHealthController>(true);
+        }
+
+        if (directionalBonus2xSprite == null)
+        {
+            var t = transform.Find("2x");
+            if (t != null) directionalBonus2xSprite = t.GetComponent<SpriteRenderer>();
         }
     }
 
@@ -183,6 +208,40 @@ public class EnemyWorldHealthBar : MonoBehaviour
                 barSprite.transform.localPosition = _barBaseLocalPos + new Vector3(-shift, 0f, 0f);
             }
         }
+    }
+
+
+    public void ShowDirectionalBonus2x()
+    {
+        if (directionalBonus2xSprite == null)
+            TryAutoWire();
+
+        if (directionalBonus2xSprite == null)
+            return;
+
+        directionalBonus2xSprite.gameObject.SetActive(true);
+        directionalBonus2xSprite.enabled = true;
+
+        if (_directionalBonusRoutine != null)
+            StopCoroutine(_directionalBonusRoutine);
+
+        float delay = Mathf.Max(0.01f, directionalBonus2xShowSeconds);
+        _directionalBonusRoutine = StartCoroutine(HideDirectionalBonus2xAfter(delay));
+    }
+
+    private IEnumerator HideDirectionalBonus2xAfter(float delay)
+    {
+        yield return new WaitForSeconds(delay);
+        HideDirectionalBonus2xImmediate();
+        _directionalBonusRoutine = null;
+    }
+
+    private void HideDirectionalBonus2xImmediate()
+    {
+        if (directionalBonus2xSprite == null)
+            return;
+
+        directionalBonus2xSprite.enabled = false;
     }
 
     private void DoBillboard()

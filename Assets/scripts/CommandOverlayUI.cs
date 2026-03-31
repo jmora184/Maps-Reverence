@@ -290,16 +290,14 @@ public class CommandOverlayUI : MonoBehaviour
             if (p != null) playerTarget = p.transform;
         }
 
-        if (bossTarget == null)
-        {
-            var b = GameObject.FindGameObjectWithTag("Boss");
-            if (b != null) bossTarget = b.transform;
-        }
-
         SetupPlayerIconClick();
 
         if (playerIcon != null) EnsureHoverHint(playerIcon, playerHoverHint);
-        if (bossIcon != null) EnsureHoverHint(bossIcon, bossHoverHint);
+        if (bossIcon != null)
+        {
+            EnsureHoverHint(bossIcon, bossHoverHint);
+            bossIcon.gameObject.SetActive(false);
+        }
 
         BuildIcons();
     }
@@ -1182,9 +1180,11 @@ public class CommandOverlayUI : MonoBehaviour
         if (playerIcon != null && playerTarget != null)
             UpdateWorldAnchoredUI(playerIcon, playerTarget, playerIconWorldHeight, uiCam);
 
-        // Update persistent boss icon
-        if (bossIcon != null && bossTarget != null)
+        // Update persistent boss icon only when the mech/boss target is actually active.
+        if (ShouldShowBossIcon())
             UpdateWorldAnchoredUI(bossIcon, bossTarget, bossIconWorldHeight, uiCam);
+        else if (bossIcon != null && bossIcon.gameObject.activeSelf)
+            bossIcon.gameObject.SetActive(false);
 
         // Sync team stars & disable teamed unit icons
         SyncTeamsAndStars(uiCam);
@@ -1205,6 +1205,21 @@ public class CommandOverlayUI : MonoBehaviour
 
         // Keep enemy team icons rendered above unit icons (but below hover cursor)
         EnsureEnemyTeamIconsOnTop();
+    }
+
+    private bool ShouldShowBossIcon()
+    {
+        if (bossIcon == null || bossTarget == null)
+            return false;
+
+        if (!bossTarget.gameObject.activeInHierarchy)
+            return false;
+
+        var mechHealth = bossTarget.GetComponentInParent<MechHealthController>();
+        if (mechHealth != null && mechHealth.IsDead)
+            return false;
+
+        return true;
     }
 
     private bool IsInCommandView()
@@ -1265,7 +1280,7 @@ public class CommandOverlayUI : MonoBehaviour
 
         // Persistent icons
         if (playerIcon != null) playerIcon.gameObject.SetActive(visible);
-        if (bossIcon != null) bossIcon.gameObject.SetActive(visible);
+        if (bossIcon != null) bossIcon.gameObject.SetActive(visible && ShouldShowBossIcon());
 
         // Command button panel should never linger in FPS.
         if (!visible && commandButtonPanel != null)

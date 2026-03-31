@@ -34,6 +34,21 @@ public class EnemyHealthController : MonoBehaviour
     [Tooltip("If true, this script will stop accepting damage once dead.")]
     public bool lockAfterDeath = true;
 
+    [Header("Directional Bonus UI (optional)")]
+    [Tooltip("Optional world health bar used to briefly show a 2x sprite when directional bonus damage is applied.")]
+    [SerializeField] private EnemyWorldHealthBar directionalDamageUI;
+
+    [Header("Directional Damage (optional)")]
+    [Tooltip("If true, shots from the side or back can deal bonus damage, while front shots stay normal damage.")]
+    public bool enableDirectionalDamageBonus = true;
+
+    [Tooltip("Damage multiplier applied when the shot comes from outside the front cone.")]
+    public float sideOrBackDamageMultiplier = 2f;
+
+    [Tooltip("Half-angle of the FRONT cone in degrees. Shots inside this cone deal normal damage. Shots outside it get the side/back multiplier.")]
+    [Range(0f, 180f)]
+    public float frontDamageHalfAngle = 60f;
+
 [Tooltip("Animator Bool parameter to set true when this enemy dies. Helps prevent hit-reactions/locomotion from overriding death.")]
 public string animatorIsDeadBool = "isDead";
 
@@ -99,7 +114,11 @@ public bool clearLocomotionParamsOnDeath = true;
         
         if (staggerOnDamage == null)
             staggerOnDamage = GetComponent<StaggerOnDamage>();
-RaiseHealthChanged();
+
+        if (directionalDamageUI == null)
+            directionalDamageUI = GetComponentInChildren<EnemyWorldHealthBar>(true);
+
+        RaiseHealthChanged();
     }
 
     /// <summary>
@@ -139,6 +158,70 @@ public void ApplyDamage(int damage)
 }
 
 public void DamageEnemy(int damageAmount)
+{
+    ApplyDamageInternal(damageAmount);
+}
+
+public void DamageEnemy(int damageAmount, Vector3 incomingDirectionWorld)
+{
+    bool appliedDirectionalBonus;
+    int finalDamage = ApplyDirectionalDamageMultiplier(damageAmount, incomingDirectionWorld, out appliedDirectionalBonus);
+
+    if (appliedDirectionalBonus)
+        ShowDirectionalDamageBonusUI();
+
+    ApplyDamageInternal(finalDamage);
+}
+
+private int ApplyDirectionalDamageMultiplier(int damageAmount, Vector3 incomingDirectionWorld, out bool appliedDirectionalBonus)
+{
+    appliedDirectionalBonus = false;
+
+    if (!enableDirectionalDamageBonus)
+        return damageAmount;
+
+    if (damageAmount <= 0)
+        return damageAmount;
+
+    Vector3 incoming = incomingDirectionWorld;
+    incoming.y = 0f;
+    if (incoming.sqrMagnitude <= 0.0001f)
+        return damageAmount;
+
+    Vector3 forward = transform.forward;
+    forward.y = 0f;
+    if (forward.sqrMagnitude <= 0.0001f)
+        return damageAmount;
+
+    incoming.Normalize();
+    forward.Normalize();
+
+    float frontDotThreshold = Mathf.Cos(Mathf.Clamp(frontDamageHalfAngle, 0f, 180f) * Mathf.Deg2Rad);
+    float dot = Vector3.Dot(forward, incoming);
+    bool isFrontShot = dot >= frontDotThreshold;
+
+    if (isFrontShot)
+        return damageAmount;
+
+    float multiplier = Mathf.Max(1f, sideOrBackDamageMultiplier);
+    if (multiplier <= 1f)
+        return damageAmount;
+
+    appliedDirectionalBonus = true;
+    float multiplied = damageAmount * multiplier;
+    return Mathf.Max(1, Mathf.RoundToInt(multiplied));
+}
+
+private void ShowDirectionalDamageBonusUI()
+{
+    if (directionalDamageUI == null)
+        directionalDamageUI = GetComponentInChildren<EnemyWorldHealthBar>(true);
+
+    if (directionalDamageUI != null)
+        directionalDamageUI.ShowDirectionalBonus2x();
+}
+
+private void ApplyDamageInternal(int damageAmount)
     {
         if (lockAfterDeath && _isDead) return;
 
