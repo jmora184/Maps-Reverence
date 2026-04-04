@@ -32,6 +32,10 @@ public class GrenadeProjectile : MonoBehaviour
     public bool useDamageFalloff = true;
     public float minimumDamageMultiplier = 0.25f;
 
+    [Header("Damage By Target")]
+    [Tooltip("Multiplier applied only when explosion damages PlayerVitals. 0.25 = player takes 75% less damage.")]
+    public float playerDamageMultiplier = 0.25f;
+
     [Header("Owner / Collision")]
     [Tooltip("Ignore collision with the owner briefly right after spawn so the grenade does not instantly hit the player while still allowing blast damage later.")]
     public float ignoreOwnerCollisionTime = 0.15f;
@@ -180,14 +184,15 @@ public class GrenadeProjectile : MonoBehaviour
             float distance = Vector3.Distance(center, ClosestPointOrTransform(hit, center));
             float appliedDamage = CalculateDamage(distance);
             int damageInt = Mathf.Max(1, Mathf.RoundToInt(appliedDamage));
+            int adjustedDamage = AdjustDamageForTarget(hit, damageInt);
 
             if (debugLogs)
             {
                 string targetName = damageKey != null ? damageKey.name : hit.name;
-                Debug.Log($"[GrenadeProjectile] Hit collider '{hit.name}', targetKey '{targetName}', distance {distance:F2}, damage {damageInt}", hit);
+                Debug.Log($"[GrenadeProjectile] Hit collider '{hit.name}', targetKey '{targetName}', distance {distance:F2}, damage {damageInt}, adjustedDamage {adjustedDamage}", hit);
             }
 
-            bool damaged = TryApplyDamage(hit, damageInt);
+            bool damaged = TryApplyDamage(hit, adjustedDamage);
 
             if (debugLogs && !damaged)
             {
@@ -269,6 +274,20 @@ public class GrenadeProjectile : MonoBehaviour
         {
             return col.transform.position;
         }
+    }
+
+    private int AdjustDamageForTarget(Collider hit, int amount)
+    {
+        if (amount <= 0) amount = 1;
+
+        PlayerVitals playerVitals = hit.GetComponent<PlayerVitals>() ?? hit.GetComponentInParent<PlayerVitals>();
+        if (playerVitals != null)
+        {
+            float scaled = amount * Mathf.Clamp01(playerDamageMultiplier);
+            return Mathf.Max(1, Mathf.RoundToInt(scaled));
+        }
+
+        return amount;
     }
 
     private UnityEngine.Object ResolveDamageTargetKey(Collider hit)

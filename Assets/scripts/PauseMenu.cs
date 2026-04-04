@@ -36,6 +36,12 @@ public class PauseMenu : MonoBehaviour
     [SerializeField] private Button controlsButton;
     [SerializeField] private Button backButton;
     [SerializeField] private Button quitButton;
+    [SerializeField] private Button respawnButton;
+
+    [Header("Optional Respawn / Unstuck")]
+    [SerializeField] private Transform playerToRespawn;
+    [SerializeField] private Vector3 respawnOffset = new Vector3(10f, 10f, 10f);
+    [SerializeField] private bool resumeAfterRespawn = true;
 
     private bool isPaused;
     private float previousTimeScale = 1f;
@@ -105,6 +111,12 @@ public class PauseMenu : MonoBehaviour
         {
             quitButton.onClick.RemoveListener(QuitToStartScreen);
             quitButton.onClick.AddListener(QuitToStartScreen);
+        }
+
+        if (respawnButton != null)
+        {
+            respawnButton.onClick.RemoveListener(RespawnPlayerByOffset);
+            respawnButton.onClick.AddListener(RespawnPlayerByOffset);
         }
     }
 
@@ -183,6 +195,45 @@ public class PauseMenu : MonoBehaviour
         if (mainPanel != null) mainPanel.SetActive(false);
         if (tipsPanel != null) tipsPanel.SetActive(false);
         if (controlsPanel != null) controlsPanel.SetActive(true);
+    }
+
+    public void RespawnPlayerByOffset()
+    {
+        if (playerToRespawn == null)
+        {
+            Debug.LogWarning("PauseMenu: playerToRespawn is not assigned.", this);
+            return;
+        }
+
+        Vector3 targetPosition = playerToRespawn.position + respawnOffset;
+
+        CharacterController characterController = playerToRespawn.GetComponent<CharacterController>();
+        Rigidbody rigidbodyComponent = playerToRespawn.GetComponent<Rigidbody>();
+
+        bool reEnableCharacterController = false;
+        if (characterController != null && characterController.enabled)
+        {
+            characterController.enabled = false;
+            reEnableCharacterController = true;
+        }
+
+        playerToRespawn.position = targetPosition;
+
+        if (rigidbodyComponent != null)
+        {
+            rigidbodyComponent.linearVelocity = Vector3.zero;
+            rigidbodyComponent.angularVelocity = Vector3.zero;
+        }
+
+        if (reEnableCharacterController)
+        {
+            characterController.enabled = true;
+        }
+
+        if (resumeAfterRespawn)
+        {
+            ResumeGame();
+        }
     }
 
     public void QuitToStartScreen()

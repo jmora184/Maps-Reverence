@@ -17,6 +17,13 @@ public class mechController : MonoBehaviour
     public float distanceToChase = 10f;
     public float distanceToLose = 15f;
 
+    [Header("Player Pressure")]
+    [Tooltip("If true, when there is no combat target this mech will immediately chase the player from spawn instead of waiting for distanceToChase.")]
+    public bool alwaysChasePlayerWhenNoCombatTarget = true;
+
+    [Tooltip("If true, team leash is ignored while the mech is pressure-chasing the player with no combat target.")]
+    public bool ignoreTeamLeashWhilePressureChasingPlayer = true;
+
     [Header("Aggro Gates")]
     [Tooltip("If true, the enemy will ONLY switch to an attacker/combat target when they are within the ranges below.")]
     public bool onlyAggroIfTargetInRange = true;
@@ -538,6 +545,12 @@ public string bulletsAnimalTag = "Animal";
         // When we newly aggro (damage/orders), stay active for a bit (don't immediately enter stand-still pause).
         _forceStrafeUntilTime = Time.time + Mathf.Max(0f, forceStrafeAfterAggroSeconds);
 
+        if (alwaysChasePlayerWhenNoCombatTarget && _playerFallback != null)
+        {
+            chasing = true;
+            chaseCounter = 0f;
+        }
+
     }
 
     private bool IsWithinAggroRange(Transform t, float maxDistance)
@@ -825,17 +838,28 @@ public void SetWaterSlow(bool inWater, float speedMultiplier)
 
         float dist = Vector3.Distance(transform.position, targetPoint);
 
-        // Acquire chase if close enough (only when we don't have an aggro target).
-        if (_combatTarget == null && !chasing)
+        bool pressureChasingPlayer = _combatTarget == null &&
+                                   alwaysChasePlayerWhenNoCombatTarget &&
+                                   IsPlayerTransform(target);
+
+        // Acquire chase if close enough (only when we don't have an aggro target),
+        // unless this mech is configured to always pressure the player from spawn.
+        if (_combatTarget == null)
         {
-            if (dist <= distanceToChase)
+            if (pressureChasingPlayer)
+            {
+                chasing = true;
+                chaseCounter = 0f;
+            }
+            else if (!chasing && dist <= distanceToChase)
             {
                 chasing = true;
                 chaseCounter = 0f;
             }
         }
 
-        // Lose chase only when we're chasing the fallback player and far away.
+        // Lose chase only when we're chasing the fallback player and far away,
+        // unless this mech is configured to always pressure the player.
         float loseDistance = distanceToLose;
         if (returnFireWhenHitFromFar && Time.time < _damageAggroUntil)
         {
@@ -843,7 +867,7 @@ public void SetWaterSlow(bool inWater, float speedMultiplier)
             loseDistance = Mathf.Max(distanceToLose, overrideLose);
         }
 
-        if (_combatTarget == null && chasing && dist >= loseDistance)
+        if (!pressureChasingPlayer && _combatTarget == null && chasing && dist >= loseDistance)
         {
             chaseCounter += Time.deltaTime;
             if (chaseCounter >= keepChasingTime)
@@ -937,6 +961,15 @@ public void SetWaterSlow(bool inWater, float speedMultiplier)
     private bool UpdateTeamLeash()
     {
         if (!enableTeamLeash) return false;
+
+        if (ignoreTeamLeashWhilePressureChasingPlayer &&
+            alwaysChasePlayerWhenNoCombatTarget &&
+            _combatTarget == null &&
+            _playerFallback != null)
+        {
+            _returningToTeam = false;
+            return false;
+        }
 
         // Must have an anchor to leash to.
         if (_teamAnchor == null)

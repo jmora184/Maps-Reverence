@@ -20,6 +20,9 @@ public class CommandCamToggle : MonoBehaviour
     [Header("Optional: Disable these while in Command Mode")]
     public MonoBehaviour[] disableInCommandMode; // drag Player2Controller, gun scripts, etc.
 
+    [Header("Optional: Hide these objects while in Command Mode")]
+    public GameObject[] hideInCommandMode; // drag UI objects like AllyRecruited, Image, etc.
+
     [Header("Execute queued commands on exit")]
     public CommandExecutor executor;   // drag your CommandExecutor (or it will auto-find)
 
@@ -44,6 +47,7 @@ public class CommandCamToggle : MonoBehaviour
     private CanvasGroup uiGroup;
     private Coroutine switchRoutine;
     private CommandCameraZoomPan zoomPan;
+    private bool[] hideInCommandModeWasActive;
 
     [Header("Pause While In Command Mode")]
     public bool pauseGameInCommandMode = true;
@@ -138,6 +142,9 @@ public class CommandCamToggle : MonoBehaviour
                 if (mb != null) mb.enabled = !on;
         }
 
+        // Hide chosen objects while in command mode
+        ApplyHideInCommandMode(on);
+
         // Cursor
         if (lockCursorInFps)
         {
@@ -192,6 +199,39 @@ public class CommandCamToggle : MonoBehaviour
             if (CommandQueue.Instance != null && executor != null)
             {
                 CommandQueue.Instance.FlushMoves(executor);
+            }
+        }
+    }
+
+    private void ApplyHideInCommandMode(bool commandModeOn)
+    {
+        if (hideInCommandMode == null || hideInCommandMode.Length == 0)
+            return;
+
+        if (hideInCommandModeWasActive == null || hideInCommandModeWasActive.Length != hideInCommandMode.Length)
+            hideInCommandModeWasActive = new bool[hideInCommandMode.Length];
+
+        if (commandModeOn)
+        {
+            for (int i = 0; i < hideInCommandMode.Length; i++)
+            {
+                GameObject go = hideInCommandMode[i];
+                if (go == null) continue;
+
+                hideInCommandModeWasActive[i] = go.activeSelf;
+                if (go.activeSelf)
+                    go.SetActive(false);
+            }
+        }
+        else
+        {
+            for (int i = 0; i < hideInCommandMode.Length; i++)
+            {
+                GameObject go = hideInCommandMode[i];
+                if (go == null) continue;
+
+                if (hideInCommandModeWasActive[i])
+                    go.SetActive(true);
             }
         }
     }

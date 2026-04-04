@@ -13,7 +13,7 @@
 //     HealthBar   <-- (empty GameObject positioned above head; add this script here)
 //       Bar       <-- SpriteRenderer using your green bar sprite (pivot ideally left-center)
 //       (Optional) Background <-- SpriteRenderer not scaled
-//       (Optional) DirectionalBonus2x <-- SpriteRenderer for the temporary 2x icon
+//       (Optional) DirectionalBonus2x / 2x <-- SpriteRenderer for the temporary 2x icon
 //
 // Notes:
 // - This script POLLS health (no events needed).
@@ -68,6 +68,36 @@ public class MeleeEnemyWorldHealthBar : MonoBehaviour
     [Tooltip("If true, hides the 2x icon automatically on Awake/OnEnable.")]
     [SerializeField] private bool hideDirectionalBonusOnStart = true;
 
+    [Header("Directional Bonus Flash")]
+    [Tooltip("If true, briefly flashes the fill bar when directional bonus damage happens.")]
+    [SerializeField] private bool flashBarOnDirectionalBonus = true;
+
+    [Tooltip("If true, briefly flashes the background too. This is easier to see than only tinting a red fill bar.")]
+    [SerializeField] private bool flashBackgroundOnDirectionalBonus = true;
+
+    [Tooltip("Bright flash color for the fill bar.")]
+    [SerializeField] private Color directionalBonusBarFlashColor = new Color(1f, 0.95f, 0.45f, 1f);
+
+    [Tooltip("Flash color for the background bar.")]
+    [SerializeField] private Color directionalBonusBackgroundFlashColor = new Color(1f, 0.65f, 0.15f, 1f);
+
+    [Tooltip("Alpha used during the flash.")]
+    [Range(0f, 1f)]
+    [SerializeField] private float directionalBonusFlashAlpha = 1f;
+
+    [Tooltip("How long the bar/background flash lasts.")]
+    [SerializeField] private float directionalBonusFlashSeconds = 0.2f;
+
+    [Header("Directional Bonus Pulse")]
+    [Tooltip("If true, the whole health bar pulses slightly when directional bonus damage happens.")]
+    [SerializeField] private bool pulseRootOnDirectionalBonus = true;
+
+    [Tooltip("How much to scale the health bar root during the pulse.")]
+    [SerializeField] private float directionalBonusRootPulseScaleMultiplier = 1.12f;
+
+    [Tooltip("How long the pulse lasts.")]
+    [SerializeField] private float directionalBonusRootPulseSeconds = 0.18f;
+
     [Header("Billboard")]
     [Tooltip("If true, the health bar always faces the camera.")]
     [SerializeField] private bool faceCamera = true;
@@ -88,6 +118,9 @@ public class MeleeEnemyWorldHealthBar : MonoBehaviour
     private Vector3 _barBaseScale;
     private Vector3 _barBaseLocalPos;
     private float _barBaseSizeX;
+    private Vector3 _rootBaseScale;
+    private Color _barBaseColor = Color.white;
+    private Color _backgroundBaseColor = Color.white;
 
     private float _nextRefreshTime;
     private Coroutine _directionalBonusRoutine;
@@ -96,24 +129,20 @@ public class MeleeEnemyWorldHealthBar : MonoBehaviour
     {
         billboardRoot = transform;
         TryAutoWire();
-        HideDirectionalBonusImmediate();
+        CacheBaseVisualState();
+        ResetDirectionalBonusVisualsImmediate();
     }
 
     private void Awake()
     {
-        if (billboardRoot == null) billboardRoot = transform;
+        if (billboardRoot == null)
+            billboardRoot = transform;
 
         TryAutoWire();
-
-        if (barSprite != null)
-        {
-            _barBaseScale = barSprite.transform.localScale;
-            _barBaseLocalPos = barSprite.transform.localPosition;
-            _barBaseSizeX = barSprite.size.x;
-        }
+        CacheBaseVisualState();
 
         if (hideDirectionalBonusOnStart)
-            HideDirectionalBonusImmediate();
+            ResetDirectionalBonusVisualsImmediate();
     }
 
     private void OnEnable()
@@ -121,7 +150,7 @@ public class MeleeEnemyWorldHealthBar : MonoBehaviour
         _nextRefreshTime = 0f;
 
         if (hideDirectionalBonusOnStart)
-            HideDirectionalBonusImmediate();
+            ResetDirectionalBonusVisualsImmediate();
 
         RedrawImmediate();
     }
@@ -135,7 +164,7 @@ public class MeleeEnemyWorldHealthBar : MonoBehaviour
         }
 
         if (hideDirectionalBonusOnStart)
-            HideDirectionalBonusImmediate();
+            ResetDirectionalBonusVisualsImmediate();
     }
 
     private void LateUpdate()
@@ -143,9 +172,11 @@ public class MeleeEnemyWorldHealthBar : MonoBehaviour
         if (health == null || barSprite == null)
             TryAutoWire();
 
-        if (faceCamera) DoBillboard();
+        if (faceCamera)
+            DoBillboard();
 
-        if (health == null || barSprite == null) return;
+        if (health == null || barSprite == null)
+            return;
 
         if (refreshInterval <= 0f || Time.time >= _nextRefreshTime)
         {
@@ -156,31 +187,90 @@ public class MeleeEnemyWorldHealthBar : MonoBehaviour
 
     public void ShowDirectionalBonus2x()
     {
-        if (directionalBonus2xSprite == null)
-            TryAutoWire();
-
-        if (directionalBonus2xSprite == null)
-            return;
-
-        directionalBonus2xSprite.enabled = true;
+        TryAutoWire();
 
         if (_directionalBonusRoutine != null)
             StopCoroutine(_directionalBonusRoutine);
 
-        if (directionalBonusShowTime <= 0f)
-        {
-            HideDirectionalBonusImmediate();
-            return;
-        }
-
-        _directionalBonusRoutine = StartCoroutine(HideDirectionalBonusAfterDelay());
+        _directionalBonusRoutine = StartCoroutine(PlayDirectionalBonusVisuals());
     }
 
-    private IEnumerator HideDirectionalBonusAfterDelay()
+    private IEnumerator PlayDirectionalBonusVisuals()
     {
-        yield return new WaitForSeconds(directionalBonusShowTime);
-        HideDirectionalBonusImmediate();
+        ResetDirectionalBonusVisualsImmediate();
+
+        if (directionalBonus2xSprite != null)
+        {
+            directionalBonus2xSprite.gameObject.SetActive(true);
+            directionalBonus2xSprite.enabled = true;
+        }
+
+        Color flashBarColor = directionalBonusBarFlashColor;
+        flashBarColor.a = directionalBonusFlashAlpha;
+
+        Color flashBackgroundColor = directionalBonusBackgroundFlashColor;
+        flashBackgroundColor.a = directionalBonusFlashAlpha;
+
+        if (flashBarOnDirectionalBonus && barSprite != null)
+            barSprite.color = flashBarColor;
+
+        if (flashBackgroundOnDirectionalBonus && backgroundSprite != null)
+            backgroundSprite.color = flashBackgroundColor;
+
+        if (pulseRootOnDirectionalBonus)
+            transform.localScale = _rootBaseScale * Mathf.Max(1f, directionalBonusRootPulseScaleMultiplier);
+
+        float flashDuration = Mathf.Max(0.01f, directionalBonusFlashSeconds);
+        float pulseDuration = Mathf.Max(0.01f, directionalBonusRootPulseSeconds);
+        float iconDuration = Mathf.Max(0.01f, directionalBonusShowTime);
+        float totalDuration = Mathf.Max(iconDuration, Mathf.Max(flashDuration, pulseDuration));
+
+        float elapsed = 0f;
+        while (elapsed < totalDuration)
+        {
+            elapsed += Time.deltaTime;
+
+            if (pulseRootOnDirectionalBonus)
+            {
+                float pulseT = Mathf.Clamp01(elapsed / pulseDuration);
+                float pulseLerp = 1f - pulseT;
+                float pulseScale = Mathf.Lerp(1f, Mathf.Max(1f, directionalBonusRootPulseScaleMultiplier), pulseLerp);
+                transform.localScale = _rootBaseScale * pulseScale;
+            }
+
+            if (flashBarOnDirectionalBonus && barSprite != null)
+            {
+                float flashT = Mathf.Clamp01(elapsed / flashDuration);
+                barSprite.color = Color.Lerp(flashBarColor, _barBaseColor, flashT);
+            }
+
+            if (flashBackgroundOnDirectionalBonus && backgroundSprite != null)
+            {
+                float flashT = Mathf.Clamp01(elapsed / flashDuration);
+                backgroundSprite.color = Color.Lerp(flashBackgroundColor, _backgroundBaseColor, flashT);
+            }
+
+            if (directionalBonus2xSprite != null)
+                directionalBonus2xSprite.enabled = elapsed < iconDuration;
+
+            yield return null;
+        }
+
+        ResetDirectionalBonusVisualsImmediate();
         _directionalBonusRoutine = null;
+    }
+
+    private void ResetDirectionalBonusVisualsImmediate()
+    {
+        transform.localScale = _rootBaseScale == Vector3.zero ? transform.localScale : _rootBaseScale;
+
+        if (barSprite != null)
+            barSprite.color = _barBaseColor;
+
+        if (backgroundSprite != null)
+            backgroundSprite.color = _backgroundBaseColor;
+
+        HideDirectionalBonusImmediate();
     }
 
     private void HideDirectionalBonusImmediate()
@@ -189,17 +279,41 @@ public class MeleeEnemyWorldHealthBar : MonoBehaviour
             directionalBonus2xSprite.enabled = false;
     }
 
+    private void CacheBaseVisualState()
+    {
+        _rootBaseScale = transform.localScale;
+
+        if (barSprite != null)
+        {
+            _barBaseScale = barSprite.transform.localScale;
+            _barBaseLocalPos = barSprite.transform.localPosition;
+            _barBaseSizeX = barSprite.size.x;
+            _barBaseColor = barSprite.color;
+        }
+
+        if (backgroundSprite != null)
+            _backgroundBaseColor = backgroundSprite.color;
+    }
+
     private void TryAutoWire()
     {
         if (barSprite == null)
         {
-            var t = transform.Find("Bar");
+            Transform t = transform.Find("Bar");
             if (t != null) barSprite = t.GetComponent<SpriteRenderer>();
+        }
+
+        if (backgroundSprite == null)
+        {
+            Transform t = transform.Find("background");
+            if (t == null) t = transform.Find("Background");
+            if (t != null) backgroundSprite = t.GetComponent<SpriteRenderer>();
         }
 
         if (directionalBonus2xSprite == null)
         {
-            var bonus = transform.Find("DirectionalBonus2x");
+            Transform bonus = transform.Find("DirectionalBonus2x");
+            if (bonus == null) bonus = transform.Find("2x");
             if (bonus != null) directionalBonus2xSprite = bonus.GetComponent<SpriteRenderer>();
         }
 
@@ -230,9 +344,8 @@ public class MeleeEnemyWorldHealthBar : MonoBehaviour
 
         bool shouldShow = true;
 
-        // Prefer IsDead if available, but still respect actual health.
         bool isDead = false;
-        try { isDead = health != null && health.IsDead; } catch { /* ignore */ }
+        try { isDead = health != null && health.IsDead; } catch { }
 
         if (hideWhenZero && (t <= 0.0001f || isDead)) shouldShow = false;
         if (hideWhenFull && t >= 0.9999f) shouldShow = false;
@@ -245,7 +358,7 @@ public class MeleeEnemyWorldHealthBar : MonoBehaviour
 
         if (useSpriteSize && !useLocalScale)
         {
-            var sz = barSprite.size;
+            Vector2 sz = barSprite.size;
             sz.x = Mathf.Max(0.0001f, _barBaseSizeX * t);
             barSprite.size = sz;
 
@@ -257,7 +370,7 @@ public class MeleeEnemyWorldHealthBar : MonoBehaviour
         }
         else
         {
-            var s = _barBaseScale;
+            Vector3 s = _barBaseScale;
             s.x *= t;
             barSprite.transform.localScale = new Vector3(Mathf.Max(0.0001f, s.x), s.y, s.z);
 
@@ -272,7 +385,7 @@ public class MeleeEnemyWorldHealthBar : MonoBehaviour
 
     private void DoBillboard()
     {
-        var cam = GetCamera();
+        Camera cam = GetCamera();
         if (cam == null) return;
 
         Transform root = billboardRoot != null ? billboardRoot : transform;

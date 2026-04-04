@@ -399,8 +399,17 @@ private void ClearPlannedDestinationForTeams(List<GameObject> expandedSelection)
                 var ally = go.GetComponent<AllyController>();
                 if (ally != null)
                 {
+                    ally.ClearManualHoldPoint();
                     ally.target = null;
                     ally.ForceCombatTarget(targetT);
+                }
+
+                var agent = go.GetComponent<NavMeshAgent>();
+                if (agent == null) agent = go.GetComponentInChildren<NavMeshAgent>();
+                if (agent != null && agent.isActiveAndEnabled)
+                {
+                    agent.isStopped = false;
+                    agent.SetDestination(targetT.position);
                 }
             }
 

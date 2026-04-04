@@ -20,6 +20,21 @@ public class MechHealthController : MonoBehaviour
     [Tooltip("If assigned, accumulates damage within a short window and triggers take_damage only when the threshold is reached.")]
     public StaggerOnDamage staggerOnDamage;
 
+    [Header("Directional Damage (optional)")]
+    [Tooltip("If true, hits from outside the front cone deal bonus damage and show the 2x icon.")]
+    public bool enableDirectionalDamageBonus = true;
+
+    [Tooltip("Damage multiplier applied when the hit comes from outside the front cone.")]
+    public float sideOrBackDamageMultiplier = 2f;
+
+    [Tooltip("Half-angle of the FRONT cone in degrees. Hits inside this cone deal normal damage. Hits outside it get the side/back multiplier.")]
+    [Range(0f, 180f)]
+    public float frontDamageHalfAngle = 60f;
+
+    [Header("Directional Bonus UI (optional)")]
+    [Tooltip("Optional mech health bar used to briefly show a 2x icon when directional bonus damage is applied.")]
+    [SerializeField] private MechHealthBarSimple directionalDamageUI;
+
     [Header("Death")]
     [Tooltip("If true, this script will stop accepting damage once dead.")]
     public bool lockAfterDeath = true;
@@ -79,6 +94,9 @@ public class MechHealthController : MonoBehaviour
         if (staggerOnDamage == null)
             staggerOnDamage = GetComponent<StaggerOnDamage>();
 
+        if (directionalDamageUI == null)
+            directionalDamageUI = GetComponentInChildren<MechHealthBarSimple>(true);
+
         RaiseHealthChanged();
     }
 
@@ -99,6 +117,70 @@ public class MechHealthController : MonoBehaviour
     }
 
     public void DamageEnemy(int damageAmount)
+    {
+        ApplyDamageInternal(damageAmount);
+    }
+
+    public void DamageEnemy(int damageAmount, Vector3 incomingDirectionWorld)
+    {
+        bool appliedDirectionalBonus;
+        int finalDamage = ApplyDirectionalDamageMultiplier(damageAmount, incomingDirectionWorld, out appliedDirectionalBonus);
+
+        if (appliedDirectionalBonus)
+            ShowDirectionalDamageBonusUI();
+
+        ApplyDamageInternal(finalDamage);
+    }
+
+    public void ShowDirectionalDamageBonusUI()
+    {
+        if (directionalDamageUI == null)
+            directionalDamageUI = GetComponentInChildren<MechHealthBarSimple>(true);
+
+        if (directionalDamageUI != null)
+            directionalDamageUI.ShowDirectionalBonus2x();
+    }
+
+    private int ApplyDirectionalDamageMultiplier(int damageAmount, Vector3 incomingDirectionWorld, out bool appliedDirectionalBonus)
+    {
+        appliedDirectionalBonus = false;
+
+        if (!enableDirectionalDamageBonus)
+            return damageAmount;
+
+        if (damageAmount <= 0)
+            return damageAmount;
+
+        Vector3 incoming = incomingDirectionWorld;
+        incoming.y = 0f;
+        if (incoming.sqrMagnitude <= 0.0001f)
+            return damageAmount;
+
+        Vector3 forward = transform.forward;
+        forward.y = 0f;
+        if (forward.sqrMagnitude <= 0.0001f)
+            return damageAmount;
+
+        incoming.Normalize();
+        forward.Normalize();
+
+        float frontDotThreshold = Mathf.Cos(Mathf.Clamp(frontDamageHalfAngle, 0f, 180f) * Mathf.Deg2Rad);
+        float dot = Vector3.Dot(forward, incoming);
+        bool isFrontHit = dot >= frontDotThreshold;
+
+        if (isFrontHit)
+            return damageAmount;
+
+        float multiplier = Mathf.Max(1f, sideOrBackDamageMultiplier);
+        if (multiplier <= 1f)
+            return damageAmount;
+
+        appliedDirectionalBonus = true;
+        float multiplied = damageAmount * multiplier;
+        return Mathf.Max(1, Mathf.RoundToInt(multiplied));
+    }
+
+    private void ApplyDamageInternal(int damageAmount)
     {
         if (lockAfterDeath && _isDead) return;
 

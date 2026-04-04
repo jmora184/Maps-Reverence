@@ -37,6 +37,14 @@ public class AllyWorldHealthBar : MonoBehaviour
     [Tooltip("If true, also tries to locate AllyHealth by searching the tagged Ally root.")]
     [SerializeField] private bool searchTaggedAllyRoot = true;
 
+    [Header("Follower Indicator (Optional)")]
+    [Tooltip("Optional child object/sprite shown only while this ally is an active Player follower. If empty, tries to find a child named 'Bodyguard'.")]
+    [SerializeField] private GameObject bodyguardIndicator;
+
+    [Header("Team Indicator (Optional)")]
+    [Tooltip("Optional child object/sprite shown only while this ally currently belongs to an Ally Team. If empty, tries to find a child named 'Team'.")]
+    [SerializeField] private GameObject teamIndicator;
+
     [Header("Visual Behavior")]
     [Tooltip("Shrink method: using localScale.x is simplest, but can 'squish' borders if your sprite has them.")]
     [SerializeField] private bool useLocalScale = true;
@@ -74,6 +82,11 @@ public class AllyWorldHealthBar : MonoBehaviour
     private Vector3 _barBaseLocalPos;
     private float _barBaseSizeX;
     private bool _isBound;
+    private Transform _allyRoot;
+    private bool _lastBodyguardVisible;
+    private bool _hasBodyguardState;
+    private bool _lastTeamVisible;
+    private bool _hasTeamState;
 
     private void Reset()
     {
@@ -98,6 +111,8 @@ public class AllyWorldHealthBar : MonoBehaviour
     {
         BindIfNeeded();
         RedrawImmediate();
+        RefreshFollowerIndicator();
+        RefreshTeamIndicator();
     }
 
     private void OnDisable()
@@ -108,6 +123,9 @@ public class AllyWorldHealthBar : MonoBehaviour
     private void LateUpdate()
     {
         if (!_isBound) BindIfNeeded();
+
+        RefreshFollowerIndicator();
+        RefreshTeamIndicator();
 
         if (faceCamera) DoBillboard();
 
@@ -133,6 +151,18 @@ public class AllyWorldHealthBar : MonoBehaviour
             if (t != null) barSprite = t.GetComponent<SpriteRenderer>();
         }
 
+        if (bodyguardIndicator == null)
+        {
+            var t = transform.Find("Bodyguard");
+            if (t != null) bodyguardIndicator = t.gameObject;
+        }
+
+        if (teamIndicator == null)
+        {
+            var t = transform.Find("Team");
+            if (t != null) teamIndicator = t.gameObject;
+        }
+
         if (allyHealth == null)
         {
             allyHealth = GetComponentInParent<AllyHealth>();
@@ -148,6 +178,8 @@ public class AllyWorldHealthBar : MonoBehaviour
                 if (allyHealth == null) allyHealth = allyRoot.GetComponentInParent<AllyHealth>();
             }
         }
+
+        ResolveAllyRoot();
     }
 
     private void BindIfNeeded()
@@ -221,6 +253,66 @@ public class AllyWorldHealthBar : MonoBehaviour
                 barSprite.transform.localPosition = _barBaseLocalPos + new Vector3(-shift, 0f, 0f);
             }
         }
+    }
+
+    private void RefreshFollowerIndicator()
+    {
+        if (bodyguardIndicator == null)
+        {
+            var t = transform.Find("Bodyguard");
+            if (t != null) bodyguardIndicator = t.gameObject;
+            if (bodyguardIndicator == null) return;
+        }
+
+        if (_allyRoot == null)
+            ResolveAllyRoot();
+
+        bool shouldShow = false;
+        var follow = PlayerSquadFollowSystem.Instance;
+        if (follow != null && _allyRoot != null)
+            shouldShow = follow.IsFollowing(_allyRoot);
+
+        if (!_hasBodyguardState || _lastBodyguardVisible != shouldShow)
+        {
+            bodyguardIndicator.SetActive(shouldShow);
+            _lastBodyguardVisible = shouldShow;
+            _hasBodyguardState = true;
+        }
+    }
+
+
+    private void RefreshTeamIndicator()
+    {
+        if (teamIndicator == null)
+        {
+            var t = transform.Find("Team");
+            if (t != null) teamIndicator = t.gameObject;
+            if (teamIndicator == null) return;
+        }
+
+        if (_allyRoot == null)
+            ResolveAllyRoot();
+
+        bool shouldShow = false;
+        var teamManager = TeamManager.Instance;
+        if (teamManager != null && _allyRoot != null)
+            shouldShow = teamManager.GetTeamOf(_allyRoot) != null;
+
+        if (!_hasTeamState || _lastTeamVisible != shouldShow)
+        {
+            teamIndicator.SetActive(shouldShow);
+            _lastTeamVisible = shouldShow;
+            _hasTeamState = true;
+        }
+    }
+
+    private void ResolveAllyRoot()
+    {
+        if (allyHealth != null)
+            _allyRoot = FindTaggedAllyRoot(allyHealth.transform);
+
+        if (_allyRoot == null)
+            _allyRoot = FindTaggedAllyRoot(transform);
     }
 
     private void DoBillboard()

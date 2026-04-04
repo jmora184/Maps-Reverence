@@ -364,6 +364,7 @@ private void FixedUpdate()
         // Prefer component-based detection (most reliable)
         EnemyHealthController enemyHealth = hit.GetComponentInParent<EnemyHealthController>();
         MeleeEnemyHealthController meleeEnemyHealth = hit.GetComponentInParent<MeleeEnemyHealthController>();
+        MechHealthController mechHealth = hit.GetComponentInParent<MechHealthController>();
         AllyHealth allyHealth = hit.GetComponentInParent<AllyHealth>();
         PlayerVitals playerVitals = hit.GetComponentInParent<PlayerVitals>();
 
@@ -375,7 +376,7 @@ private void FixedUpdate()
 
 
         DroneEnemyController droneEnemy = hit.GetComponentInParent<DroneEnemyController>();
-        bool isEnemy = enemyHealth != null || meleeEnemyHealth != null || droneEnemy != null || HasTagInParents(hit, enemyTag);
+        bool isEnemy = enemyHealth != null || meleeEnemyHealth != null || mechHealth != null || droneEnemy != null || HasTagInParents(hit, enemyTag);
         bool isAlly = allyHealth != null || playerVitals != null || HasTagInParents(hit, allyTag) || HasTagInParents(hit, playerTag);
         bool isNPC = npcHealth != null || HasTagInParents(hit, npcTag);
         bool isAnimal = animalHealth != null || HasTagInParents(hit, animalTag);
@@ -409,6 +410,16 @@ private void FixedUpdate()
                     incomingDirectionWorld = -transform.forward;
 
                 meleeEnemyHealth.DamageEnemy(dmgInt, incomingDirectionWorld);
+            }
+            else if (mechHealth != null)
+            {
+                Vector3 incomingDirectionWorld;
+                if (owner != null)
+                    incomingDirectionWorld = owner.position - mechHealth.transform.position;
+                else
+                    incomingDirectionWorld = -transform.forward;
+
+                mechHealth.DamageEnemy(dmgInt, incomingDirectionWorld);
             }
             else
             {
