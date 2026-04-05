@@ -219,6 +219,32 @@ public class EncounterDirectorPOC : MonoBehaviour
         SpawnGroups(allyGroups, allyTeamRootPrefix, Faction.Ally);
     }
 
+    public Transform SpawnEnemyGroupBySaveId(string saveId)
+    {
+        return SpawnGroupBySaveId(enemyGroups, saveId, enemyTeamRootPrefix, Faction.Enemy);
+    }
+
+    public Transform SpawnAllyGroupBySaveId(string saveId)
+    {
+        return SpawnGroupBySaveId(allyGroups, saveId, allyTeamRootPrefix, Faction.Ally);
+    }
+
+    private Transform SpawnGroupBySaveId(SpawnGroup[] groups, string saveId, string teamPrefix, Faction faction)
+    {
+        if (groups == null || string.IsNullOrWhiteSpace(saveId))
+            return null;
+
+        for (int i = 0; i < groups.Length; i++)
+        {
+            if (!string.Equals(groups[i].saveId, saveId, StringComparison.Ordinal))
+                continue;
+
+            return SpawnGroupByIndex(groups, i, teamPrefix, faction, null, null);
+        }
+
+        return null;
+    }
+
     [ContextMenu("Refresh Enemy Team Icons (POC)")]
     public void RefreshEnemyTeamIcons()
     {
@@ -400,6 +426,9 @@ public class EncounterDirectorPOC : MonoBehaviour
             teamRootName = $"{teamPrefix}{group.teamIndex}";
             teamRoot = GetOrCreateTeamRoot(teamRootName, faction);
 
+            if (teamRoot != null && !string.IsNullOrWhiteSpace(group.saveId))
+                MNRSaveRuntimeUtility.AttachTeamRuntime(teamRoot, group.saveId, faction == Faction.Ally);
+
             if (faction == Faction.Enemy && group.overrideEnemyTeamIconScale && !string.IsNullOrEmpty(teamRootName))
             {
                 var ov = new EnemyIconScaleOverride
@@ -438,6 +467,7 @@ public class EncounterDirectorPOC : MonoBehaviour
         }
 
         List<GameObject> spawnedMembers = faction == Faction.Enemy ? new List<GameObject>(prefabSequence.Length) : null;
+        int memberSlot = 0;
 
         int count = prefabSequence.Length;
         for (int i = 0; i < count; i++)
@@ -455,6 +485,8 @@ public class EncounterDirectorPOC : MonoBehaviour
                 spawnPos += Vector3.up * droneSpawnYOffset;
 
             var go = Instantiate(chosenPrefab, spawnPos, spawnPose.rotation);
+            MNRSaveRuntimeUtility.AttachMemberRuntime(go, group.saveId, memberSlot);
+            memberSlot++;
 
             if (teamRoot != null)
             {
@@ -1404,6 +1436,9 @@ public class EncounterDirectorPOC : MonoBehaviour
         [Header("Team")]
         [Tooltip("0 = no team parenting. 1 = team root #1, 2 = team root #2, etc.")]
         public int teamIndex;
+
+        [Tooltip("Optional stable save/load id for this spawned team/group.")]
+        public string saveId;
 
         [Tooltip("Optional. If this group is an Enemy team (teamIndex > 0), you can override the icon prefab used for that team.")]
         public RectTransform teamIconPrefabOverride;

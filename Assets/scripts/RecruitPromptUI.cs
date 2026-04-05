@@ -2,14 +2,21 @@ using UnityEngine;
 using TMPro;
 
 /// <summary>
-/// Attach this to your existing Canvas -> Recruit GameObject that has a TMP text (TextMeshProUGUI).
-/// This version is "explicit show/hide" (no auto-hide). If something calls Show(), it's visible until Hide() is called.
+/// Attach this to your existing Canvas -> Recruit GameObject.
+/// Supports a hierarchy like:
+/// Recruit
+///   └── Panel
+///       └── Text (TMP)
+///
+/// This version is explicit show/hide (no auto-hide).
+/// If something calls Show(), it's visible until Hide() is called.
 /// </summary>
 public class RecruitPromptUI : MonoBehaviour
 {
     private static RecruitPromptUI _instance;
 
     [Header("References")]
+    [SerializeField] private GameObject promptRoot;
     [SerializeField] private TMP_Text promptText;
 
     [Header("Debug")]
@@ -28,6 +35,14 @@ public class RecruitPromptUI : MonoBehaviour
 
         if (promptText == null)
             promptText = GetComponentInChildren<TMP_Text>(true);
+
+        if (promptRoot == null)
+        {
+            if (promptText != null && promptText.transform.parent != null)
+                promptRoot = promptText.transform.parent.gameObject;
+            else
+                promptRoot = gameObject;
+        }
 
         SetVisible(false);
     }
@@ -49,14 +64,24 @@ public class RecruitPromptUI : MonoBehaviour
         if (_instance.promptText == null) return;
         if (string.IsNullOrEmpty(message)) return;
 
-        // Ensure hierarchy is active
+        // Do not allow this prompt to re-enable itself while command mode is active.
+        if (CommandCamToggle.Instance != null && CommandCamToggle.Instance.IsCommandMode)
+        {
+            _instance.SetVisible(false);
+            return;
+        }
+
         if (!_instance.gameObject.activeSelf) _instance.gameObject.SetActive(true);
+        if (_instance.promptRoot != null && !_instance.promptRoot.activeSelf) _instance.promptRoot.SetActive(true);
         if (!_instance.promptText.gameObject.activeSelf) _instance.promptText.gameObject.SetActive(true);
 
-        // Force visible
         _instance.promptText.enabled = true;
         var c = _instance.promptText.color;
-        if (c.a < 0.05f) { c.a = 1f; _instance.promptText.color = c; }
+        if (c.a < 0.05f)
+        {
+            c.a = 1f;
+            _instance.promptText.color = c;
+        }
 
         _instance.promptText.text = message;
         _instance.SetVisible(true);
@@ -70,7 +95,14 @@ public class RecruitPromptUI : MonoBehaviour
 
     private void SetVisible(bool visible)
     {
+        if (visible && CommandCamToggle.Instance != null && CommandCamToggle.Instance.IsCommandMode)
+            visible = false;
+
+        if (promptRoot != null)
+            promptRoot.SetActive(visible);
+
         if (promptText == null) return;
+
         promptText.enabled = visible;
         promptText.gameObject.SetActive(visible);
     }

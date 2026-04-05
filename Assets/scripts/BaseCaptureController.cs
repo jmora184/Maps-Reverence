@@ -69,6 +69,10 @@ public class BaseCaptureController : MonoBehaviour
     [Tooltip("If true, the old icon is destroyed after replacement.")]
     public bool destroyOldBaseIcon = true;
 
+    [Header("Save / Load")]
+    [Tooltip("Optional stable save/load id for this base capture controller.")]
+    public string saveId = "";
+
     [Header("Ally Team Spawn")]
     public AllyTeamConfig allyTeam = new AllyTeamConfig();
 
@@ -85,6 +89,8 @@ public class BaseCaptureController : MonoBehaviour
 
     [SerializeField, Tooltip("Runtime only: true after this base has been captured once.")]
     private bool hasCaptured = false;
+
+    public bool HasCaptured => hasCaptured;
 
     private UnityAction _cachedActivationListener;
     private UnityEvent _hookedActivationEvent;
@@ -238,6 +244,38 @@ public class BaseCaptureController : MonoBehaviour
     public void TriggerCaptureNow()
     {
         HandleBaseActivated();
+    }
+
+    public void ApplySavedCapturedStateForLoad()
+    {
+        if (hasCaptured)
+            return;
+
+        if (levelOne == null)
+            AutoResolveReferences();
+
+        if (levelOne == null)
+        {
+            Debug.LogError("[BaseCaptureController] Cannot apply saved capture state because LevelOne could not be resolved.", this);
+            return;
+        }
+
+        hasCaptured = true;
+        SwapBaseIcon();
+        EnableRefillZone();
+        SwitchBaseTurrets();
+        SpawnAllyTeamImmediate();
+        RegisterEnemyCounterattackPlansOnly();
+    }
+
+    private string BuildAllyTeamSaveId()
+    {
+        return string.IsNullOrWhiteSpace(saveId) ? "" : $"{saveId.Trim()}__ally";
+    }
+
+    private string BuildEnemyTeamSaveId(int configIndex)
+    {
+        return string.IsNullOrWhiteSpace(saveId) ? "" : $"{saveId.Trim()}__enemy_{Mathf.Max(0, configIndex)}";
     }
 
     private void AutoResolveReferences()
@@ -492,6 +530,7 @@ public class BaseCaptureController : MonoBehaviour
             teamIndex = allyTeam.teamIndex,
             teamNamePrefix = string.IsNullOrWhiteSpace(allyTeam.teamNamePrefix) ? "CapturedBaseAlly_" : allyTeam.teamNamePrefix,
             teamName = allyTeam.teamName,
+            saveId = BuildAllyTeamSaveId(),
             spawnPoint = allyTeam.spawnPoint,
             allyPrefab = allyTeam.allyPrefab,
             allyCount = Mathf.Max(0, allyTeam.allyCount),
@@ -511,34 +550,16 @@ public class BaseCaptureController : MonoBehaviour
         levelOne.SpawnAllyTeam(index);
     }
 
-    private void SpawnEnemyCounterattacks()
+    private List<int> RegisterEnemyCounterattackPlans(List<EnemyTeamConfig> configs)
     {
-        bool spawnedAnyEnemyTeam = false;
-        var configs = new List<EnemyTeamConfig>();
+        var levelPlanIndices = new List<int>(configs != null ? configs.Count : 0);
 
-        if (enemyTeams != null)
-        {
-            for (int i = 0; i < enemyTeams.Count; i++)
-            {
-                if (enemyTeams[i] != null)
-                    configs.Add(enemyTeams[i]);
-            }
-        }
-
-        if (configs.Count == 0 && enemyTeam != null)
-            configs.Add(enemyTeam);
-
-        if (configs.Count == 0)
-        {
-            if (debugLogs)
-                Debug.Log("[BaseCaptureController] No enemy counterattack teams configured.", this);
-            return;
-        }
+        if (configs == null || configs.Count == 0)
+            return levelPlanIndices;
 
         if (levelOne.teams == null)
             levelOne.teams = new List<LevelOne.TeamSpawnPlan>();
 
-        var levelPlanIndices = new List<int>(configs.Count);
         for (int cfgIndex = 0; cfgIndex < configs.Count; cfgIndex++)
         {
             EnemyTeamConfig cfg = configs[cfgIndex];
@@ -576,6 +597,7 @@ public class BaseCaptureController : MonoBehaviour
             {
                 teamName = cfg.teamName,
                 teamNamePrefix = string.IsNullOrWhiteSpace(cfg.teamNamePrefix) ? "CapturedBaseEnemy_" : cfg.teamNamePrefix,
+                saveId = BuildEnemyTeamSaveId(cfgIndex),
                 hoverHintTitle = string.IsNullOrWhiteSpace(cfg.hoverHintTitle) ? "Enemy Team" : cfg.hoverHintTitle,
                 strengthGrade = string.IsNullOrWhiteSpace(cfg.strengthGrade) ? "" : cfg.strengthGrade,
                 spawnPoint = cfg.spawnPoint,
@@ -629,6 +651,61 @@ public class BaseCaptureController : MonoBehaviour
             levelOne.teams.Add(plan);
             levelPlanIndices.Add(index);
         }
+
+        return levelPlanIndices;
+    }
+
+    private void RegisterEnemyCounterattackPlansOnly()
+    {
+        var configs = new List<EnemyTeamConfig>();
+
+        if (enemyTeams != null)
+        {
+            for (int i = 0; i < enemyTeams.Count; i++)
+            {
+                if (enemyTeams[i] != null)
+                    configs.Add(enemyTeams[i]);
+            }
+        }
+
+        if (configs.Count == 0 && enemyTeam != null)
+            configs.Add(enemyTeam);
+
+        if (configs.Count == 0)
+        {
+            if (debugLogs)
+                Debug.Log("[BaseCaptureController] No enemy counterattack teams configured.", this);
+            return;
+        }
+
+        RegisterEnemyCounterattackPlans(configs);
+    }
+
+    private void SpawnEnemyCounterattacks()
+    {
+        bool spawnedAnyEnemyTeam = false;
+        var configs = new List<EnemyTeamConfig>();
+
+        if (enemyTeams != null)
+        {
+            for (int i = 0; i < enemyTeams.Count; i++)
+            {
+                if (enemyTeams[i] != null)
+                    configs.Add(enemyTeams[i]);
+            }
+        }
+
+        if (configs.Count == 0 && enemyTeam != null)
+            configs.Add(enemyTeam);
+
+        if (configs.Count == 0)
+        {
+            if (debugLogs)
+                Debug.Log("[BaseCaptureController] No enemy counterattack teams configured.", this);
+            return;
+        }
+
+        var levelPlanIndices = RegisterEnemyCounterattackPlans(configs);
 
         for (int cfgIndex = 0; cfgIndex < configs.Count; cfgIndex++)
         {

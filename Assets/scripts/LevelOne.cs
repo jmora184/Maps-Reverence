@@ -199,6 +199,9 @@ public class LevelOne : MonoBehaviour
         var teamRootGO = new GameObject(teamRootName);
         teamRootGO.transform.position = plan.spawnPoint.position;
 
+        if (!string.IsNullOrWhiteSpace(plan.saveId))
+            MNRSaveRuntimeUtility.AttachTeamRuntime(teamRootGO.transform, plan.saveId, false);
+
         var anchor = teamRootGO.AddComponent<EncounterTeamAnchor>();
         anchor.faction = EncounterDirectorPOC.Faction.Enemy;
         anchor.updateContinuously = true;
@@ -222,8 +225,8 @@ public class LevelOne : MonoBehaviour
         }
 
         var spawned = new List<GameObject>(32);
-        if (usingEntries) SpawnFromEntries(plan, teamRootGO.transform, spawned);
-        else SpawnLegacy(plan, teamRootGO.transform, spawned);
+        if (usingEntries) SpawnFromEntries(plan, teamRootGO.transform, spawned, plan.saveId);
+        else SpawnLegacy(plan, teamRootGO.transform, spawned, plan.saveId);
 
         if (_iconsByTeamRoot.TryGetValue(teamRootGO.transform, out var iconData) && iconData != null)
         {
@@ -330,6 +333,37 @@ public class LevelOne : MonoBehaviour
     public void SpawnTeam3() => SpawnTeam(3);
     public void SpawnTeam4() => SpawnTeam(4);
 
+    public SpawnedTeamRuntimeInfo SpawnTeamBySaveId(string saveId)
+    {
+        if (string.IsNullOrWhiteSpace(saveId) || teams == null)
+            return null;
+
+        for (int i = 0; i < teams.Count; i++)
+        {
+            var plan = teams[i];
+            if (plan == null) continue;
+            if (!string.Equals(plan.saveId, saveId, StringComparison.Ordinal)) continue;
+            return SpawnTeamAndGetRuntime(i);
+        }
+
+        return null;
+    }
+
+    public SpawnedAllyTeamRuntimeInfo SpawnAllyTeamBySaveId(string saveId)
+    {
+        if (string.IsNullOrWhiteSpace(saveId) || allyTeams == null)
+            return null;
+
+        for (int i = 0; i < allyTeams.Count; i++)
+        {
+            var plan = allyTeams[i];
+            if (plan == null) continue;
+            if (!string.Equals(plan.saveId, saveId, StringComparison.Ordinal)) continue;
+            return SpawnAllyTeamAndGetRuntime(i);
+        }
+
+        return null;
+    }
 
     private void ApplyEnemyIconScale(EncounterTeamAnchor anchor, TeamSpawnPlan plan)
     {
@@ -378,7 +412,7 @@ public class LevelOne : MonoBehaviour
         return false;
     }
 
-    private void SpawnLegacy(TeamSpawnPlan plan, Transform parent, List<GameObject> spawned)
+    private void SpawnLegacy(TeamSpawnPlan plan, Transform parent, List<GameObject> spawned, string teamSaveId)
     {
         int count = Mathf.Max(0, plan.enemyCount);
         for (int i = 0; i < count; i++)
@@ -387,11 +421,12 @@ public class LevelOne : MonoBehaviour
             var unit = Instantiate(plan.enemyPrefab, pos, Quaternion.identity);
             unit.name = $"{plan.enemyPrefab.name}_{parent.name}_{i + 1}";
             unit.transform.SetParent(parent, true);
+            MNRSaveRuntimeUtility.AttachMemberRuntime(unit, teamSaveId, i);
             spawned.Add(unit);
         }
     }
 
-    private void SpawnFromEntries(TeamSpawnPlan plan, Transform parent, List<GameObject> spawned)
+    private void SpawnFromEntries(TeamSpawnPlan plan, Transform parent, List<GameObject> spawned, string teamSaveId)
     {
         int globalIndex = 0;
         foreach (var entry in plan.spawnEntries)
@@ -406,6 +441,7 @@ public class LevelOne : MonoBehaviour
                 globalIndex++;
                 unit.name = $"{entry.prefab.name}_{parent.name}_{globalIndex}";
                 unit.transform.SetParent(parent, true);
+                MNRSaveRuntimeUtility.AttachMemberRuntime(unit, teamSaveId, globalIndex - 1);
                 spawned.Add(unit);
             }
         }
@@ -514,6 +550,16 @@ public class LevelOne : MonoBehaviour
     }
 
     [Serializable]
+    public class SpawnedAllyTeamRuntimeInfo
+    {
+        public int allyTeamIndex = -1;
+        public AllySpawnPlan plan;
+        public Transform teamRoot;
+        public List<GameObject> spawnedUnits = new List<GameObject>();
+        public EncounterTeamAnchor anchor;
+    }
+
+    [Serializable]
     public class AllySpawnPlan
     {
         [Header("Identity")]
@@ -521,6 +567,8 @@ public class LevelOne : MonoBehaviour
         public int teamIndex = 1;
         public string teamNamePrefix = "AllyTeam_";
         public string teamName = "";
+        [Tooltip("Optional stable save/load id for this ally team.")]
+        public string saveId = "";
 
         [Header("Spawn")]
         public Transform spawnPoint;
@@ -549,6 +597,8 @@ public class LevelOne : MonoBehaviour
         [Header("Team Identity")]
         public string teamName = "";
         public string teamNamePrefix = "EnemyTeam_";
+        [Tooltip("Optional stable save/load id for this enemy team.")]
+        public string saveId = "";
 
         [Header("Hover Hint")]
         [Tooltip("Title shown when hovering this enemy team icon.")]
@@ -857,29 +907,34 @@ public class LevelOne : MonoBehaviour
 
     public void SpawnAllyTeam(int allyTeamIndex)
     {
+        SpawnAllyTeamAndGetRuntime(allyTeamIndex);
+    }
+
+    public SpawnedAllyTeamRuntimeInfo SpawnAllyTeamAndGetRuntime(int allyTeamIndex)
+    {
         if (allyTeams == null || allyTeamIndex < 0 || allyTeamIndex >= allyTeams.Count)
         {
             Debug.LogError($"[LevelOne] Invalid ally team index {allyTeamIndex}.", this);
-            return;
+            return null;
         }
 
         AllySpawnPlan plan = allyTeams[allyTeamIndex];
         if (plan == null)
         {
             Debug.LogError($"[LevelOne] Ally plan at index {allyTeamIndex} is null.", this);
-            return;
+            return null;
         }
 
         if (plan.spawnPoint == null)
         {
             Debug.LogError($"[LevelOne] Ally plan {allyTeamIndex} spawnPoint is not assigned.", this);
-            return;
+            return null;
         }
 
         if (plan.allyPrefab == null)
         {
             Debug.LogError($"[LevelOne] Ally plan {allyTeamIndex} allyPrefab is not assigned.", this);
-            return;
+            return null;
         }
 
         plan.spawnSequence++;
@@ -894,6 +949,9 @@ public class LevelOne : MonoBehaviour
         var teamRootGO = new GameObject(teamRootName);
         teamRootGO.transform.position = plan.spawnPoint.position;
 
+        if (!string.IsNullOrWhiteSpace(plan.saveId))
+            MNRSaveRuntimeUtility.AttachTeamRuntime(teamRootGO.transform, plan.saveId, true);
+
         // UI centroid anchor
         var anchor = teamRootGO.AddComponent<EncounterTeamAnchor>();
         anchor.faction = EncounterDirectorPOC.Faction.Ally;
@@ -904,10 +962,20 @@ public class LevelOne : MonoBehaviour
 
         EnsureAllyIconForTeam(teamRootGO.transform, anchor);
 
-        SpawnAllies(plan, teamRootGO.transform);
+        var spawned = new List<GameObject>(Mathf.Max(0, plan.allyCount));
+        SpawnAllies(plan, teamRootGO.transform, spawned, plan.saveId);
+
+        return new SpawnedAllyTeamRuntimeInfo
+        {
+            allyTeamIndex = allyTeamIndex,
+            plan = plan,
+            teamRoot = teamRootGO.transform,
+            spawnedUnits = spawned,
+            anchor = anchor
+        };
     }
 
-    private void SpawnAllies(AllySpawnPlan plan, Transform teamRoot)
+    private void SpawnAllies(AllySpawnPlan plan, Transform teamRoot, List<GameObject> spawned, string teamSaveId)
     {
         int count = Mathf.Max(0, plan.allyCount);
         if (count <= 0) return;
@@ -931,6 +999,9 @@ public class LevelOne : MonoBehaviour
             var go = Instantiate(plan.allyPrefab, pos, Quaternion.identity);
             if (plan.parentUnderTeamRoot && teamRoot != null)
                 go.transform.SetParent(teamRoot, true);
+
+            MNRSaveRuntimeUtility.AttachMemberRuntime(go, teamSaveId, i);
+            spawned?.Add(go);
 
             // Track members so the ally team icon count is correct.
             RegisterAllyMember(teamRoot, go.transform);

@@ -32,9 +32,19 @@ public class PauseMenu : MonoBehaviour
 
     [Header("Optional Buttons")]
     [SerializeField] private Button resumeButton;
+    [SerializeField] private Button saveButton;
     [SerializeField] private Button tipsButton;
     [SerializeField] private Button controlsButton;
+
+    [Tooltip("Legacy/shared back button. Optional. Still wired to ShowMain().")]
     [SerializeField] private Button backButton;
+
+    [Tooltip("Optional back button inside the Tips panel.")]
+    [SerializeField] private Button tipsBackButton;
+
+    [Tooltip("Optional back button inside the Controls panel.")]
+    [SerializeField] private Button controlsBackButton;
+
     [SerializeField] private Button quitButton;
     [SerializeField] private Button respawnButton;
 
@@ -60,64 +70,41 @@ public class PauseMenu : MonoBehaviour
     private void Update()
     {
         if (Input.GetKeyDown(pauseKey))
-        {
             TogglePause();
-        }
     }
 
     private void OnDisable()
     {
         if (isPaused)
-        {
             ResumeGame();
-        }
     }
 
     private void EnsureValidSetup()
     {
         if (pauseRoot == null)
-        {
             Debug.LogWarning("PauseMenu: pauseRoot is not assigned.", this);
-        }
     }
 
     private void WireButtons()
     {
-        if (resumeButton != null)
-        {
-            resumeButton.onClick.RemoveListener(ResumeGame);
-            resumeButton.onClick.AddListener(ResumeGame);
-        }
+        WireButton(resumeButton, ResumeGame);
+        WireButton(saveButton, SaveGame);
+        WireButton(tipsButton, ShowTips);
+        WireButton(controlsButton, ShowControls);
+        WireButton(backButton, ShowMain);
+        WireButton(tipsBackButton, ShowMain);
+        WireButton(controlsBackButton, ShowMain);
+        WireButton(quitButton, QuitToStartScreen);
+        WireButton(respawnButton, RespawnPlayerByOffset);
+    }
 
-        if (tipsButton != null)
-        {
-            tipsButton.onClick.RemoveListener(ShowTips);
-            tipsButton.onClick.AddListener(ShowTips);
-        }
+    private void WireButton(Button button, UnityEngine.Events.UnityAction action)
+    {
+        if (button == null)
+            return;
 
-        if (controlsButton != null)
-        {
-            controlsButton.onClick.RemoveListener(ShowControls);
-            controlsButton.onClick.AddListener(ShowControls);
-        }
-
-        if (backButton != null)
-        {
-            backButton.onClick.RemoveListener(ShowMain);
-            backButton.onClick.AddListener(ShowMain);
-        }
-
-        if (quitButton != null)
-        {
-            quitButton.onClick.RemoveListener(QuitToStartScreen);
-            quitButton.onClick.AddListener(QuitToStartScreen);
-        }
-
-        if (respawnButton != null)
-        {
-            respawnButton.onClick.RemoveListener(RespawnPlayerByOffset);
-            respawnButton.onClick.AddListener(RespawnPlayerByOffset);
-        }
+        button.onClick.RemoveListener(action);
+        button.onClick.AddListener(action);
     }
 
     public void TogglePause()
@@ -160,7 +147,6 @@ public class PauseMenu : MonoBehaviour
             return;
 
         isPaused = false;
-
         Time.timeScale = previousTimeScale <= 0f ? 1f : previousTimeScale;
 
         if (pauseAudio)
@@ -174,6 +160,12 @@ public class PauseMenu : MonoBehaviour
 
         Cursor.visible = previousCursorVisible;
         Cursor.lockState = previousCursorLockMode;
+    }
+
+    public void SaveGame()
+    {
+        bool success = MNRSaveSystem.SaveCurrentGame();
+        Debug.Log(success ? "[PauseMenu] Game saved." : "[PauseMenu] Save failed.", this);
     }
 
     public void ShowMain()
@@ -226,14 +218,10 @@ public class PauseMenu : MonoBehaviour
         }
 
         if (reEnableCharacterController)
-        {
             characterController.enabled = true;
-        }
 
         if (resumeAfterRespawn)
-        {
             ResumeGame();
-        }
     }
 
     public void QuitToStartScreen()

@@ -130,7 +130,7 @@ public class Enemy2Controller : MonoBehaviour
     public float backoffSampleRadius = 2.5f;
 
     [Tooltip("Turn speed when facing the target.")]
-    public float faceTargetTurnSpeed = 10f;
+    public float faceTargetTurnSpeed = 12f;
 
     [Tooltip("How often we repath while approaching/backing off (seconds).")]
     public float combatRepathInterval = 0.2f;
