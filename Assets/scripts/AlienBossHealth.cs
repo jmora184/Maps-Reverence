@@ -1,4 +1,7 @@
 using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Reflection;
 using UnityEngine;
 
 /// <summary>
@@ -40,6 +43,22 @@ public class AlienBossHealth : MonoBehaviour
     [Range(0f, 1f)] public float deathSpatialBlend = 0f;
     public float deathMinDistance = 10f;
     public float deathMaxDistance = 40f;
+
+    [Header("Follower Reset / Restore On Death")]
+    [Tooltip("If true, any active player bodyguards are temporarily removed from the follower system when this boss dies.")]
+    public bool resetPlayerFollowersOnDeath = true;
+
+    [Tooltip("If true, cancel Follow Me pick mode when the boss dies.")]
+    public bool disarmFollowerPickModeOnDeath = true;
+
+    [Tooltip("If true, the same bodyguards that were following right before boss death are automatically added back after a short delay.")]
+    public bool autoRestorePlayerFollowersOnDeath = true;
+
+    [Tooltip("Delay before auto-restoring the saved bodyguards after boss death.")]
+    public float followerRestoreDelay = 0.35f;
+
+    [Tooltip("Passes through to PlayerSquadFollowSystem.StopFollow(stopAgents). Usually leave false so allies are not hard-stopped.")]
+    public bool stopFollowerAgentsOnDeath = false;
 
     public int CurrentHealth => currentHealth;
     public bool IsDead => currentHealth <= 0;
@@ -97,6 +116,8 @@ public class AlienBossHealth : MonoBehaviour
         if (_deathHandled) return;
         _deathHandled = true;
 
+        List<Transform> savedFollowers = CaptureCurrentPlayerFollowers();
+
         PlayDieSfx();
 
         if (animator && !string.IsNullOrWhiteSpace(dieTrigger))
@@ -108,10 +129,183 @@ public class AlienBossHealth : MonoBehaviour
                 if (b) b.enabled = false;
         }
 
+        HandleFollowerResetAndRestore(savedFollowers);
+
         OnDied?.Invoke(this, killer);
 
         if (destroyOnDeath)
             Destroy(gameObject, Mathf.Max(0f, destroyDelay));
+    }
+
+    private List<Transform> CaptureCurrentPlayerFollowers()
+    {
+        var system = PlayerSquadFollowSystem.Instance;
+        if (!resetPlayerFollowersOnDeath || system == null || system.FollowerCount <= 0)
+            return null;
+
+        GameObject[] allies = GameObject.FindGameObjectsWithTag("Ally");
+        if (allies == null || allies.Length == 0)
+            return null;
+
+        List<Transform> snapshot = new List<Transform>();
+
+        for (int i = 0; i < allies.Length; i++)
+        {
+            GameObject go = allies[i];
+            if (go == null) continue;
+
+            Transform ally = go.transform;
+            if (system.IsFollowing(ally))
+                snapshot.Add(ally);
+        }
+
+        if (snapshot.Count == 0)
+            return null;
+
+        snapshot.Sort((a, b) => a.GetInstanceID().CompareTo(b.GetInstanceID()));
+        return snapshot;
+    }
+
+    private void HandleFollowerResetAndRestore(List<Transform> savedFollowers)
+    {
+        var system = PlayerSquadFollowSystem.Instance;
+        if (system == null) return;
+
+        if (resetPlayerFollowersOnDeath)
+            system.StopFollow(stopFollowerAgentsOnDeath);
+
+        if (disarmFollowerPickModeOnDeath)
+            system.DisarmPickFollowers();
+
+        if (autoRestorePlayerFollowersOnDeath && savedFollowers != null && savedFollowers.Count > 0)
+            system.StartCoroutine(RestoreFollowersAfterDelay(system, savedFollowers));
+    }
+
+    private IEnumerator RestoreFollowersAfterDelay(PlayerSquadFollowSystem system, List<Transform> savedFollowers)
+    {
+        yield return new WaitForSeconds(Mathf.Max(0f, followerRestoreDelay));
+
+        if (system == null || savedFollowers == null || savedFollowers.Count == 0)
+            yield break;
+
+        for (int i = 0; i < savedFollowers.Count; i++)
+        {
+            Transform ally = savedFollowers[i];
+            if (!IsFollowerEligibleForRestore(ally))
+                continue;
+
+            system.TryAddFollowerDirect(ally, false);
+        }
+    }
+
+    private bool IsFollowerEligibleForRestore(Transform ally)
+    {
+        if (ally == null)
+            return false;
+
+        if (!ally.gameObject.activeInHierarchy)
+            return false;
+
+        var deathController = ally.GetComponentInParent<MnR.DeathController>();
+        if (deathController != null && deathController.IsDead)
+            return false;
+
+        var allyHealth = ally.GetComponentInParent<AllyHealth>();
+        if (allyHealth != null)
+        {
+            if (ReadCommonDeadFlag(allyHealth))
+                return false;
+
+            if (ReadCommonHealthValue(allyHealth, out float healthValue) && healthValue <= 0f)
+                return false;
+        }
+
+        return true;
+    }
+
+    private bool ReadCommonDeadFlag(Component component)
+    {
+        if (component == null)
+            return false;
+
+        var type = component.GetType();
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+        string[] names = { "IsDead", "isDead", "Dead", "dead" };
+
+        for (int i = 0; i < names.Length; i++)
+        {
+            var prop = type.GetProperty(names[i], flags);
+            if (prop != null && prop.PropertyType == typeof(bool))
+                return (bool)prop.GetValue(component, null);
+
+            var field = type.GetField(names[i], flags);
+            if (field != null && field.FieldType == typeof(bool))
+                return (bool)field.GetValue(component);
+        }
+
+        return false;
+    }
+
+    private bool ReadCommonHealthValue(Component component, out float value)
+    {
+        value = 0f;
+
+        if (component == null)
+            return false;
+
+        var type = component.GetType();
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+        string[] names = { "CurrentHealth", "currentHealth", "Health", "health" };
+
+        for (int i = 0; i < names.Length; i++)
+        {
+            var prop = type.GetProperty(names[i], flags);
+            if (prop != null)
+            {
+                if (TryConvertToFloat(prop.GetValue(component, null), out value))
+                    return true;
+            }
+
+            var field = type.GetField(names[i], flags);
+            if (field != null)
+            {
+                if (TryConvertToFloat(field.GetValue(component), out value))
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    private bool TryConvertToFloat(object raw, out float value)
+    {
+        value = 0f;
+        if (raw == null)
+            return false;
+
+        switch (raw)
+        {
+            case int i:
+                value = i;
+                return true;
+            case float f:
+                value = f;
+                return true;
+            case double d:
+                value = (float)d;
+                return true;
+            case long l:
+                value = l;
+                return true;
+            case short s:
+                value = s;
+                return true;
+            case byte b:
+                value = b;
+                return true;
+            default:
+                return false;
+        }
     }
 
     public void PlayDieSfx()

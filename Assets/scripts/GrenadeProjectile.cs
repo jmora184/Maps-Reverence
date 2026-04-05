@@ -22,11 +22,27 @@ public class GrenadeProjectile : MonoBehaviour
     [Tooltip("Simple explosion clip option. If assigned, this script will spawn a temporary AudioSource at the explosion point.")]
     public AudioClip explosionSFX;
 
-    [Range(0f, 2f)]
-    public float explosionVolume = 1f;
+    [Range(0f, 4f)]
+    public float explosionVolume = 1.75f;
 
     [Tooltip("If both are assigned, prefer the simple clip over the audio source prefab.")]
     public bool preferExplosionClipOverPrefab = true;
+
+    [Header("Explosion Audio 3D Tuning")]
+    [Tooltip("If true, play the grenade explosion as 2D so it stays loud regardless of distance.")]
+    public bool use2DExplosionSound = false;
+
+    [Tooltip("3D rolloff mode used for grenade audio.")]
+    public AudioRolloffMode explosionRolloffMode = AudioRolloffMode.Linear;
+
+    [Tooltip("Within this distance, the explosion stays near full loudness.")]
+    public float explosionMinDistance = 20f;
+
+    [Tooltip("Past this distance, the explosion is mostly faded out.")]
+    public float explosionMaxDistance = 90f;
+
+    [Tooltip("Usually keep this at 0 for explosions.")]
+    public float explosionDopplerLevel = 0f;
 
     [Header("Damage Falloff")]
     public bool useDamageFalloff = true;
@@ -223,6 +239,8 @@ public class GrenadeProjectile : MonoBehaviour
             AudioSource spawnedAudio = Instantiate(explosionAudioSourcePrefab, center, Quaternion.identity);
             if (spawnedAudio != null)
             {
+                ApplyExplosionAudioSettings(spawnedAudio, explosionVolume);
+
                 if (spawnedAudio.clip != null && !spawnedAudio.isPlaying)
                     spawnedAudio.Play();
 
@@ -246,13 +264,25 @@ public class GrenadeProjectile : MonoBehaviour
 
         AudioSource source = audioGO.AddComponent<AudioSource>();
         source.clip = clip;
-        source.volume = volume;
-        source.spatialBlend = 1f;
         source.playOnAwake = false;
         source.loop = false;
+        ApplyExplosionAudioSettings(source, volume);
 
         source.Play();
         Destroy(audioGO, clip.length + 0.25f);
+    }
+
+    private void ApplyExplosionAudioSettings(AudioSource source, float volumeMultiplier)
+    {
+        if (source == null) return;
+
+        source.volume = Mathf.Max(0f, source.volume * Mathf.Max(0f, volumeMultiplier));
+        source.spatialBlend = use2DExplosionSound ? 0f : 1f;
+        source.rolloffMode = explosionRolloffMode;
+        source.minDistance = Mathf.Max(0.1f, explosionMinDistance);
+        source.maxDistance = Mathf.Max(source.minDistance, explosionMaxDistance);
+        source.dopplerLevel = Mathf.Max(0f, explosionDopplerLevel);
+        source.spread = 0f;
     }
 
     private float CalculateDamage(float distance)
