@@ -244,6 +244,17 @@ public class CommandStateMachine : MonoBehaviour
         }
 
         SetSelection(newSelection);
+
+        for (int i = 0; i < newSelection.Count; i++)
+        {
+            var unit = newSelection[i];
+            if (unit != null && unit.CompareTag("Ally"))
+            {
+                CommandModeSFX.PlayClickGlobal();
+                break;
+            }
+        }
+
         return true;
     }
 
@@ -568,6 +579,9 @@ public class CommandStateMachine : MonoBehaviour
         }
 
         SelectUnit(clickedUnit, additive: false);
+
+        if (clickedUnit.CompareTag("Ally"))
+            CommandModeSFX.PlayClickGlobal();
     }
 
     /// <summary>
@@ -578,6 +592,8 @@ public class CommandStateMachine : MonoBehaviour
     {
         if (CurrentState != State.MoveTargeting) return;
         if (selection.Count == 0) return;
+
+        CommandModeSFX.PlayMoveOrderGlobal();
 
         // If we are issuing a NON-attack command (move), clear any committed attack indicators
         // for these units so counts don't linger on enemies.
@@ -626,6 +642,9 @@ if (!keepSelectionAfterMove)
         if (CurrentState != State.MoveTargeting) return;
         if (selection.Count == 0) return;
         if (targetUnit == null) return;
+
+        if (targetUnit.CompareTag("Enemy") || targetUnit.CompareTag("Boss"))
+            CommandModeSFX.PlayAttackOrderGlobal();
 
         // Place a marker at the target's current projected ground position (visual feedback).
         Vector3 target = targetUnit.transform.position;

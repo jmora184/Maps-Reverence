@@ -480,6 +480,60 @@ if (gunHolder != null)
     }
 
 
+    public void ForceResetWeaponViewState()
+    {
+        // Hard reset ADS / zoom / recoil / reload visual state.
+        blockShooting = false;
+        extraSpreadDeg = 0f;
+        nextFireTime = 0f;
+
+        if (gunHolder != null)
+            gunHolder.localPosition = gunStartPos;
+
+        if (TestCam.instance != null)
+            TestCam.instance.ZoomOut();
+
+        if (activeGun != null)
+            activeGun.fireCounter = 0f;
+
+        // Cancel any visual reload animation that may have been mid-play on death.
+        var rifleReloads = GetComponentsInChildren<PlayerWeaponReloadAnimation>(true);
+        for (int i = 0; i < rifleReloads.Length; i++)
+        {
+            if (rifleReloads[i] != null)
+                rifleReloads[i].CancelReload();
+        }
+
+        var pistolReloads = GetComponentsInChildren<PlayerPistolReloadAnimation>(true);
+        for (int i = 0; i < pistolReloads.Length; i++)
+        {
+            if (pistolReloads[i] != null)
+                pistolReloads[i].CancelReload();
+        }
+
+        if (muzzleFlash != null)
+            muzzleFlash.SetActive(false);
+
+        if (muzzleFlashPS != null)
+            muzzleFlashPS.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
+
+        muzzleFlashUntil = 0f;
+
+        recoilPosCurrent = Vector3.zero;
+        recoilRotCurrent = Vector3.zero;
+        recoilPosVelocity = Vector3.zero;
+        recoilRotVelocity = Vector3.zero;
+
+        RecomputeAdsLocalTarget();
+
+        if (recoilTarget != null)
+        {
+            recoilTarget.localPosition = recoilPosBase;
+            recoilTarget.localRotation = Quaternion.Euler(recoilRotBase);
+        }
+    }
+
+
     private void ResolveFootstepAudioSourceIfNeeded()
     {
         if (footstepAudioSource == null)

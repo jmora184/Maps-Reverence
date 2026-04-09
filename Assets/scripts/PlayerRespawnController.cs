@@ -201,6 +201,10 @@ public class PlayerRespawnController : MonoBehaviour
     private IEnumerator RespawnRoutine()
     {
         isRespawning = true;
+
+        // Death can happen while ADS / reload / recoil is mid-state.
+        // Reset those visuals immediately so they do not persist into the respawn.
+        ResetPlayerWeaponViewState();
         SetPlayerControlEnabled(false);
 
         if (respawnDelay > 0f)
@@ -278,6 +282,13 @@ public class PlayerRespawnController : MonoBehaviour
     }
 
 
+    private void ResetPlayerWeaponViewState()
+    {
+        if (playerController != null)
+            playerController.ForceResetWeaponViewState();
+    }
+
+
     private void SetPlayerControlEnabled(bool enabledState)
     {
         if (playerController == null)
@@ -303,6 +314,8 @@ public class PlayerRespawnController : MonoBehaviour
             return;
         }
 
+        ResetPlayerWeaponViewState();
+
         // Teleport safely with CharacterController disabled.
         bool hadCC = characterController != null;
         if (hadCC)
@@ -320,6 +333,9 @@ public class PlayerRespawnController : MonoBehaviour
         RestoreFullHealth();
         if (restoreAmmoOnRespawn)
             RestoreAmmo();
+
+        // One more reset after teleport/restore so the active weapon always comes back in its hip pose.
+        ResetPlayerWeaponViewState();
 
         if (debugLogs)
             Debug.Log("[PlayerRespawnController] Player respawned at chosen point with restored health/ammo.", this);

@@ -42,6 +42,17 @@ public class MechSpawnAfterKills : MonoBehaviour
     [Tooltip("If true, force the boss icon off at startup until the kill threshold is reached.")]
     public bool disableBossIconAtStart = true;
 
+    [Header("Spawn Audio")]
+    [Tooltip("Optional AudioSource used to play the mech spawn SFX. If left empty, PlayClipAtPoint is used.")]
+    public AudioSource spawnAudioSource;
+
+    [Tooltip("Optional sound effect that plays when the mech spawns.")]
+    public AudioClip spawnSfx;
+
+    [Range(0f, 1f)]
+    [Tooltip("Volume used for the mech spawn SFX.")]
+    public float spawnSfxVolume = 1f;
+
     [Header("Spawn Popup")]
     [Tooltip("Optional TMP text object used as a temporary spawn popup.")]
     public TMP_Text spawnPopupText;
@@ -111,10 +122,29 @@ public class MechSpawnAfterKills : MonoBehaviour
         if (bossIconObject != null)
             bossIconObject.SetActive(true);
 
+        PlaySpawnSfx();
         ShowSpawnPopup();
 
         if (debugLogs)
             Debug.Log($"[MechSpawnAfterKills] Spawned mech after {requiredDestroyedCount} destroyed enemies.", this);
+    }
+
+    private void PlaySpawnSfx()
+    {
+        if (spawnSfx == null)
+            return;
+
+        if (spawnAudioSource != null)
+        {
+            spawnAudioSource.PlayOneShot(spawnSfx, spawnSfxVolume);
+            return;
+        }
+
+        Vector3 playPosition = transform.position;
+        if (mechObject != null)
+            playPosition = mechObject.transform.position;
+
+        AudioSource.PlayClipAtPoint(spawnSfx, playPosition, spawnSfxVolume);
     }
 
     private void ShowSpawnPopup()

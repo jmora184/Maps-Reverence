@@ -29,6 +29,15 @@ public class MeleeEnemyHealthController : MonoBehaviour, IDamageable
     [Tooltip("Optional: your melee enemy controller (any type). If empty, we auto-find one on this GameObject.")]
     public MonoBehaviour meleeController;
 
+    [Header("Death Audio (optional)")]
+    [Tooltip("Optional death SFX played once when this enemy dies.")]
+    public AudioClip deathSFX;
+
+    [Tooltip("Optional audio source for the death SFX. If empty, we auto-find one. If none exists, we use PlayClipAtPoint.")]
+    public AudioSource deathAudioSource;
+
+    [Range(0f, 1f)] public float deathSFXVolume = 1f;
+
     [Header("Directional Bonus UI (optional)")]
     [Tooltip("Optional world health bar used to briefly show a 2x sprite when directional bonus damage is applied.")]
     [SerializeField] private MeleeEnemyWorldHealthBar directionalDamageUI;
@@ -76,12 +85,14 @@ public class MeleeEnemyHealthController : MonoBehaviour, IDamageable
     public bool debugLogs = false;
 
     private bool _dead;
+    private bool _deathSoundPlayed;
 
     private static readonly BindingFlags BF = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
     private void Awake()
     {
         if (!animator) animator = GetComponentInChildren<Animator>();
+        ResolveDeathAudioSourceIfNeeded();
 
         if (maxHealth <= 0) maxHealth = 1;
         currentHealth = Mathf.Clamp(currentHealth, 0, maxHealth);
@@ -218,6 +229,8 @@ public class MeleeEnemyHealthController : MonoBehaviour, IDamageable
                 TrySetTriggerSafe(animator, dieTrigger);
         }
 
+        PlayDeathSound();
+
         // Tell the controller to actually "die" (stop AI / movement)
         NotifyControllerDeath();
 
@@ -247,6 +260,48 @@ public class MeleeEnemyHealthController : MonoBehaviour, IDamageable
     private void DisableSelf()
     {
         gameObject.SetActive(false);
+    }
+
+    private void PlayDeathSound()
+    {
+        if (_deathSoundPlayed) return;
+        _deathSoundPlayed = true;
+
+        if (deathSFX == null) return;
+
+        AudioSource src = ResolveDeathAudioSourceIfNeeded();
+        if (src != null && src.enabled && src.gameObject.activeInHierarchy)
+        {
+            src.PlayOneShot(deathSFX, Mathf.Clamp01(deathSFXVolume));
+            return;
+        }
+
+        AudioListener listener = FindObjectOfType<AudioListener>();
+        float volume = Mathf.Clamp01(deathSFXVolume);
+        if (listener != null)
+        {
+            Vector3 pos = transform.position;
+            pos.z = listener.transform.position.z;
+            AudioSource.PlayClipAtPoint(deathSFX, pos, volume);
+        }
+        else
+        {
+            AudioSource.PlayClipAtPoint(deathSFX, transform.position, volume);
+        }
+    }
+
+    private AudioSource ResolveDeathAudioSourceIfNeeded()
+    {
+        if (deathAudioSource != null) return deathAudioSource;
+
+        deathAudioSource = GetComponent<AudioSource>();
+        if (deathAudioSource != null) return deathAudioSource;
+
+        deathAudioSource = GetComponentInChildren<AudioSource>(true);
+        if (deathAudioSource != null) return deathAudioSource;
+
+        deathAudioSource = GetComponentInParent<AudioSource>();
+        return deathAudioSource;
     }
 
     private static void TrySetTriggerSafe(Animator a, string trigger)

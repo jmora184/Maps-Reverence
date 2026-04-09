@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Reflection;
 using UnityEngine;
 
 /// <summary>
@@ -30,7 +31,7 @@ public class PlayerWeaponMeleePunch : MonoBehaviour
     public bool requireEnemyTag = true;
 
     [Header("Melee")]
-    [Tooltip("Melee damage. If EnemyHealthController is used (maxHealth ~5), set this to 1–2 for balanced hits.")]
+    [Tooltip("Melee damage. If EnemyHealthController is used (maxHealth ~5), set this to 1â€“2 for balanced hits.")]
     public float damage = 1f;
 
     public float range = 2.2f;
@@ -39,6 +40,22 @@ public class PlayerWeaponMeleePunch : MonoBehaviour
 
     [Header("Input")]
     public KeyCode meleeKey = KeyCode.V;
+
+    [Header("ADS / Zoom Blocking")]
+    [Tooltip("If true, the player cannot start a melee attack while holding ADS / zoom (right mouse by default).")]
+    public bool blockMeleeWhileADS = true;
+
+    [Tooltip("If true, ADS / zoom is suppressed while the melee punch animation is active.")]
+    public bool blockADSWhilePunching = true;
+
+    [Tooltip("If true, forces TestCam zoom out when a punch starts or while ADS is attempted during a punch.")]
+    public bool forceZoomOutWhenPunching = true;
+
+    [Tooltip("If true, forces the gun holder back toward its hip-fire position while punching so ADS cannot visually stick.")]
+    public bool forceHipPositionWhilePunching = true;
+
+    [Tooltip("Multiplier applied to Player2Controller.adsSpeed when pushing the gun holder back to hip during a punch.")]
+    public float hipReturnSpeedMultiplier = 1.5f;
 
     [Header("Physics Filtering")]
     [Tooltip("Physics mask to search. You can leave as Everything. For best results exclude Ground/Water/Player layers if you have them.")]
@@ -63,12 +80,20 @@ public class PlayerWeaponMeleePunch : MonoBehaviour
     public bool blockFiringBriefly = true;
     public float firingBlockTime = 0.12f;
 
+    private static readonly BindingFlags BF = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+    private static FieldInfo _gunStartPosField;
+
     float _nextTimeAllowed;
 
     Transform _weaponVisual;
     Vector3 _weaponStartPos;
     Quaternion _weaponStartRot;
     bool _weaponCached;
+    Coroutine _punchRoutine;
+    bool _isPunching;
+    Player2Controller _player;
+
+    public bool IsPunching => _isPunching;
 
     void Awake()
     {
@@ -77,10 +102,25 @@ public class PlayerWeaponMeleePunch : MonoBehaviour
             Camera cam = GetComponentInChildren<Camera>();
             if (cam != null) aimOrigin = cam.transform;
         }
+
+        ResolvePlayer();
+    }
+
+    void OnDisable()
+    {
+        CancelPunchAndReset();
+    }
+
+    void OnDestroy()
+    {
+        CancelPunchAndReset();
     }
 
     void Update()
     {
+        if (_isPunching && blockADSWhilePunching)
+            EnforceNoADS();
+
         if (Input.GetKeyDown(meleeKey))
             TryMelee();
     }
@@ -88,20 +128,80 @@ public class PlayerWeaponMeleePunch : MonoBehaviour
     void TryMelee()
     {
         if (Time.time < _nextTimeAllowed) return;
+        if (_isPunching) return;
+        if (blockMeleeWhileADS && IsADSHeld())
+        {
+            if (debugLog) Debug.Log("[Melee] Blocked melee because ADS / zoom is currently active.");
+            return;
+        }
+
         _nextTimeAllowed = Time.time + cooldown;
 
         ResolveWeaponVisual();
 
         if (_weaponVisual != null)
         {
-            StopAllCoroutines();
-            StartCoroutine(PunchAnim());
+            CancelPunchAndReset();
+            _punchRoutine = StartCoroutine(PunchAnim());
         }
 
         if (blockFiringBriefly)
             BlockFiring();
 
+        if (blockADSWhilePunching)
+            EnforceNoADS();
+
         DoHitCheck();
+    }
+
+    void ResolvePlayer()
+    {
+        if (_player == null)
+        {
+            _player = Player2Controller.instance;
+            if (_player == null)
+                _player = GetComponentInParent<Player2Controller>();
+            if (_player == null)
+                _player = FindFirstObjectByType<Player2Controller>();
+        }
+    }
+
+    bool IsADSHeld()
+    {
+        return Input.GetMouseButton(1);
+    }
+
+    void EnforceNoADS()
+    {
+        ResolvePlayer();
+
+        if (forceZoomOutWhenPunching && TestCam.instance != null)
+            TestCam.instance.ZoomOut();
+
+        if (!forceHipPositionWhilePunching || _player == null || _player.gunHolder == null)
+            return;
+
+        Vector3 hipPos = GetPlayerGunStartPos(_player);
+        float adsSpeed = Mathf.Max(0.01f, _player.adsSpeed * Mathf.Max(0.01f, hipReturnSpeedMultiplier));
+        _player.gunHolder.localPosition = Vector3.MoveTowards(_player.gunHolder.localPosition, hipPos, adsSpeed * Time.deltaTime);
+    }
+
+    Vector3 GetPlayerGunStartPos(Player2Controller player)
+    {
+        if (player == null || player.gunHolder == null)
+            return Vector3.zero;
+
+        if (_gunStartPosField == null)
+            _gunStartPosField = typeof(Player2Controller).GetField("gunStartPos", BF);
+
+        if (_gunStartPosField != null)
+        {
+            object value = _gunStartPosField.GetValue(player);
+            if (value is Vector3 startPos)
+                return startPos;
+        }
+
+        return player.gunHolder.localPosition;
     }
 
     void ResolveWeaponVisual()
@@ -110,6 +210,9 @@ public class PlayerWeaponMeleePunch : MonoBehaviour
         {
             if (_weaponVisual != weaponVisualRootOverride)
             {
+                if (_isPunching)
+                    CancelPunchAndReset();
+
                 _weaponVisual = weaponVisualRootOverride;
                 CacheWeaponStart();
             }
@@ -119,6 +222,9 @@ public class PlayerWeaponMeleePunch : MonoBehaviour
         Gun activeGun = FindActiveGun();
         if (activeGun != null && _weaponVisual != activeGun.transform)
         {
+            if (_isPunching)
+                CancelPunchAndReset();
+
             _weaponVisual = activeGun.transform;
             CacheWeaponStart();
         }
@@ -132,10 +238,37 @@ public class PlayerWeaponMeleePunch : MonoBehaviour
         _weaponCached = true;
     }
 
+    void CancelPunchAndReset()
+    {
+        if (_punchRoutine != null)
+        {
+            StopCoroutine(_punchRoutine);
+            _punchRoutine = null;
+        }
+
+        if (_weaponVisual != null)
+        {
+            if (_weaponCached)
+            {
+                _weaponVisual.localPosition = _weaponStartPos;
+                _weaponVisual.localRotation = _weaponStartRot;
+            }
+            else
+            {
+                _weaponVisual.localPosition = Vector3.zero;
+                _weaponVisual.localRotation = Quaternion.identity;
+            }
+        }
+
+        _isPunching = false;
+    }
+
     IEnumerator PunchAnim()
     {
         if (_weaponVisual == null) yield break;
         if (!_weaponCached) CacheWeaponStart();
+
+        _isPunching = true;
 
         Vector3 fromPos = _weaponStartPos;
         Vector3 toPos = _weaponStartPos + punchLocalOffset;
@@ -149,6 +282,12 @@ public class PlayerWeaponMeleePunch : MonoBehaviour
         float t = 0f;
         while (t < 1f)
         {
+            if (_weaponVisual == null)
+                break;
+
+            if (blockADSWhilePunching)
+                EnforceNoADS();
+
             t += Time.deltaTime / dur;
             float s = Smooth01(t);
             _weaponVisual.localPosition = Vector3.Lerp(fromPos, toPos, s);
@@ -160,6 +299,12 @@ public class PlayerWeaponMeleePunch : MonoBehaviour
         t = 0f;
         while (t < 1f)
         {
+            if (_weaponVisual == null)
+                break;
+
+            if (blockADSWhilePunching)
+                EnforceNoADS();
+
             t += Time.deltaTime / dur;
             float s = Smooth01(t);
             _weaponVisual.localPosition = Vector3.Lerp(toPos, fromPos, s);
@@ -167,8 +312,14 @@ public class PlayerWeaponMeleePunch : MonoBehaviour
             yield return null;
         }
 
-        _weaponVisual.localPosition = fromPos;
-        _weaponVisual.localRotation = fromRot;
+        if (_weaponVisual != null)
+        {
+            _weaponVisual.localPosition = fromPos;
+            _weaponVisual.localRotation = fromRot;
+        }
+
+        _isPunching = false;
+        _punchRoutine = null;
     }
 
     static float Smooth01(float t)

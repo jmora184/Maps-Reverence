@@ -1,6 +1,7 @@
 using System.Collections;
 using UnityEngine;
 using UnityEngine.AI;
+using UnityEngine.Serialization;
 
 /// <summary>
 /// Melee-only enemy controller (walk/run + melee + take_damage) with optional patrol integration.
@@ -18,9 +19,17 @@ using UnityEngine.AI;
 ///   - TakeDamage(...) for hit-reaction
 ///   - Die() when HP reaches 0
 ///
+/// Footstep audio hookup:
+/// - Add animation events on the melee enemy's locomotion/run clips.
+/// - Call PlayLeftFootstep() on the left-foot contact frame.
+/// - Call PlayRightFootstep() on the right-foot contact frame.
+/// - Or call PlayFootstep() if you only want a single generic footstep event.
+///
 /// Fixes:
 /// - Stops all movement on death (NavMeshAgent + root motion + rigidbody/character controller)
 /// - Optional corpse lifetime (auto-destroy after N seconds)
+/// - Uses one-shot footsteps instead of a looping run clip
+/// - Clears queued attack/take-damage triggers on death and disables melee damage range
 /// </summary>
 [DisallowMultipleComponent]
 public class MeleeEnemy2Controller : MonoBehaviour
@@ -40,9 +49,6 @@ public class MeleeEnemy2Controller : MonoBehaviour
     public bool autoAggroPlayerByDistance = true;
     [Min(0f)] public float distanceToChase = 22f;
     [Min(0f)] public float distanceToLose = 40f;
-
-
-    
 
     [Header("Sight / Auto Aggro (like Animal)")]
     [Tooltip("If true, auto-aggro uses sightRange (and optional line-of-sight) instead of simple distanceToChase. " +
@@ -67,8 +73,9 @@ public class MeleeEnemy2Controller : MonoBehaviour
     [Tooltip("Optional height offset for the target point when doing line-of-sight raycasts.")]
     public float sightTargetHeight = 1.2f;
 
-[Tooltip("If > 0, being shot will only aggro if the attacker is within this distance. Set to 0 for unlimited (old behavior).")]
+    [Tooltip("If > 0, being shot will only aggro if the attacker is within this distance. Set to 0 for unlimited (old behavior).")]
     [Min(0f)] public float shotAggroDistance = 60f;
+
     [Header("Melee")]
     [Min(0.1f)] public float desiredMeleeRange = 2.2f;
     [Min(0.05f)] public float attackCooldown = 1.1f;
@@ -82,17 +89,33 @@ public class MeleeEnemy2Controller : MonoBehaviour
     public float minAttackPitch = 0.96f;
     public float maxAttackPitch = 1.04f;
 
-    [Header("Run Audio (Optional)")]
-    public AudioSource runAudioSource;
-    public AudioClip runLoopSFX;
-    [Min(0f)] public float runVolume = 1f;
-    public float runPitch = 1f;
+    [Header("Footstep Audio (Optional)")]
+    [FormerlySerializedAs("runAudioSource")]
+    public AudioSource footstepAudioSource;
+
+    [Tooltip("Optional left-foot clip for animation event playback.")]
+    public AudioClip leftFootstepSFX;
+
+    [Tooltip("Optional right-foot clip for animation event playback.")]
+    public AudioClip rightFootstepSFX;
+
+    [FormerlySerializedAs("runLoopSFX")]
+    [Tooltip("Optional fallback footstep clip if left/right clips are not assigned.")]
+    public AudioClip defaultFootstepSFX;
+
+    [FormerlySerializedAs("runVolume")]
+    [Min(0f)] public float footstepVolume = 1f;
+
+    [Tooltip("If true, randomizes one-shot footstep pitch slightly.")]
+    public bool randomizeFootstepPitch = true;
+
+    public float minFootstepPitch = 0.96f;
+    public float maxFootstepPitch = 1.04f;
 
     [Header("Animator Triggers")]
     public string attackTrigger = "attack";
     public string takeDamageTrigger = "take_damage";
     [Min(0f)] public float takeDamageTriggerCooldown = 0.12f;
-
 
     [Header("Hit-Reaction Throttling")]
     [Tooltip("Optional: prevents auto-fire from re-triggering take_damage every bullet. If enabled, we won't re-trigger while already in the take_damage state and we enforce a minimum interval.")]
@@ -103,6 +126,7 @@ public class MeleeEnemy2Controller : MonoBehaviour
 
     [Tooltip("If throttleTakeDamageReactions is true, this is the minimum time between take_damage triggers (seconds).")]
     [Min(0f)] public float takeDamageMinInterval = 0.40f;
+
     [Header("Death (stop movement)")]
     [Tooltip("Animator trigger to play on death (leave empty if you use isDead bool instead).")]
     public string dieTrigger = "Die";
@@ -149,10 +173,10 @@ public class MeleeEnemy2Controller : MonoBehaviour
 
     private bool isDead = false;
     private Vector3 deathPos;
-    private Quaternion deathRot;
 
     private Rigidbody rb;
     private CharacterController characterController;
+    private MeleeEnemyMeleeDamageRange meleeDamageRange;
 
     private void Awake()
     {
@@ -160,9 +184,10 @@ public class MeleeEnemy2Controller : MonoBehaviour
         anim = GetComponentInChildren<Animator>();
         rb = GetComponent<Rigidbody>();
         characterController = GetComponent<CharacterController>();
+        meleeDamageRange = GetComponentInChildren<MeleeEnemyMeleeDamageRange>(true);
 
         ResolveAttackAudioSourceIfNeeded();
-        ResolveRunAudioSourceIfNeeded();
+        ResolveFootstepAudioSourceIfNeeded();
 
         if (waypointPatrolBehaviour == null)
         {
@@ -237,8 +262,6 @@ public class MeleeEnemy2Controller : MonoBehaviour
             ApplyWalkSpeed();
             DriveAnimatorLocomotion(agent.velocity.magnitude, hasCombatTarget: false);
         }
-
-        UpdateRunLoopAudio();
     }
 
     private void LateUpdate()
@@ -256,7 +279,6 @@ public class MeleeEnemy2Controller : MonoBehaviour
         }
     }
 
-    
     private bool IsWithinSightRange(Transform t)
     {
         if (t == null) return false;
@@ -281,7 +303,7 @@ public class MeleeEnemy2Controller : MonoBehaviour
         return !Physics.Raycast(origin, dir, dist, sightLineOfSightBlockers, QueryTriggerInteraction.Ignore);
     }
 
-private void CombatTick()
+    private void CombatTick()
     {
         if (combatTarget == null) return;
 
@@ -372,6 +394,7 @@ private void CombatTick()
 
     private void TriggerAttack()
     {
+        if (isDead) return;
         if (anim == null) return;
         if (string.IsNullOrEmpty(attackTrigger)) return;
 
@@ -380,72 +403,41 @@ private void CombatTick()
         TriggerAttackSound();
     }
 
-    private void ResolveRunAudioSourceIfNeeded()
+    private void ResolveFootstepAudioSourceIfNeeded()
     {
-        if (runAudioSource != null) return;
+        if (footstepAudioSource != null) return;
 
         var localSources = GetComponents<AudioSource>();
         foreach (var s in localSources)
         {
             if (s != null && s != attackAudioSource)
             {
-                runAudioSource = s;
+                footstepAudioSource = s;
                 return;
             }
         }
 
-        var childSources = GetComponentsInChildren<AudioSource>();
+        var childSources = GetComponentsInChildren<AudioSource>(true);
         foreach (var s in childSources)
         {
             if (s != null && s != attackAudioSource)
             {
-                runAudioSource = s;
+                footstepAudioSource = s;
                 return;
             }
         }
 
         // Fallback: share the same source only if no separate source exists.
-        if (runAudioSource == null)
-            runAudioSource = attackAudioSource;
+        if (footstepAudioSource == null)
+            footstepAudioSource = attackAudioSource;
     }
 
-    private void UpdateRunLoopAudio()
+    private void StopFootstepAudio()
     {
-        if (runLoopSFX == null)
-        {
-            StopRunLoopSound();
-            return;
-        }
-
-        if (runAudioSource == null)
-            ResolveRunAudioSourceIfNeeded();
-        if (runAudioSource == null) return;
-
-        bool shouldPlay = !isDead && combatTarget != null && agent != null && !agent.isStopped && agent.velocity.magnitude > movingThreshold;
-
-        if (!shouldPlay)
-        {
-            StopRunLoopSound();
-            return;
-        }
-
-        if (runAudioSource.clip != runLoopSFX)
-            runAudioSource.clip = runLoopSFX;
-
-        runAudioSource.loop = true;
-        runAudioSource.playOnAwake = false;
-        runAudioSource.volume = runVolume;
-        runAudioSource.pitch = runPitch;
-
-        if (!runAudioSource.isPlaying)
-            runAudioSource.Play();
-    }
-
-    private void StopRunLoopSound()
-    {
-        if (runAudioSource == null) return;
-        if (runAudioSource.isPlaying && runAudioSource.clip == runLoopSFX)
-            runAudioSource.Stop();
+        if (footstepAudioSource == null) return;
+        if (footstepAudioSource.isPlaying && footstepAudioSource.loop)
+            footstepAudioSource.Stop();
+        footstepAudioSource.loop = false;
     }
 
     private void ResolveAttackAudioSourceIfNeeded()
@@ -473,6 +465,45 @@ private void CombatTick()
 
         attackAudioSource.PlayOneShot(attackSFX, attackVolume);
         attackAudioSource.pitch = originalPitch;
+    }
+
+    public void PlayLeftFootstep()
+    {
+        PlayFootstepClip(leftFootstepSFX != null ? leftFootstepSFX : defaultFootstepSFX);
+    }
+
+    public void PlayRightFootstep()
+    {
+        PlayFootstepClip(rightFootstepSFX != null ? rightFootstepSFX : defaultFootstepSFX);
+    }
+
+    public void PlayFootstep()
+    {
+        AudioClip clip = defaultFootstepSFX != null ? defaultFootstepSFX : (leftFootstepSFX != null ? leftFootstepSFX : rightFootstepSFX);
+        PlayFootstepClip(clip);
+    }
+
+    private void PlayFootstepClip(AudioClip clip)
+    {
+        if (isDead) return;
+        if (clip == null) return;
+
+        if (footstepAudioSource == null)
+            ResolveFootstepAudioSourceIfNeeded();
+        if (footstepAudioSource == null) return;
+
+        StopFootstepAudio();
+
+        float originalPitch = footstepAudioSource.pitch;
+        if (randomizeFootstepPitch)
+        {
+            float low = Mathf.Min(minFootstepPitch, maxFootstepPitch);
+            float high = Mathf.Max(minFootstepPitch, maxFootstepPitch);
+            footstepAudioSource.pitch = Random.Range(low, high);
+        }
+
+        footstepAudioSource.PlayOneShot(clip, footstepVolume);
+        footstepAudioSource.pitch = originalPitch;
     }
 
     private void TriggerTakeDamage()
@@ -553,7 +584,7 @@ private void CombatTick()
     {
         if (isDead) return;
         TriggerTakeDamage();
-        
+
         if (attacker != null)
         {
             if (shotAggroDistance <= 0f || Vector3.Distance(transform.position, attacker.position) <= shotAggroDistance)
@@ -565,7 +596,7 @@ private void CombatTick()
     {
         if (isDead) return;
         TriggerTakeDamage();
-        
+
         if (attacker != null)
         {
             if (shotAggroDistance <= 0f || Vector3.Distance(transform.position, attacker.position) <= shotAggroDistance)
@@ -581,16 +612,18 @@ private void CombatTick()
     {
         if (isDead) return;
         isDead = true;
-        StopRunLoopSound();
+        StopFootstepAudio();
 
         deathPos = transform.position;
-        deathRot = transform.rotation;
 
         combatTarget = null;
         autoAggroPlayerByDistance = false;
 
         if (waypointPatrolBehaviour != null)
             waypointPatrolBehaviour.enabled = false;
+
+        if (meleeDamageRange != null)
+            meleeDamageRange.enabled = false;
 
         // Stop NavMeshAgent hard
         if (agent != null)
@@ -622,6 +655,12 @@ private void CombatTick()
         // Animator death params
         if (anim != null)
         {
+            if (!string.IsNullOrEmpty(attackTrigger))
+                anim.ResetTrigger(attackTrigger);
+
+            if (!string.IsNullOrEmpty(takeDamageTrigger))
+                anim.ResetTrigger(takeDamageTrigger);
+
             if (disableRootMotionOnDeath)
                 anim.applyRootMotion = false;
 
@@ -675,7 +714,7 @@ private void CombatTick()
     {
         if (isDead) return;
 
-        StopRunLoopSound();
+        StopFootstepAudio();
         combatTarget = null;
 
         if (agent != null)

@@ -102,6 +102,13 @@ public class CommandExecutor : MonoBehaviour
     [Tooltip("If true, when a direct ATTACK target dies, the ordered agents are stopped and their stale combat paths are cleared immediately. This prevents teams from continuing to crowd into the dead target's center point.")]
     public bool stopAgentsWhenCombatTargetGone = true;
 
+    [Header("Enemy Team Attack Retarget")]
+    [Tooltip("When attacking an enemy that belongs to an EnemyTeam_* root, keep the attack active until the whole enemy team is dead instead of stopping when the first targeted member dies.")]
+    public bool keepAttackingRemainingEnemyTeamMembers = true;
+
+    [Tooltip("Parent/root name prefix used to detect grouped enemy team members.")]
+    public string enemyTeamParentPrefix = "EnemyTeam_";
+
 
     [Header("Join Settings")]
     [Tooltip("Desired spacing (meters) from the team leader (the last-clicked ally) when joining. Larger = more spread.")]
@@ -1059,8 +1066,10 @@ private void ClearPlannedDestinationForTeams(List<GameObject> expandedSelection)
         if (team == null) return;
         if (targetT == null) return;
 
+        Transform watchRoot = GetAttackCleanupWatchRoot(targetT);
+
         StopPinClearRoutine();
-        pinClearRoutine = StartCoroutine(ClearCombatTargetGone_TeamRoutine(team, targetT));
+        pinClearRoutine = StartCoroutine(ClearCombatTargetGone_TeamRoutine(team, targetT, watchRoot));
     }
 
     private void StartCombatTargetCleanupRoutine_Units(List<GameObject> units, Transform targetT)
@@ -1068,8 +1077,16 @@ private void ClearPlannedDestinationForTeams(List<GameObject> expandedSelection)
         if (units == null || units.Count == 0) return;
         if (targetT == null) return;
 
+        Transform watchRoot = GetAttackCleanupWatchRoot(targetT);
+
         StopPinClearRoutine();
-        pinClearRoutine = StartCoroutine(ClearCombatTargetGone_UnitsRoutine(new List<GameObject>(units), targetT));
+        pinClearRoutine = StartCoroutine(ClearCombatTargetGone_UnitsRoutine(new List<GameObject>(units), targetT, watchRoot));
+    }
+
+    private Transform GetAttackCleanupWatchRoot(Transform targetT)
+    {
+        if (!keepAttackingRemainingEnemyTeamMembers) return null;
+        return FindEnemyTeamRoot(targetT);
     }
 
     private void StartFollowPinClearRoutine_Team(Team team, Transform targetT)
@@ -1138,6 +1155,9 @@ private void ClearPlannedDestinationForTeams(List<GameObject> expandedSelection)
         if (MoveDestinationMarkerSystem.Instance != null && units != null && units.Count > 0)
             MoveDestinationMarkerSystem.Instance.ClearForUnits(units.ToArray());
 
+        if (units != null && units.Count > 0)
+            AttackTargetIndicatorSystem.Instance?.UnregisterAttackers(units);
+
         pinClearRoutine = null;
     }
 
@@ -1158,6 +1178,48 @@ private void ClearPlannedDestinationForTeams(List<GameObject> expandedSelection)
         return false;
     }
 
+    private Transform FindEnemyTeamRoot(Transform targetT)
+    {
+        if (targetT == null) return null;
+        if (string.IsNullOrEmpty(enemyTeamParentPrefix)) return null;
+
+        Transform cur = targetT;
+        while (cur != null)
+        {
+            if (cur.name.StartsWith(enemyTeamParentPrefix))
+                return cur;
+
+            cur = cur.parent;
+        }
+
+        return null;
+    }
+
+    private bool HasAnyLivingEnemyTeamMembers(Transform teamRoot)
+    {
+        if (teamRoot == null) return false;
+
+        var all = teamRoot.GetComponentsInChildren<Transform>(true);
+        for (int i = 0; i < all.Length; i++)
+        {
+            Transform t = all[i];
+            if (t == null || t == teamRoot) continue;
+            if (!(t.CompareTag("Enemy") || t.CompareTag("Boss"))) continue;
+            if (IsFollowTargetGone(t)) continue;
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool IsAttackObjectiveGone(Transform targetT, Transform watchRoot)
+    {
+        if (watchRoot != null)
+            return !HasAnyLivingEnemyTeamMembers(watchRoot);
+
+        return IsFollowTargetGone(targetT);
+    }
+
     private List<NavMeshAgent> GatherAgentsForTeam(Team team)
     {
         List<GameObject> gos = new List<GameObject>();
@@ -1174,17 +1236,19 @@ private void ClearPlannedDestinationForTeams(List<GameObject> expandedSelection)
         return GatherAgents(gos);
     }
 
-    private IEnumerator ClearCombatTargetGone_TeamRoutine(Team team, Transform targetT)
+    private IEnumerator ClearCombatTargetGone_TeamRoutine(Team team, Transform targetT, Transform watchRoot)
     {
         if (team == null) yield break;
 
         float interval = Mathf.Max(0.05f, pinArrivalCheckInterval);
 
-        while (!IsFollowTargetGone(targetT))
+        while (!IsAttackObjectiveGone(targetT, watchRoot))
             yield return new WaitForSeconds(interval);
 
         if (stopAgentsWhenCombatTargetGone)
             StopAgents(GatherAgentsForTeam(team));
+
+        List<GameObject> teamAttackers = null;
 
         if (MoveDestinationMarkerSystem.Instance != null)
         {
@@ -1192,27 +1256,40 @@ private void ClearPlannedDestinationForTeams(List<GameObject> expandedSelection)
 
             if (team.Members != null && team.Members.Count > 0)
             {
-                List<GameObject> gos = new List<GameObject>(team.Members.Count);
+                teamAttackers = new List<GameObject>(team.Members.Count);
                 for (int i = 0; i < team.Members.Count; i++)
                 {
                     var tr = team.Members[i];
                     if (tr == null) continue;
-                    gos.Add(tr.gameObject);
+                    teamAttackers.Add(tr.gameObject);
                 }
 
-                if (gos.Count > 0)
-                    MoveDestinationMarkerSystem.Instance.ClearForUnits(gos.ToArray());
+                if (teamAttackers.Count > 0)
+                    MoveDestinationMarkerSystem.Instance.ClearForUnits(teamAttackers.ToArray());
             }
         }
+        else if (team.Members != null && team.Members.Count > 0)
+        {
+            teamAttackers = new List<GameObject>(team.Members.Count);
+            for (int i = 0; i < team.Members.Count; i++)
+            {
+                var tr = team.Members[i];
+                if (tr == null) continue;
+                teamAttackers.Add(tr.gameObject);
+            }
+        }
+
+        if (teamAttackers != null && teamAttackers.Count > 0)
+            AttackTargetIndicatorSystem.Instance?.UnregisterAttackers(teamAttackers);
 
         pinClearRoutine = null;
     }
 
-    private IEnumerator ClearCombatTargetGone_UnitsRoutine(List<GameObject> units, Transform targetT)
+    private IEnumerator ClearCombatTargetGone_UnitsRoutine(List<GameObject> units, Transform targetT, Transform watchRoot)
     {
         float interval = Mathf.Max(0.05f, pinArrivalCheckInterval);
 
-        while (!IsFollowTargetGone(targetT))
+        while (!IsAttackObjectiveGone(targetT, watchRoot))
             yield return new WaitForSeconds(interval);
 
         if (stopAgentsWhenCombatTargetGone)

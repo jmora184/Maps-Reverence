@@ -201,6 +201,7 @@ public class ContextCommandPanelUI : MonoBehaviour
             joinButton.onClick.RemoveAllListeners();
             joinButton.onClick.AddListener(() =>
             {
+                CommandModeSFX.PlayClickGlobal();
                 if (sm == null || sm.PrimarySelected == null) return;
 
                 sm.ArmJoinFromCurrentSelection();
@@ -214,6 +215,7 @@ public class ContextCommandPanelUI : MonoBehaviour
             moveButton.onClick.RemoveAllListeners();
             moveButton.onClick.AddListener(() =>
             {
+                CommandModeSFX.PlayClickGlobal();
                 if (sm == null || sm.PrimarySelected == null) return;
 
                 sm.ArmMoveFromCurrentSelection();
@@ -231,6 +233,7 @@ public class ContextCommandPanelUI : MonoBehaviour
             cancelButton.onClick.RemoveAllListeners();
             cancelButton.onClick.AddListener(() =>
             {
+                CommandModeSFX.PlayClickGlobal();
                 if (sm != null)
                     sm.ClearSelection();
 

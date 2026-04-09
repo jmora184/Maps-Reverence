@@ -62,6 +62,12 @@ public class MeleeEnemyMeleeDamageRange : MonoBehaviour
     {
         if (!animator) return;
 
+        if (IsOwnerDead())
+        {
+            _wasInAttack = false;
+            return;
+        }
+
         bool inAttack = IsInAnyState(animator, layerIndex, attackStateNames);
 
         if (inAttack && !_wasInAttack)
@@ -74,6 +80,7 @@ public class MeleeEnemyMeleeDamageRange : MonoBehaviour
 
     private void TryDamage()
     {
+        if (IsOwnerDead()) return;
         if (Time.time < _nextDamageTime) return;
 
         Transform target = ResolveTarget();
@@ -195,6 +202,54 @@ public class MeleeEnemyMeleeDamageRange : MonoBehaviour
         }
 
         return best;
+    }
+
+    private bool IsOwnerDead()
+    {
+        if (meleeController != null)
+        {
+            Type ct = meleeController.GetType();
+
+            MethodInfo m = ct.GetMethod("IsDead", BF, null, Type.EmptyTypes, null);
+            if (m != null)
+            {
+                try
+                {
+                    object result = m.Invoke(meleeController, null);
+                    if (result is bool dead && dead)
+                        return true;
+                }
+                catch { }
+            }
+
+            PropertyInfo p = ct.GetProperty("IsDead", BF);
+            if (p != null && p.PropertyType == typeof(bool))
+            {
+                try
+                {
+                    if ((bool)p.GetValue(meleeController, null))
+                        return true;
+                }
+                catch { }
+            }
+
+            FieldInfo f = ct.GetField("isDead", BF);
+            if (f != null && f.FieldType == typeof(bool))
+            {
+                try
+                {
+                    if ((bool)f.GetValue(meleeController))
+                        return true;
+                }
+                catch { }
+            }
+        }
+
+        MeleeEnemyHealthController health = GetComponentInParent<MeleeEnemyHealthController>();
+        if (health == null)
+            health = GetComponentInChildren<MeleeEnemyHealthController>(true);
+
+        return health != null && health.IsDead;
     }
 
     private bool TryApplyDamage(GameObject victim, int amount)

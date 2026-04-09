@@ -45,7 +45,10 @@ public class EnemyHealthController : MonoBehaviour
     [Tooltip("Damage multiplier applied when the shot comes from outside the front cone.")]
     public float sideOrBackDamageMultiplier = 2f;
 
-    [Tooltip("Half-angle of the FRONT cone in degrees. Shots inside this cone deal normal damage. Shots outside it get the side/back multiplier.")]
+    [Tooltip("Damage multiplier applied when the shot comes from INSIDE the front cone. Default 1 = normal damage. Set lower for front-armored enemies.")]
+    public float frontDamageMultiplier = 1f;
+
+    [Tooltip("Half-angle of the FRONT cone in degrees. Shots inside this cone use the front damage multiplier. Shots outside it get the side/back multiplier.")]
     [Range(0f, 180f)]
     public float frontDamageHalfAngle = 60f;
 
@@ -201,7 +204,14 @@ private int ApplyDirectionalDamageMultiplier(int damageAmount, Vector3 incomingD
     bool isFrontShot = dot >= frontDotThreshold;
 
     if (isFrontShot)
-        return damageAmount;
+    {
+        float frontMultiplier = Mathf.Max(0f, frontDamageMultiplier);
+        if (Mathf.Approximately(frontMultiplier, 1f))
+            return damageAmount;
+
+        float frontMultiplied = damageAmount * frontMultiplier;
+        return Mathf.Max(0, Mathf.RoundToInt(frontMultiplied));
+    }
 
     float multiplier = Mathf.Max(1f, sideOrBackDamageMultiplier);
     if (multiplier <= 1f)

@@ -40,6 +40,8 @@ public class MNRSaveSystem : MonoBehaviour
     {
         public int slot = -1;
         public bool alive = false;
+        public bool hasAmmoDonationState = false;
+        public bool ammoDonated = false;
     }
 
     [Serializable]
@@ -65,6 +67,9 @@ public class MNRSaveSystem : MonoBehaviour
 
         public bool hasAllyPingPongPatrol = false;
         public bool allyPingPongPatrolEnabled = false;
+
+        public bool hasAmmoDonationState = false;
+        public bool ammoDonated = false;
     }
 
     private static MNRSaveSystem _instance;
@@ -303,10 +308,14 @@ public class MNRSaveSystem : MonoBehaviour
 
             for (int m = 0; m < members.Length; m++)
             {
+                var donor = FindAmmoSupplyDonor(members[m]);
+
                 state.members.Add(new MemberState
                 {
                     slot = members[m].MemberSlot,
-                    alive = members[m].IsAliveForSave()
+                    alive = members[m].IsAliveForSave(),
+                    hasAmmoDonationState = donor != null,
+                    ammoDonated = donor != null && donor.HasDonatedAmmo
                 });
             }
         }
@@ -386,6 +395,13 @@ public class MNRSaveSystem : MonoBehaviour
                     state.hasAllyPingPongPatrol = true;
                     state.allyPingPongPatrolEnabled = allyPingPongPatrol.patrolEnabledOnStart;
                 }
+            }
+
+            var donor = FindAmmoSupplyDonor(actor);
+            if (donor != null)
+            {
+                state.hasAmmoDonationState = true;
+                state.ammoDonated = donor.HasDonatedAmmo;
             }
 
             data.individuals.Add(state);
@@ -520,12 +536,12 @@ public class MNRSaveSystem : MonoBehaviour
             if (members == null || members.Length == 0)
                 continue;
 
-            var aliveLookup = new Dictionary<int, bool>();
+            var memberLookup = new Dictionary<int, MemberState>();
             for (int m = 0; m < team.members.Count; m++)
             {
                 var memberState = team.members[m];
                 if (memberState == null) continue;
-                aliveLookup[memberState.slot] = memberState.alive;
+                memberLookup[memberState.slot] = memberState;
             }
 
             for (int m = 0; m < members.Length; m++)
@@ -533,9 +549,18 @@ public class MNRSaveSystem : MonoBehaviour
                 var member = members[m];
                 if (member == null) continue;
 
-                bool shouldBeAlive = aliveLookup.TryGetValue(member.MemberSlot, out var alive) && alive;
-                if (!shouldBeAlive && member.gameObject.activeSelf)
-                    member.gameObject.SetActive(false);
+                bool foundState = memberLookup.TryGetValue(member.MemberSlot, out var memberState);
+                bool shouldBeAlive = foundState && memberState.alive;
+                if (!shouldBeAlive)
+                {
+                    if (member.gameObject.activeSelf)
+                        member.gameObject.SetActive(false);
+                    continue;
+                }
+
+                var donor = FindAmmoSupplyDonor(member);
+                if (donor != null && foundState && memberState.hasAmmoDonationState)
+                    donor.ApplySavedDonationState(memberState.ammoDonated);
             }
         }
     }
@@ -616,6 +641,19 @@ public class MNRSaveSystem : MonoBehaviour
         var allyPingPongPatrol = actor.GetComponent<AllyPatrolPingPong>();
         if (allyPingPongPatrol != null && state.hasAllyPingPongPatrol)
             allyPingPongPatrol.SetPatrolEnabled(state.allyPingPongPatrolEnabled);
+
+        var donor = FindAmmoSupplyDonor(actor);
+        if (donor != null && state.hasAmmoDonationState)
+            donor.ApplySavedDonationState(state.ammoDonated);
+    }
+
+    private static AllyAmmoSupplyDonor FindAmmoSupplyDonor(Component component)
+    {
+        if (component == null)
+            return null;
+
+        return component.GetComponent<AllyAmmoSupplyDonor>()
+               ?? component.GetComponentInChildren<AllyAmmoSupplyDonor>(true);
     }
 
     private static void ApplyTransformState(Transform target, Vector3 position, Quaternion rotation)

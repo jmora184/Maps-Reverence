@@ -171,6 +171,8 @@ public class PlayerContextCommandPanelUI : MonoBehaviour
 
     private void OnFollowMeClicked()
     {
+        CommandModeSFX.PlayClickGlobal();
+
         // Resolve player
         ResolvePlayerIfNeeded();
         if (playerTarget == null)
@@ -190,6 +192,7 @@ public class PlayerContextCommandPanelUI : MonoBehaviour
 
     private void OnLineFormationClicked()
     {
+        CommandModeSFX.PlayClickGlobal();
         ResolvePlayerIfNeeded();
 
         var sys = PlayerSquadFollowSystem.EnsureExists();
@@ -201,6 +204,7 @@ public class PlayerContextCommandPanelUI : MonoBehaviour
 
     private void OnWedgeFormationClicked()
     {
+        CommandModeSFX.PlayClickGlobal();
         ResolvePlayerIfNeeded();
 
         var sys = PlayerSquadFollowSystem.EnsureExists();
@@ -212,6 +216,8 @@ public class PlayerContextCommandPanelUI : MonoBehaviour
 
     private void OnCancelFormationClicked()
     {
+        CommandModeSFX.PlayClickGlobal();
+
         // Return to the default "normal" follow behavior (Arc-Behind)
         // and cancel any active pick session.
         var sys = PlayerSquadFollowSystem.EnsureExists();
@@ -225,12 +231,14 @@ public class PlayerContextCommandPanelUI : MonoBehaviour
 
     private void OnHoldFireClicked()
     {
+        CommandModeSFX.PlayClickGlobal();
         Debug.Log("[Player Panel] Hold Fire clicked (stub).");
         HideImmediate();
     }
 
     private void OnHoldPositionClicked()
     {
+        CommandModeSFX.PlayClickGlobal();
         Debug.Log("[Player Panel] Hold Position clicked (stub).");
         HideImmediate();
     }

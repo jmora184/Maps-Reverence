@@ -1,6 +1,7 @@
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
+using UnityEngine.Audio;
 
 /// <summary>
 /// Simple pause menu controller for MNR.
@@ -30,11 +31,44 @@ public class PauseMenu : MonoBehaviour
     [Header("Audio")]
     [SerializeField] private bool pauseAudio = true;
 
+    [Tooltip("Optional AudioMixer used for music/SFX mute buttons.")]
+    [SerializeField] private AudioMixer gameAudioMixer;
+
+    [Tooltip("Exposed AudioMixer parameter name for gameplay music volume.")]
+    [SerializeField] private string musicVolumeParameter = "MusicVolume";
+
+    [Tooltip("Exposed AudioMixer parameter name for sound effects volume.")]
+    [SerializeField] private string sfxVolumeParameter = "SFXVolume";
+
+    [Tooltip("dB value used when music is not muted.")]
+    [SerializeField] private float unmutedMusicDb = 0f;
+
+    [Tooltip("dB value used when music is muted.")]
+    [SerializeField] private float mutedMusicDb = -80f;
+
+    [Tooltip("dB value used when SFX are not muted.")]
+    [SerializeField] private float unmutedSfxDb = 0f;
+
+    [Tooltip("dB value used when SFX are muted.")]
+    [SerializeField] private float mutedSfxDb = -80f;
+
     [Header("Optional Buttons")]
     [SerializeField] private Button resumeButton;
     [SerializeField] private Button saveButton;
     [SerializeField] private Button tipsButton;
     [SerializeField] private Button controlsButton;
+
+    [Tooltip("Optional button to mute gameplay music.")]
+    [SerializeField] private Button muteMusicButton;
+
+    [Tooltip("Optional button to unmute gameplay music.")]
+    [SerializeField] private Button unmuteMusicButton;
+
+    [Tooltip("Optional button to mute all sound effects.")]
+    [SerializeField] private Button muteSfxButton;
+
+    [Tooltip("Optional button to unmute all sound effects.")]
+    [SerializeField] private Button unmuteSfxButton;
 
     [Tooltip("Legacy/shared back button. Optional. Still wired to ShowMain().")]
     [SerializeField] private Button backButton;
@@ -53,6 +87,9 @@ public class PauseMenu : MonoBehaviour
     [SerializeField] private Vector3 respawnOffset = new Vector3(10f, 10f, 10f);
     [SerializeField] private bool resumeAfterRespawn = true;
 
+    private const string MusicMutedPrefKey = "PauseMenu_MusicMuted";
+    private const string SfxMutedPrefKey = "PauseMenu_SfxMuted";
+
     private bool isPaused;
     private float previousTimeScale = 1f;
     private bool previousCursorVisible;
@@ -64,6 +101,7 @@ public class PauseMenu : MonoBehaviour
     {
         EnsureValidSetup();
         WireButtons();
+        ApplySavedAudioSettings();
         ForceClosedImmediate();
     }
 
@@ -91,6 +129,12 @@ public class PauseMenu : MonoBehaviour
         WireButton(saveButton, SaveGame);
         WireButton(tipsButton, ShowTips);
         WireButton(controlsButton, ShowControls);
+
+        WireButton(muteMusicButton, MuteMusic);
+        WireButton(unmuteMusicButton, UnmuteMusic);
+        WireButton(muteSfxButton, MuteSfx);
+        WireButton(unmuteSfxButton, UnmuteSfx);
+
         WireButton(backButton, ShowMain);
         WireButton(tipsBackButton, ShowMain);
         WireButton(controlsBackButton, ShowMain);
@@ -189,6 +233,26 @@ public class PauseMenu : MonoBehaviour
         if (controlsPanel != null) controlsPanel.SetActive(true);
     }
 
+    public void MuteMusic()
+    {
+        SetMusicMuted(true);
+    }
+
+    public void UnmuteMusic()
+    {
+        SetMusicMuted(false);
+    }
+
+    public void MuteSfx()
+    {
+        SetSfxMuted(true);
+    }
+
+    public void UnmuteSfx()
+    {
+        SetSfxMuted(false);
+    }
+
     public void RespawnPlayerByOffset()
     {
         if (playerToRespawn == null)
@@ -267,5 +331,66 @@ public class PauseMenu : MonoBehaviour
             if (hideWhilePaused[i] != null)
                 hideWhilePaused[i].SetActive(visible);
         }
+    }
+
+    private void ApplySavedAudioSettings()
+    {
+        bool musicMuted = PlayerPrefs.GetInt(MusicMutedPrefKey, 0) == 1;
+        bool sfxMuted = PlayerPrefs.GetInt(SfxMutedPrefKey, 0) == 1;
+
+        SetMusicMutedInternal(musicMuted, false);
+        SetSfxMutedInternal(sfxMuted, false);
+    }
+
+    private void SetMusicMuted(bool muted)
+    {
+        SetMusicMutedInternal(muted, true);
+    }
+
+    private void SetSfxMuted(bool muted)
+    {
+        SetSfxMutedInternal(muted, true);
+    }
+
+    private void SetMusicMutedInternal(bool muted, bool savePref)
+    {
+        if (!TrySetMixerVolume(musicVolumeParameter, muted ? mutedMusicDb : unmutedMusicDb))
+            return;
+
+        if (savePref)
+        {
+            PlayerPrefs.SetInt(MusicMutedPrefKey, muted ? 1 : 0);
+            PlayerPrefs.Save();
+        }
+    }
+
+    private void SetSfxMutedInternal(bool muted, bool savePref)
+    {
+        if (!TrySetMixerVolume(sfxVolumeParameter, muted ? mutedSfxDb : unmutedSfxDb))
+            return;
+
+        if (savePref)
+        {
+            PlayerPrefs.SetInt(SfxMutedPrefKey, muted ? 1 : 0);
+            PlayerPrefs.Save();
+        }
+    }
+
+    private bool TrySetMixerVolume(string parameterName, float value)
+    {
+        if (gameAudioMixer == null)
+        {
+            Debug.LogWarning("PauseMenu: gameAudioMixer is not assigned. Audio mute buttons will do nothing until it is assigned.", this);
+            return false;
+        }
+
+        bool success = gameAudioMixer.SetFloat(parameterName, value);
+        if (!success)
+        {
+            Debug.LogWarning("PauseMenu: AudioMixer parameter '" + parameterName + "' was not found or is not exposed.", this);
+            return false;
+        }
+
+        return true;
     }
 }

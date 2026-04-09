@@ -10,6 +10,11 @@ using UnityEngine;
 /// - Instead of disabling/enabling the magazine object, it SLIDES the magazine along LOCAL X:
 ///     insertedX (-0.0057) -> removedX (-0.04) -> insertedX
 ///
+/// IMPORTANT:
+/// - Manual reload input should go through WeaponAmmo so the ammo math is applied correctly.
+/// - This script still provides the visual animation, and WeaponAmmo can invoke RequestReload()
+///   via UnityEvent (OnReloadRequested) when a reload actually starts.
+///
 /// Attach to your Pistol (or the same place you attached the rifle version).
 /// Assign:
 ///   - Weapon Visual Root Override (optional)
@@ -26,6 +31,9 @@ public class PlayerPistolReloadAnimation : MonoBehaviour
 
     [Header("Input")]
     public KeyCode reloadKey = KeyCode.N;
+
+    [Tooltip("If true, manual reload input tries to start reload on the active WeaponAmmo first so the ammo math is handled correctly.")]
+    public bool routeManualReloadThroughWeaponAmmo = true;
 
     [Header("References")]
     [Tooltip("Optional: weapon parent/holder to animate instead of the gun root. If null, we auto-use the active Gun transform.")]
@@ -104,7 +112,23 @@ public class PlayerPistolReloadAnimation : MonoBehaviour
     void Update()
     {
         if (Input.GetKeyDown(reloadKey))
-            TryReload();
+            TryManualReload();
+    }
+
+    public void TryManualReload()
+    {
+        if (routeManualReloadThroughWeaponAmmo)
+        {
+            WeaponAmmo activeAmmo = FindActiveWeaponAmmo();
+            if (activeAmmo != null)
+            {
+                activeAmmo.StartReload();
+                return;
+            }
+        }
+
+        // Fallback: preserve old behavior if no WeaponAmmo is found.
+        TryReload();
     }
 
     public void TryReload()
@@ -459,6 +483,17 @@ public class PlayerPistolReloadAnimation : MonoBehaviour
         {
             if (guns[i] != null && guns[i].gameObject.activeInHierarchy)
                 return guns[i];
+        }
+        return null;
+    }
+
+    WeaponAmmo FindActiveWeaponAmmo()
+    {
+        WeaponAmmo[] ammoComponents = GetComponentsInChildren<WeaponAmmo>(true);
+        for (int i = 0; i < ammoComponents.Length; i++)
+        {
+            if (ammoComponents[i] != null && ammoComponents[i].gameObject.activeInHierarchy)
+                return ammoComponents[i];
         }
         return null;
     }

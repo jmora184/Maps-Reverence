@@ -55,6 +55,23 @@ public class WeaponAmmo : MonoBehaviour
     [Tooltip("Key to manually reload this weapon (set to None if you handle input elsewhere).")]
     public KeyCode reloadKey = KeyCode.N;
 
+    [Header("Empty Fire Audio (optional)")]
+    [Tooltip("Audio source used for the dry-fire / empty click. If left empty, we try to find one on this object, its children, or parents in Awake.")]
+    public AudioSource emptyFireAudioSource;
+
+    [Tooltip("Clip played when the player tries to fire with an empty magazine.")]
+    public AudioClip emptyFireSFX;
+
+    [Range(0f, 1.5f)]
+    [Tooltip("Playback volume for the empty click.")]
+    public float emptyFireVolume = 1f;
+
+    [Tooltip("Small cooldown so holding the trigger on an empty weapon does not spam the click every frame.")]
+    public float emptyFireCooldown = 0.12f;
+
+    [Tooltip("If true and no empty-fire AudioSource is assigned, we try to auto-find one in Awake.")]
+    public bool autoFindEmptyFireAudioSource = true;
+
     public int InMag { get; private set; }
     public int Reserve { get; private set; }
     public bool IsReloading { get; private set; }
@@ -64,10 +81,12 @@ public class WeaponAmmo : MonoBehaviour
     public event Action<WeaponAmmo> OnReloadFinished;
 
     private Coroutine _reloadRoutine;
+    private float _nextEmptyFireTime = -999f;
 
     void Awake()
     {
         if (animator == null) animator = GetComponentInParent<Animator>();
+        ResolveEmptyFireAudioSourceIfNeeded();
         ResetAmmoToDefaults();
     }
 
@@ -131,6 +150,8 @@ public class WeaponAmmo : MonoBehaviour
         }
 
         // No rounds in mag
+        PlayEmptyFireSound();
+
         if (!IsReloading && Reserve > 0)
         {
             // If player tried to shoot empty mag, reload (even if autoReload disabled).
@@ -138,6 +159,35 @@ public class WeaponAmmo : MonoBehaviour
         }
 
         return false;
+    }
+
+
+    private void ResolveEmptyFireAudioSourceIfNeeded()
+    {
+        if (!autoFindEmptyFireAudioSource) return;
+        if (emptyFireAudioSource != null) return;
+
+        emptyFireAudioSource = GetComponent<AudioSource>();
+
+        if (emptyFireAudioSource == null)
+            emptyFireAudioSource = GetComponentInChildren<AudioSource>(true);
+
+        if (emptyFireAudioSource == null)
+            emptyFireAudioSource = GetComponentInParent<AudioSource>();
+    }
+
+    private void PlayEmptyFireSound()
+    {
+        if (emptyFireSFX == null) return;
+        if (Time.time < _nextEmptyFireTime) return;
+
+        if (emptyFireAudioSource == null)
+            ResolveEmptyFireAudioSourceIfNeeded();
+
+        if (emptyFireAudioSource == null) return;
+
+        emptyFireAudioSource.PlayOneShot(emptyFireSFX, Mathf.Clamp(emptyFireVolume, 0f, 1.5f));
+        _nextEmptyFireTime = Time.time + Mathf.Max(0f, emptyFireCooldown);
     }
 
     public void StartReload()
