@@ -133,6 +133,68 @@ public class BaseRefillZone : MonoBehaviour
         if (bc != null) bc.isTrigger = true;
     }
 
+    public void RefillOccupantsImmediately()
+    {
+        if (!isActiveAndEnabled)
+            return;
+
+        if (!IsBaseActivated())
+            return;
+
+        if (AreEnemiesBlockingRefill())
+            return;
+
+        Collider[] hits = GetComponentsInChildren<Collider>(true);
+        if (hits == null || hits.Length == 0)
+            return;
+
+        float previousNextAllowedTime = _nextAllowedTime;
+        _nextAllowedTime = 0f;
+
+        try
+        {
+            HashSet<Collider> processed = new HashSet<Collider>();
+
+            for (int i = 0; i < hits.Length; i++)
+            {
+                Collider trigger = hits[i];
+                if (trigger == null || !trigger.enabled || !trigger.isTrigger)
+                    continue;
+
+                Bounds bounds = trigger.bounds;
+                if (bounds.size.sqrMagnitude <= 0f)
+                    continue;
+
+                Collider[] overlaps = Physics.OverlapBox(
+                    bounds.center,
+                    bounds.extents,
+                    trigger.transform.rotation,
+                    ~0,
+                    QueryTriggerInteraction.Collide);
+
+                for (int j = 0; j < overlaps.Length; j++)
+                {
+                    Collider other = overlaps[j];
+                    if (other == null || other == trigger)
+                        continue;
+
+                    if (!processed.Add(other))
+                        continue;
+
+                    if (other.transform.IsChildOf(transform))
+                        continue;
+
+                    TryRefill(other, entering: true);
+                    _nextAllowedTime = 0f;
+                }
+            }
+        }
+        finally
+        {
+            _nextAllowedTime = previousNextAllowedTime;
+        }
+    }
+
     private void OnTriggerEnter(Collider other) => TryRefill(other, entering: true);
 
     private void OnTriggerStay(Collider other)

@@ -20,6 +20,9 @@ public class MusicManager : MonoBehaviour
     [SerializeField] private bool persistAcrossScenes = true;
     [SerializeField] private bool destroyDuplicates = true;
 
+    [Tooltip("If true, this music keeps playing even when PauseMenu uses AudioListener.pause.")]
+    [SerializeField] private bool ignoreListenerPause = true;
+
     private AudioSource audioSource;
 
     private void Awake()
@@ -56,7 +59,10 @@ public class MusicManager : MonoBehaviour
             audioSource = GetComponent<AudioSource>();
 
         if (audioSource != null)
+        {
             audioSource.volume = musicVolume;
+            audioSource.ignoreListenerPause = ignoreListenerPause;
+        }
     }
 
     private void ConfigureAudioSource()
@@ -68,6 +74,7 @@ public class MusicManager : MonoBehaviour
         audioSource.loop = true;
         audioSource.spatialBlend = 0f; // 2D audio
         audioSource.volume = musicVolume;
+        audioSource.ignoreListenerPause = ignoreListenerPause;
     }
 
     public void PlayGameplayMusic()

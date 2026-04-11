@@ -263,6 +263,7 @@ public class BaseCaptureController : MonoBehaviour
         hasCaptured = true;
         SwapBaseIcon();
         EnableRefillZone();
+        RefillCurrentZoneOccupants();
         SwitchBaseTurrets();
         SpawnAllyTeamImmediate();
         RegisterEnemyCounterattackPlansOnly();
@@ -370,6 +371,7 @@ public class BaseCaptureController : MonoBehaviour
 
         SwapBaseIcon();
         EnableRefillZone();
+        RefillCurrentZoneOccupants();
         SwitchBaseTurrets();
         SpawnAllyTeamImmediate();
 
@@ -390,6 +392,14 @@ public class BaseCaptureController : MonoBehaviour
         // If the refill zone GameObject itself was disabled in the hierarchy, wake it up too.
         if (!refillZone.gameObject.activeSelf)
             refillZone.gameObject.SetActive(true);
+    }
+
+    private void RefillCurrentZoneOccupants()
+    {
+        if (refillZone == null || !refillZone.isActiveAndEnabled)
+            return;
+
+        refillZone.RefillOccupantsImmediately();
     }
 
     private void SwapBaseIcon()
