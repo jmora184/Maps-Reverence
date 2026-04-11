@@ -34,6 +34,10 @@ public class CommandOverlayUI : MonoBehaviour
     public bool enableHoverHints = true;
     [Tooltip("Default tooltip messages (used if the prefab doesn't already have UIHoverHintTarget).")]
     public string allyHoverHint = "Select Ally";
+    [Tooltip("Tooltip shown when hovering an ally that belongs to a Team.")]
+    public string teamedAllyHoverHint = "Team Ally";
+    [Tooltip("Tooltip shown when hovering an ally that is currently following the player.")]
+    public string playerFollowerHoverHint = "Player Follower";
     [Tooltip("Tooltip shown when an ally is inactive (won't accept commands until activated in-world).")]
     public string inactiveAllyHoverHint = "<color=#ffcc00>Inactive:</color> Approach and press J";
 
@@ -746,6 +750,24 @@ public class CommandOverlayUI : MonoBehaviour
             SetPlayerFollowerTag(a, active);
     }
 
+
+
+    private string GetAllyHoverHintMessage(Transform unit, bool isPinned, bool isInactiveAlly)
+    {
+        if (isPinned)
+            return pinnedHoverHint;
+
+        if (isInactiveAlly)
+            return inactiveAllyHoverHint;
+
+        if (unit != null && IsPlayerFollower(unit))
+            return playerFollowerHoverHint;
+
+        if (unit != null && TeamManager.Instance != null && TeamManager.Instance.GetTeamOf(unit) != null)
+            return teamedAllyHoverHint;
+
+        return allyHoverHint;
+    }
 
 
     public void BuildIcons()
@@ -1821,7 +1843,7 @@ public class CommandOverlayUI : MonoBehaviour
 
             var hint = icon.GetComponent<UIHoverHintTarget>();
             if (hint != null)
-                hint.message = isPinned ? pinnedHoverHint : (isInactiveAlly ? inactiveAllyHoverHint : allyHoverHint);
+                hint.message = GetAllyHoverHintMessage(unit, isPinned, isInactiveAlly);
 
             // Dim inactive ally icons
             var cg = icon.GetComponent<CanvasGroup>();

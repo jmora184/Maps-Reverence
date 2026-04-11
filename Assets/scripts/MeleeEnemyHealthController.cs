@@ -42,6 +42,17 @@ public class MeleeEnemyHealthController : MonoBehaviour, IDamageable
     [Tooltip("Optional world health bar used to briefly show a 2x sprite when directional bonus damage is applied.")]
     [SerializeField] private MeleeEnemyWorldHealthBar directionalDamageUI;
 
+    [Header("Directional Bonus Audio (optional)")]
+    [Tooltip("Optional SFX played when directional bonus damage (2x flank/side hit) is applied.")]
+    [SerializeField] private AudioClip directionalBonus2xSFX;
+
+    [Tooltip("Optional AudioSource for the 2x bonus SFX. Leave empty to use PlayClipAtPoint at the enemy position.")]
+    [SerializeField] private AudioSource directionalBonus2xAudioSource;
+
+    [Range(0f, 2f)]
+    [Tooltip("Volume used for the 2x bonus SFX.")]
+    [SerializeField] private float directionalBonus2xVolume = 1f;
+
     [Header("Directional Damage (optional)")]
     [Tooltip("If true, hits from outside the front cone deal bonus damage and show the 2x icon.")]
     public bool enableDirectionalDamageBonus = true;
@@ -49,7 +60,10 @@ public class MeleeEnemyHealthController : MonoBehaviour, IDamageable
     [Tooltip("Damage multiplier applied when the hit comes from outside the front cone.")]
     public float sideOrBackDamageMultiplier = 2f;
 
-    [Tooltip("Half-angle of the FRONT cone in degrees. Hits inside this cone deal normal damage. Hits outside it get the side/back multiplier.")]
+    [Tooltip("Damage multiplier applied when the hit comes from INSIDE the front cone. Default 1 = normal damage. Set lower for front-armored melee enemies.")]
+    public float frontDamageMultiplier = 1f;
+
+    [Tooltip("Half-angle of the FRONT cone in degrees. Hits inside this cone use the front damage multiplier. Hits outside it get the side/back multiplier.")]
     [Range(0f, 180f)]
     public float frontDamageHalfAngle = 60f;
 
@@ -138,6 +152,20 @@ public class MeleeEnemyHealthController : MonoBehaviour, IDamageable
 
     public bool IsDead => _dead;
 
+    public bool ShouldUseFrontResistImpact(Vector3 incomingDirectionWorld, float maxFrontDamageMultiplierForImpact = 0.1f)
+    {
+        if (!enableDirectionalDamageBonus)
+            return false;
+
+        if (!IsFrontHit(incomingDirectionWorld))
+            return false;
+
+        float clampedThreshold = Mathf.Clamp01(maxFrontDamageMultiplierForImpact);
+        float clampedFrontMultiplier = Mathf.Max(0f, frontDamageMultiplier);
+
+        return clampedFrontMultiplier <= clampedThreshold;
+    }
+
     public void ShowDirectionalDamageBonusUI()
     {
         if (directionalDamageUI == null)
@@ -145,6 +173,24 @@ public class MeleeEnemyHealthController : MonoBehaviour, IDamageable
 
         if (directionalDamageUI != null)
             directionalDamageUI.ShowDirectionalBonus2x();
+
+        PlayDirectionalBonus2xSound();
+    }
+
+    private void PlayDirectionalBonus2xSound()
+    {
+        if (directionalBonus2xSFX == null)
+            return;
+
+        float volume = Mathf.Clamp(directionalBonus2xVolume, 0f, 2f);
+
+        if (directionalBonus2xAudioSource != null && directionalBonus2xAudioSource.enabled && directionalBonus2xAudioSource.gameObject.activeInHierarchy)
+        {
+            directionalBonus2xAudioSource.PlayOneShot(directionalBonus2xSFX, volume);
+            return;
+        }
+
+        AudioSource.PlayClipAtPoint(directionalBonus2xSFX, transform.position, volume);
     }
 
     public void Heal(int amount)
@@ -165,25 +211,17 @@ public class MeleeEnemyHealthController : MonoBehaviour, IDamageable
         if (damageAmount <= 0)
             return damageAmount;
 
-        Vector3 incoming = incomingDirectionWorld;
-        incoming.y = 0f;
-        if (incoming.sqrMagnitude <= 0.0001f)
-            return damageAmount;
-
-        Vector3 forward = transform.forward;
-        forward.y = 0f;
-        if (forward.sqrMagnitude <= 0.0001f)
-            return damageAmount;
-
-        incoming.Normalize();
-        forward.Normalize();
-
-        float frontDotThreshold = Mathf.Cos(Mathf.Clamp(frontDamageHalfAngle, 0f, 180f) * Mathf.Deg2Rad);
-        float dot = Vector3.Dot(forward, incoming);
-        bool isFrontHit = dot >= frontDotThreshold;
+        bool isFrontHit = IsFrontHit(incomingDirectionWorld);
 
         if (isFrontHit)
-            return damageAmount;
+        {
+            float frontMultiplier = Mathf.Max(0f, frontDamageMultiplier);
+            if (Mathf.Approximately(frontMultiplier, 1f))
+                return damageAmount;
+
+            float frontMultiplied = damageAmount * frontMultiplier;
+            return Mathf.Max(0, Mathf.RoundToInt(frontMultiplied));
+        }
 
         float multiplier = Mathf.Max(1f, sideOrBackDamageMultiplier);
         if (multiplier <= 1f)
@@ -192,6 +230,26 @@ public class MeleeEnemyHealthController : MonoBehaviour, IDamageable
         appliedDirectionalBonus = true;
         float multiplied = damageAmount * multiplier;
         return Mathf.Max(1, Mathf.RoundToInt(multiplied));
+    }
+
+    private bool IsFrontHit(Vector3 incomingDirectionWorld)
+    {
+        Vector3 incoming = incomingDirectionWorld;
+        incoming.y = 0f;
+        if (incoming.sqrMagnitude <= 0.0001f)
+            return false;
+
+        Vector3 forward = transform.forward;
+        forward.y = 0f;
+        if (forward.sqrMagnitude <= 0.0001f)
+            return false;
+
+        incoming.Normalize();
+        forward.Normalize();
+
+        float frontDotThreshold = Mathf.Cos(Mathf.Clamp(frontDamageHalfAngle, 0f, 180f) * Mathf.Deg2Rad);
+        float dot = Vector3.Dot(forward, incoming);
+        return dot >= frontDotThreshold;
     }
 
     private void ApplyDamageInternal(int damageAmount)

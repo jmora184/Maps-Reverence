@@ -35,6 +35,28 @@ public class MechHealthController : MonoBehaviour
     [Tooltip("Optional mech health bar used to briefly show a 2x icon when directional bonus damage is applied.")]
     [SerializeField] private MechHealthBarSimple directionalDamageUI;
 
+    [Header("Directional Bonus Audio")]
+    [Tooltip("Optional clip played when directional 2x bonus damage is applied to this mech.")]
+    public AudioClip directionalBonus2xSFX;
+
+    [Tooltip("Loudness of the directional bonus clip.")]
+    [Range(0f, 2f)] public float directionalBonus2xVolume = 1f;
+
+    [Tooltip("0 = 2D, 1 = fully 3D. Start with 0 for testing.")]
+    [Range(0f, 1f)] public float directionalBonus2xSpatialBlend = 0f;
+
+    [Tooltip("Minimum distance for 3D directional bonus audio.")]
+    public float directionalBonus2xMinDistance = 2f;
+
+    [Tooltip("Maximum distance for 3D directional bonus audio.")]
+    public float directionalBonus2xMaxDistance = 25f;
+
+    [Tooltip("If true, creates a temporary detached audio object so the clip can finish even if this mech dies from the 2x hit.")]
+    public bool useDetachedDirectionalBonusAudio = true;
+
+    [Header("Debug Directional Bonus Audio")]
+    public bool debugDirectionalBonusAudio = false;
+
     [Header("Death")]
     [Tooltip("If true, this script will stop accepting damage once dead.")]
     public bool lockAfterDeath = true;
@@ -127,7 +149,10 @@ public class MechHealthController : MonoBehaviour
         int finalDamage = ApplyDirectionalDamageMultiplier(damageAmount, incomingDirectionWorld, out appliedDirectionalBonus);
 
         if (appliedDirectionalBonus)
+        {
             ShowDirectionalDamageBonusUI();
+            PlayDirectionalBonusSound();
+        }
 
         ApplyDamageInternal(finalDamage);
     }
@@ -139,6 +164,47 @@ public class MechHealthController : MonoBehaviour
 
         if (directionalDamageUI != null)
             directionalDamageUI.ShowDirectionalBonus2x();
+    }
+
+    private void PlayDirectionalBonusSound()
+    {
+        if (directionalBonus2xSFX == null) return;
+
+        Vector3 pos = transform.position;
+
+        if (useDetachedDirectionalBonusAudio)
+        {
+            GameObject temp = new GameObject(name + "_DirectionalBonusAudio");
+            temp.transform.position = pos;
+
+            var src = temp.AddComponent<AudioSource>();
+            src.clip = directionalBonus2xSFX;
+            src.volume = directionalBonus2xVolume;
+            src.spatialBlend = directionalBonus2xSpatialBlend;
+            src.minDistance = Mathf.Max(0.01f, directionalBonus2xMinDistance);
+            src.maxDistance = Mathf.Max(src.minDistance, directionalBonus2xMaxDistance);
+            src.playOnAwake = false;
+            src.loop = false;
+            src.rolloffMode = AudioRolloffMode.Linear;
+            src.Play();
+
+            if (debugDirectionalBonusAudio) Debug.Log($"[MechHealthController] Playing detached directional bonus audio: {directionalBonus2xSFX.name}", temp);
+
+            Destroy(temp, directionalBonus2xSFX.length + 0.25f);
+            return;
+        }
+
+        var existing = GetComponent<AudioSource>();
+        if (existing == null)
+            existing = gameObject.AddComponent<AudioSource>();
+
+        existing.spatialBlend = directionalBonus2xSpatialBlend;
+        existing.minDistance = Mathf.Max(0.01f, directionalBonus2xMinDistance);
+        existing.maxDistance = Mathf.Max(existing.minDistance, directionalBonus2xMaxDistance);
+        existing.rolloffMode = AudioRolloffMode.Linear;
+        existing.PlayOneShot(directionalBonus2xSFX, directionalBonus2xVolume);
+
+        if (debugDirectionalBonusAudio) Debug.Log($"[MechHealthController] Playing attached directional bonus audio: {directionalBonus2xSFX.name}", this);
     }
 
     private int ApplyDirectionalDamageMultiplier(int damageAmount, Vector3 incomingDirectionWorld, out bool appliedDirectionalBonus)

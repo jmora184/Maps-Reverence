@@ -356,9 +356,10 @@ private void ClearPlannedDestinationForTeams(List<GameObject> expandedSelection)
 
 
         // Any new command breaks TEAM hold-ground.
-        Transform targetT = targetUnit != null ? targetUnit.transform : null;
+        Transform rawTargetT = targetUnit != null ? targetUnit.transform : null;
+        Transform targetT = ResolveCombatOrderTarget(rawTargetT);
 
-        bool isCombatTarget = targetUnit != null && (targetUnit.CompareTag("Enemy") || targetUnit.CompareTag("Boss"));
+        bool isCombatTarget = targetT != null && (targetT.CompareTag("Enemy") || targetT.CompareTag("Boss"));
         if (targetT == null) return;
 
 
@@ -1155,9 +1156,6 @@ private void ClearPlannedDestinationForTeams(List<GameObject> expandedSelection)
         if (MoveDestinationMarkerSystem.Instance != null && units != null && units.Count > 0)
             MoveDestinationMarkerSystem.Instance.ClearForUnits(units.ToArray());
 
-        if (units != null && units.Count > 0)
-            AttackTargetIndicatorSystem.Instance?.UnregisterAttackers(units);
-
         pinClearRoutine = null;
     }
 
@@ -1212,6 +1210,52 @@ private void ClearPlannedDestinationForTeams(List<GameObject> expandedSelection)
         return false;
     }
 
+    private Transform ResolveCombatOrderTarget(Transform rawTargetT)
+    {
+        if (rawTargetT == null) return null;
+
+        Transform teamRoot = FindEnemyTeamRoot(rawTargetT);
+        if (teamRoot != null)
+        {
+            Transform bestMember = FindBestEnemyTeamMemberNearAnchor(teamRoot);
+            if (bestMember != null)
+                return bestMember;
+        }
+
+        return rawTargetT;
+    }
+
+    private Transform FindBestEnemyTeamMemberNearAnchor(Transform teamRoot)
+    {
+        if (teamRoot == null) return null;
+
+        Vector3 anchorPos = teamRoot.position;
+        var encounterAnchor = teamRoot.GetComponent<EncounterTeamAnchor>();
+        if (encounterAnchor != null)
+            anchorPos = encounterAnchor.AnchorWorldPosition;
+
+        Transform best = null;
+        float bestDistSqr = float.PositiveInfinity;
+
+        var all = teamRoot.GetComponentsInChildren<Transform>(true);
+        for (int i = 0; i < all.Length; i++)
+        {
+            Transform t = all[i];
+            if (t == null || t == teamRoot) continue;
+            if (!(t.CompareTag("Enemy") || t.CompareTag("Boss"))) continue;
+            if (IsFollowTargetGone(t)) continue;
+
+            float distSqr = (t.position - anchorPos).sqrMagnitude;
+            if (best == null || distSqr < bestDistSqr)
+            {
+                best = t;
+                bestDistSqr = distSqr;
+            }
+        }
+
+        return best;
+    }
+
     private bool IsAttackObjectiveGone(Transform targetT, Transform watchRoot)
     {
         if (watchRoot != null)
@@ -1236,19 +1280,93 @@ private void ClearPlannedDestinationForTeams(List<GameObject> expandedSelection)
         return GatherAgents(gos);
     }
 
+    private void ReassignCombatTargetForTeam(Team team, Transform newTarget)
+    {
+        if (team == null || newTarget == null || team.Members == null) return;
+
+        for (int i = 0; i < team.Members.Count; i++)
+        {
+            var tr = team.Members[i];
+            if (tr == null) continue;
+
+            var go = tr.gameObject;
+            if (go == null || !go.CompareTag("Ally")) continue;
+
+            var ally = go.GetComponent<AllyController>();
+            if (ally != null)
+            {
+                ally.ClearManualHoldPoint();
+                ally.target = null;
+                ally.ForceCombatTarget(newTarget);
+            }
+
+            var agent = go.GetComponent<NavMeshAgent>();
+            if (agent == null) agent = go.GetComponentInChildren<NavMeshAgent>();
+            if (agent != null && agent.isActiveAndEnabled)
+            {
+                agent.isStopped = false;
+                agent.SetDestination(newTarget.position);
+            }
+        }
+    }
+
+    private void ReassignCombatTargetForUnits(List<GameObject> units, Transform newTarget)
+    {
+        if (units == null || newTarget == null) return;
+
+        for (int i = 0; i < units.Count; i++)
+        {
+            var go = units[i];
+            if (go == null || !go.CompareTag("Ally")) continue;
+
+            var ally = go.GetComponent<AllyController>();
+            if (ally != null)
+            {
+                ally.ClearManualHoldPoint();
+                ally.target = null;
+                ally.ForceCombatTarget(newTarget);
+            }
+
+            var agent = go.GetComponent<NavMeshAgent>();
+            if (agent == null) agent = go.GetComponentInChildren<NavMeshAgent>();
+            if (agent != null && agent.isActiveAndEnabled)
+            {
+                agent.isStopped = false;
+                agent.SetDestination(newTarget.position);
+            }
+        }
+    }
+
     private IEnumerator ClearCombatTargetGone_TeamRoutine(Team team, Transform targetT, Transform watchRoot)
     {
         if (team == null) yield break;
 
         float interval = Mathf.Max(0.05f, pinArrivalCheckInterval);
 
-        while (!IsAttackObjectiveGone(targetT, watchRoot))
+        while (true)
+        {
+            if (watchRoot != null)
+            {
+                Transform refreshedTarget = FindBestEnemyTeamMemberNearAnchor(watchRoot);
+                if (refreshedTarget != null && refreshedTarget != targetT)
+                {
+                    targetT = refreshedTarget;
+                    ReassignCombatTargetForTeam(team, targetT);
+                }
+            }
+            else if (IsFollowTargetGone(targetT))
+            {
+                break;
+            }
+
+            if (IsAttackObjectiveGone(targetT, watchRoot))
+                break;
+
             yield return new WaitForSeconds(interval);
+        }
 
         if (stopAgentsWhenCombatTargetGone)
             StopAgents(GatherAgentsForTeam(team));
-
-        List<GameObject> teamAttackers = null;
 
         if (MoveDestinationMarkerSystem.Instance != null)
         {
@@ -1256,31 +1374,18 @@ private void ClearPlannedDestinationForTeams(List<GameObject> expandedSelection)
 
             if (team.Members != null && team.Members.Count > 0)
             {
-                teamAttackers = new List<GameObject>(team.Members.Count);
+                List<GameObject> gos = new List<GameObject>(team.Members.Count);
                 for (int i = 0; i < team.Members.Count; i++)
                 {
                     var tr = team.Members[i];
                     if (tr == null) continue;
-                    teamAttackers.Add(tr.gameObject);
+                    gos.Add(tr.gameObject);
                 }
 
-                if (teamAttackers.Count > 0)
-                    MoveDestinationMarkerSystem.Instance.ClearForUnits(teamAttackers.ToArray());
+                if (gos.Count > 0)
+                    MoveDestinationMarkerSystem.Instance.ClearForUnits(gos.ToArray());
             }
         }
-        else if (team.Members != null && team.Members.Count > 0)
-        {
-            teamAttackers = new List<GameObject>(team.Members.Count);
-            for (int i = 0; i < team.Members.Count; i++)
-            {
-                var tr = team.Members[i];
-                if (tr == null) continue;
-                teamAttackers.Add(tr.gameObject);
-            }
-        }
-
-        if (teamAttackers != null && teamAttackers.Count > 0)
-            AttackTargetIndicatorSystem.Instance?.UnregisterAttackers(teamAttackers);
 
         pinClearRoutine = null;
     }
@@ -1289,8 +1394,27 @@ private void ClearPlannedDestinationForTeams(List<GameObject> expandedSelection)
     {
         float interval = Mathf.Max(0.05f, pinArrivalCheckInterval);
 
-        while (!IsAttackObjectiveGone(targetT, watchRoot))
+        while (true)
+        {
+            if (watchRoot != null)
+            {
+                Transform refreshedTarget = FindBestEnemyTeamMemberNearAnchor(watchRoot);
+                if (refreshedTarget != null && refreshedTarget != targetT)
+                {
+                    targetT = refreshedTarget;
+                    ReassignCombatTargetForUnits(units, targetT);
+                }
+            }
+            else if (IsFollowTargetGone(targetT))
+            {
+                break;
+            }
+
+            if (IsAttackObjectiveGone(targetT, watchRoot))
+                break;
+
             yield return new WaitForSeconds(interval);
+        }
 
         if (stopAgentsWhenCombatTargetGone)
             StopAgents(GatherAgents(units));

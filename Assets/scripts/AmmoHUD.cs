@@ -9,6 +9,7 @@ using UnityEngine;
 /// - If weaponAmmo isn't assigned, it will try to auto-bind from Player2Controller.activeWeaponAmmo.
 /// - It refreshes every frame as a safe fallback (so even if events aren't wired, UI still matches reality).
 /// - If WeaponAmmo is assigned, it will also subscribe to OnAmmoChanged for efficiency.
+/// - Reserve ammo can be color-coded without changing the in-mag text.
 /// </summary>
 public class AmmoHUD : MonoBehaviour
 {
@@ -21,8 +22,21 @@ public class AmmoHUD : MonoBehaviour
     [Tooltip("If true, auto-binds to Player2Controller.activeWeaponAmmo when weaponAmmo is null.")]
     public bool autoBindFromPlayer = true;
 
-    [Tooltip("Format: {0}=inMag, {1}=reserve, {2}=magSize")]
+    [Tooltip("Format: {0}=inMag, {1}=reserve (or colored reserve), {2}=magSize")]
     public string format = "{0}/{2}   |   {1}";
+
+    [Header("Reserve Color States")]
+    [Tooltip("If true, only the reserve ammo text changes color based on reserve amount.")]
+    public bool colorReserveAmmo = true;
+
+    [Tooltip("Color used for the top third of reserve ammo.")]
+    public Color fullReserveColor = Color.green;
+
+    [Tooltip("Color used for the middle third of reserve ammo.")]
+    public Color midReserveColor = Color.yellow;
+
+    [Tooltip("Color used for the bottom third of reserve ammo.")]
+    public Color lowReserveColor = Color.red;
 
     Player2Controller cachedPlayer;
 
@@ -92,6 +106,35 @@ public class AmmoHUD : MonoBehaviour
             return;
         }
 
-        ammoText.text = string.Format(format, weaponAmmo.InMag, weaponAmmo.Reserve, weaponAmmo.magazineSize);
+        string reserveDisplay = weaponAmmo.Reserve.ToString();
+
+        if (colorReserveAmmo)
+        {
+            Color reserveColor = GetReserveColor();
+            string colorHex = ColorUtility.ToHtmlStringRGB(reserveColor);
+            reserveDisplay = $"<color=#{colorHex}>{reserveDisplay}</color>";
+        }
+
+        ammoText.text = string.Format(format, weaponAmmo.InMag, reserveDisplay, weaponAmmo.magazineSize);
+    }
+
+    Color GetReserveColor()
+    {
+        if (weaponAmmo == null)
+            return midReserveColor;
+
+        int maxReserveAmmo = Mathf.Max(0, weaponAmmo.totalAmmoStart - weaponAmmo.magazineSize);
+        if (maxReserveAmmo <= 0)
+            return midReserveColor;
+
+        float reservePercent = (float)weaponAmmo.Reserve / maxReserveAmmo;
+
+        if (reservePercent <= 0.33333334f)
+            return lowReserveColor;
+
+        if (reservePercent <= 0.6666667f)
+            return midReserveColor;
+
+        return fullReserveColor;
     }
 }

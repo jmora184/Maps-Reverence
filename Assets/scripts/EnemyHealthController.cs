@@ -38,6 +38,17 @@ public class EnemyHealthController : MonoBehaviour
     [Tooltip("Optional world health bar used to briefly show a 2x sprite when directional bonus damage is applied.")]
     [SerializeField] private EnemyWorldHealthBar directionalDamageUI;
 
+    [Header("Directional Bonus Audio (optional)")]
+    [Tooltip("Optional SFX played when directional bonus damage (2x flank/side hit) is applied.")]
+    [SerializeField] private AudioClip directionalBonus2xSFX;
+
+    [Tooltip("Optional AudioSource for the 2x bonus SFX. Leave empty to use PlayClipAtPoint at the enemy position.")]
+    [SerializeField] private AudioSource directionalBonus2xAudioSource;
+
+    [Range(0f, 2f)]
+    [Tooltip("Volume used for the 2x bonus SFX.")]
+    [SerializeField] private float directionalBonus2xVolume = 1f;
+
     [Header("Directional Damage (optional)")]
     [Tooltip("If true, shots from the side or back can deal bonus damage, while front shots stay normal damage.")]
     public bool enableDirectionalDamageBonus = true;
@@ -176,6 +187,20 @@ public void DamageEnemy(int damageAmount, Vector3 incomingDirectionWorld)
     ApplyDamageInternal(finalDamage);
 }
 
+public bool ShouldUseFrontResistImpact(Vector3 incomingDirectionWorld, float maxFrontDamageMultiplierForImpact = 0.1f)
+{
+    if (!enableDirectionalDamageBonus)
+        return false;
+
+    if (!IsFrontShot(incomingDirectionWorld))
+        return false;
+
+    float clampedThreshold = Mathf.Clamp01(maxFrontDamageMultiplierForImpact);
+    float clampedFrontMultiplier = Mathf.Max(0f, frontDamageMultiplier);
+
+    return clampedFrontMultiplier <= clampedThreshold;
+}
+
 private int ApplyDirectionalDamageMultiplier(int damageAmount, Vector3 incomingDirectionWorld, out bool appliedDirectionalBonus)
 {
     appliedDirectionalBonus = false;
@@ -186,22 +211,7 @@ private int ApplyDirectionalDamageMultiplier(int damageAmount, Vector3 incomingD
     if (damageAmount <= 0)
         return damageAmount;
 
-    Vector3 incoming = incomingDirectionWorld;
-    incoming.y = 0f;
-    if (incoming.sqrMagnitude <= 0.0001f)
-        return damageAmount;
-
-    Vector3 forward = transform.forward;
-    forward.y = 0f;
-    if (forward.sqrMagnitude <= 0.0001f)
-        return damageAmount;
-
-    incoming.Normalize();
-    forward.Normalize();
-
-    float frontDotThreshold = Mathf.Cos(Mathf.Clamp(frontDamageHalfAngle, 0f, 180f) * Mathf.Deg2Rad);
-    float dot = Vector3.Dot(forward, incoming);
-    bool isFrontShot = dot >= frontDotThreshold;
+    bool isFrontShot = IsFrontShot(incomingDirectionWorld);
 
     if (isFrontShot)
     {
@@ -222,6 +232,26 @@ private int ApplyDirectionalDamageMultiplier(int damageAmount, Vector3 incomingD
     return Mathf.Max(1, Mathf.RoundToInt(multiplied));
 }
 
+private bool IsFrontShot(Vector3 incomingDirectionWorld)
+{
+    Vector3 incoming = incomingDirectionWorld;
+    incoming.y = 0f;
+    if (incoming.sqrMagnitude <= 0.0001f)
+        return false;
+
+    Vector3 forward = transform.forward;
+    forward.y = 0f;
+    if (forward.sqrMagnitude <= 0.0001f)
+        return false;
+
+    incoming.Normalize();
+    forward.Normalize();
+
+    float frontDotThreshold = Mathf.Cos(Mathf.Clamp(frontDamageHalfAngle, 0f, 180f) * Mathf.Deg2Rad);
+    float dot = Vector3.Dot(forward, incoming);
+    return dot >= frontDotThreshold;
+}
+
 private void ShowDirectionalDamageBonusUI()
 {
     if (directionalDamageUI == null)
@@ -229,6 +259,24 @@ private void ShowDirectionalDamageBonusUI()
 
     if (directionalDamageUI != null)
         directionalDamageUI.ShowDirectionalBonus2x();
+
+    PlayDirectionalBonus2xSound();
+}
+
+private void PlayDirectionalBonus2xSound()
+{
+    if (directionalBonus2xSFX == null)
+        return;
+
+    float volume = Mathf.Clamp(directionalBonus2xVolume, 0f, 2f);
+
+    if (directionalBonus2xAudioSource != null && directionalBonus2xAudioSource.enabled && directionalBonus2xAudioSource.gameObject.activeInHierarchy)
+    {
+        directionalBonus2xAudioSource.PlayOneShot(directionalBonus2xSFX, volume);
+        return;
+    }
+
+    AudioSource.PlayClipAtPoint(directionalBonus2xSFX, transform.position, volume);
 }
 
 private void ApplyDamageInternal(int damageAmount)

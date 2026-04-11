@@ -45,6 +45,21 @@ public class EnemyTeamDirectionArrowUI : MonoBehaviour
     [Tooltip("If your arrow sprite points RIGHT in its default orientation, leave this ON. If it points UP, turn this OFF.")]
     public bool spritePointsRight = true;
 
+    [Header("Flash")]
+    [Tooltip("If true, the arrow image flashes while it has an active direction.")]
+    public bool flashWhenVisible = true;
+
+    [Tooltip("Minimum alpha reached during the flash.")]
+    [Range(0f, 1f)]
+    public float flashMinAlpha = 0.35f;
+
+    [Tooltip("Maximum alpha reached during the flash.")]
+    [Range(0f, 1f)]
+    public float flashMaxAlpha = 1f;
+
+    [Tooltip("How fast the arrow flashes.")]
+    public float flashSpeed = 6f;
+
     [Header("World / Binding")]
     [Tooltip("Camera used to convert world direction to screen direction. Usually the command camera.")]
     public Camera worldCamera;
@@ -58,6 +73,9 @@ public class EnemyTeamDirectionArrowUI : MonoBehaviour
     private Vector3 _prevAnchorPos;
     private bool _hasPrev;
 
+    private Color _arrowBaseColor = Color.white;
+    private bool _arrowBaseColorCaptured;
+
     // Cached reflection info for optional EncounterTeamAnchor members (safe even if absent)
     private PropertyInfo _piHasMoveTarget;
     private PropertyInfo _piMoveTarget;
@@ -68,11 +86,25 @@ public class EnemyTeamDirectionArrowUI : MonoBehaviour
     private void Reset()
     {
         TryAutoWire();
+        CacheArrowBaseColor();
     }
 
     private void Awake()
     {
         TryAutoWire();
+        CacheArrowBaseColor();
+        ResetArrowFlashVisual();
+    }
+
+    private void OnEnable()
+    {
+        CacheArrowBaseColor();
+        ResetArrowFlashVisual();
+    }
+
+    private void OnDisable()
+    {
+        ResetArrowFlashVisual();
     }
 
     public void Bind(EncounterTeamAnchor anchor, Camera cam)
@@ -119,6 +151,7 @@ public class EnemyTeamDirectionArrowUI : MonoBehaviour
                 worldCamera = Camera.main;
         }
 
+        CacheArrowBaseColor();
         CacheReflection();
     }
 
@@ -132,6 +165,15 @@ public class EnemyTeamDirectionArrowUI : MonoBehaviour
         _piHasPlannedDestination = t.GetProperty("HasPlannedDestination", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         _piPlannedDestination = t.GetProperty("PlannedDestination", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         _reflectionCached = true;
+    }
+
+    private void CacheArrowBaseColor()
+    {
+        if (arrowGraphic == null)
+            return;
+
+        _arrowBaseColor = arrowGraphic.color;
+        _arrowBaseColorCaptured = true;
     }
 
     private void LateUpdate()
@@ -158,6 +200,7 @@ public class EnemyTeamDirectionArrowUI : MonoBehaviour
 
         if (!hasDirection)
         {
+            ResetArrowFlashVisual();
             if (hideWhenNoDirection) SetArrowVisible(false);
             return;
         }
@@ -171,6 +214,7 @@ public class EnemyTeamDirectionArrowUI : MonoBehaviour
         Vector2 dirScreen = (Vector2)(b - a);
         if (dirScreen.sqrMagnitude < 0.0001f)
         {
+            ResetArrowFlashVisual();
             if (hideWhenNoDirection) SetArrowVisible(false);
             return;
         }
@@ -188,6 +232,8 @@ public class EnemyTeamDirectionArrowUI : MonoBehaviour
             float rotZ = spritePointsRight ? ang : (ang - 90f);
             arrowRect.localRotation = Quaternion.Euler(0f, 0f, rotZ);
         }
+
+        UpdateArrowFlashVisual();
     }
 
     private bool TryGetExplicitTargetDirection(Vector3 anchorPos, out Vector3 dirWorld)
@@ -270,5 +316,47 @@ public class EnemyTeamDirectionArrowUI : MonoBehaviour
             if (arrowRect.gameObject.activeSelf != visible)
                 arrowRect.gameObject.SetActive(visible);
         }
+    }
+
+    private void UpdateArrowFlashVisual()
+    {
+        if (!flashWhenVisible || arrowGraphic == null)
+        {
+            ResetArrowFlashVisual();
+            return;
+        }
+
+        if (!_arrowBaseColorCaptured)
+            CacheArrowBaseColor();
+
+        float minA = Mathf.Clamp01(Mathf.Min(flashMinAlpha, flashMaxAlpha));
+        float maxA = Mathf.Clamp01(Mathf.Max(flashMinAlpha, flashMaxAlpha));
+        float speed = Mathf.Max(0f, flashSpeed);
+
+        if (speed <= 0.0001f)
+        {
+            Color staticColor = _arrowBaseColor;
+            staticColor.a = maxA;
+            arrowGraphic.color = staticColor;
+            return;
+        }
+
+        float wave = 0.5f + (0.5f * Mathf.Sin(Time.unscaledTime * speed));
+        float alpha = Mathf.Lerp(minA, maxA, wave);
+
+        Color c = _arrowBaseColor;
+        c.a = alpha;
+        arrowGraphic.color = c;
+    }
+
+    private void ResetArrowFlashVisual()
+    {
+        if (arrowGraphic == null)
+            return;
+
+        if (!_arrowBaseColorCaptured)
+            CacheArrowBaseColor();
+
+        arrowGraphic.color = _arrowBaseColor;
     }
 }

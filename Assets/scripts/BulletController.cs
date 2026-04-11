@@ -61,6 +61,13 @@ public class BulletController : MonoBehaviour
     [Tooltip("Impact effect used when hitting the WORLD (walls, floor, props). Leave empty to use Impact Effect.")]
     public GameObject impactEffectWorld;
 
+    [Tooltip("Optional impact effect used when an enemy resists a FRONT hit because its front damage multiplier is very low or zero.")]
+    public GameObject impactEffectFrontResist;
+
+    [Range(0f, 1f)]
+    [Tooltip("Front damage multiplier threshold used to decide when to show the front-resist impact. 0 = only fully immune front hits, 0.1 = 10% or less, 0.25 = 25% or less.")]
+    public float frontResistImpactMaxMultiplier = 0.1f;
+
     [Tooltip("If true, spawn an impact effect when hitting non-damageable world geometry.")]
     public bool spawnWorldImpacts = true;
 
@@ -389,36 +396,25 @@ private void FixedUpdate()
         if (isEnemy)
             NotifyEnemyAggroFromHit(hit);
 
+        bool useFrontResistImpact = false;
+
         if (isEnemy && damageEnemy)
         {
             if (enemyHealth != null)
             {
-                Vector3 incomingDirectionWorld;
-                if (owner != null)
-                    incomingDirectionWorld = owner.position - enemyHealth.transform.position;
-                else
-                    incomingDirectionWorld = -transform.forward;
-
+                Vector3 incomingDirectionWorld = GetIncomingDirectionWorld(enemyHealth.transform);
+                useFrontResistImpact = enemyHealth.ShouldUseFrontResistImpact(incomingDirectionWorld, frontResistImpactMaxMultiplier);
                 enemyHealth.DamageEnemy(dmgInt, incomingDirectionWorld);
             }
             else if (meleeEnemyHealth != null)
             {
-                Vector3 incomingDirectionWorld;
-                if (owner != null)
-                    incomingDirectionWorld = owner.position - meleeEnemyHealth.transform.position;
-                else
-                    incomingDirectionWorld = -transform.forward;
-
+                Vector3 incomingDirectionWorld = GetIncomingDirectionWorld(meleeEnemyHealth.transform);
+                useFrontResistImpact = meleeEnemyHealth.ShouldUseFrontResistImpact(incomingDirectionWorld, frontResistImpactMaxMultiplier);
                 meleeEnemyHealth.DamageEnemy(dmgInt, incomingDirectionWorld);
             }
             else if (mechHealth != null)
             {
-                Vector3 incomingDirectionWorld;
-                if (owner != null)
-                    incomingDirectionWorld = owner.position - mechHealth.transform.position;
-                else
-                    incomingDirectionWorld = -transform.forward;
-
+                Vector3 incomingDirectionWorld = GetIncomingDirectionWorld(mechHealth.transform);
                 mechHealth.DamageEnemy(dmgInt, incomingDirectionWorld);
             }
             else
@@ -509,6 +505,10 @@ private void FixedUpdate()
         // - Player bullet uses GreenBloodSpray for enemies
         // - BUT when the PLAYER shoots an ally/player, use RedBloodSpray instead
         GameObject fx = impactEffectEnemy != null ? impactEffectEnemy : impactEffect;
+
+        // Optional front-armor/resist override for EnemyHealthController-based enemies.
+        if (useFrontResistImpact && impactEffectFrontResist != null)
+            fx = impactEffectFrontResist;
 
         // NPC override (optional)
         if (isNPC && impactEffectNPC != null)
@@ -616,6 +616,17 @@ private void FixedUpdate()
         if (owner == null) return false;
         // Safe, case-insensitive tag compare
         return string.Equals(owner.tag, playerTag, System.StringComparison.OrdinalIgnoreCase);
+    }
+
+    private Vector3 GetIncomingDirectionWorld(Transform targetTransform)
+    {
+        if (targetTransform == null)
+            return -transform.forward;
+
+        if (owner != null)
+            return owner.position - targetTransform.position;
+
+        return -transform.forward;
     }
 
     private void NotifyEnemyAggroFromHit(Collider hit)

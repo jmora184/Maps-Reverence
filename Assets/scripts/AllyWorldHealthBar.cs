@@ -88,6 +88,14 @@ public class AllyWorldHealthBar : MonoBehaviour
     private bool _lastTeamVisible;
     private bool _hasTeamState;
 
+    private Vector3 _bodyguardBaseLocalScale = Vector3.one;
+    private Transform _bodyguardParent;
+    private Vector3 _bodyguardParentBaseLocalScale = Vector3.one;
+
+    private Vector3 _teamBaseLocalScale = Vector3.one;
+    private Transform _teamParent;
+    private Vector3 _teamParentBaseLocalScale = Vector3.one;
+
     private void Reset()
     {
         billboardRoot = transform;
@@ -105,6 +113,8 @@ public class AllyWorldHealthBar : MonoBehaviour
             _barBaseLocalPos = barSprite.transform.localPosition;
             _barBaseSizeX = barSprite.size.x;
         }
+
+        CacheIndicatorBaseVisualStates();
     }
 
     private void OnEnable()
@@ -126,6 +136,7 @@ public class AllyWorldHealthBar : MonoBehaviour
 
         RefreshFollowerIndicator();
         RefreshTeamIndicator();
+        MaintainIndicatorVisualScales();
 
         if (faceCamera) DoBillboard();
 
@@ -180,6 +191,7 @@ public class AllyWorldHealthBar : MonoBehaviour
         }
 
         ResolveAllyRoot();
+        CacheIndicatorBaseVisualStates();
     }
 
     private void BindIfNeeded()
@@ -253,6 +265,8 @@ public class AllyWorldHealthBar : MonoBehaviour
                 barSprite.transform.localPosition = _barBaseLocalPos + new Vector3(-shift, 0f, 0f);
             }
         }
+
+        MaintainIndicatorVisualScales();
     }
 
     private void RefreshFollowerIndicator()
@@ -278,6 +292,9 @@ public class AllyWorldHealthBar : MonoBehaviour
             _lastBodyguardVisible = shouldShow;
             _hasBodyguardState = true;
         }
+
+        if (shouldShow)
+            MaintainBodyguardIndicatorVisualScale();
     }
 
 
@@ -304,6 +321,86 @@ public class AllyWorldHealthBar : MonoBehaviour
             _lastTeamVisible = shouldShow;
             _hasTeamState = true;
         }
+
+        if (shouldShow)
+            MaintainTeamIndicatorVisualScale();
+    }
+
+    private void CacheIndicatorBaseVisualStates()
+    {
+        CacheBodyguardIndicatorBaseState();
+        CacheTeamIndicatorBaseState();
+    }
+
+    private void CacheBodyguardIndicatorBaseState()
+    {
+        if (bodyguardIndicator == null) return;
+
+        var tr = bodyguardIndicator.transform;
+        _bodyguardBaseLocalScale = tr.localScale;
+        _bodyguardParent = tr.parent;
+        _bodyguardParentBaseLocalScale = _bodyguardParent != null ? _bodyguardParent.localScale : Vector3.one;
+    }
+
+    private void CacheTeamIndicatorBaseState()
+    {
+        if (teamIndicator == null) return;
+
+        var tr = teamIndicator.transform;
+        _teamBaseLocalScale = tr.localScale;
+        _teamParent = tr.parent;
+        _teamParentBaseLocalScale = _teamParent != null ? _teamParent.localScale : Vector3.one;
+    }
+
+    private void MaintainIndicatorVisualScales()
+    {
+        MaintainBodyguardIndicatorVisualScale();
+        MaintainTeamIndicatorVisualScale();
+    }
+
+    private void MaintainBodyguardIndicatorVisualScale()
+    {
+        MaintainIndicatorVisualScale(bodyguardIndicator, ref _bodyguardParent, ref _bodyguardParentBaseLocalScale, ref _bodyguardBaseLocalScale);
+    }
+
+    private void MaintainTeamIndicatorVisualScale()
+    {
+        MaintainIndicatorVisualScale(teamIndicator, ref _teamParent, ref _teamParentBaseLocalScale, ref _teamBaseLocalScale);
+    }
+
+    private void MaintainIndicatorVisualScale(GameObject indicator, ref Transform cachedParent, ref Vector3 cachedParentBaseLocalScale, ref Vector3 cachedBaseLocalScale)
+    {
+        if (indicator == null || !indicator.activeInHierarchy)
+            return;
+
+        Transform indicatorTransform = indicator.transform;
+        Transform parent = indicatorTransform.parent;
+
+        if (parent == null || parent == transform)
+        {
+            indicatorTransform.localScale = cachedBaseLocalScale;
+            return;
+        }
+
+        if (cachedParent != parent)
+        {
+            cachedParent = parent;
+            cachedParentBaseLocalScale = parent.localScale;
+            cachedBaseLocalScale = indicatorTransform.localScale;
+        }
+
+        indicatorTransform.localScale = new Vector3(
+            cachedBaseLocalScale.x * SafeDivide(cachedParentBaseLocalScale.x, parent.localScale.x),
+            cachedBaseLocalScale.y * SafeDivide(cachedParentBaseLocalScale.y, parent.localScale.y),
+            cachedBaseLocalScale.z * SafeDivide(cachedParentBaseLocalScale.z, parent.localScale.z));
+    }
+
+    private float SafeDivide(float value, float divisor)
+    {
+        if (Mathf.Abs(divisor) < 0.0001f)
+            return value;
+
+        return value / divisor;
     }
 
     private void ResolveAllyRoot()
