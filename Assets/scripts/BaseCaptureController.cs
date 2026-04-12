@@ -861,16 +861,6 @@ public class BaseCaptureController : MonoBehaviour
                 return;
             }
 
-            Vector3 objective = _owner != null ? _owner.transform.position : Vector3.zero;
-            if (_watchedTeamRoot != null)
-            {
-                var watchedAnchor = _watchedTeamRoot.GetComponent<EncounterTeamAnchor>();
-                if (watchedAnchor != null && watchedAnchor.HasMoveTarget)
-                    objective = watchedAnchor.MoveTarget;
-                else
-                    objective = _watchedTeamRoot.position;
-            }
-
             var plan = _levelOne.teams[_backupPlanIndex];
             if (plan == null)
             {
@@ -881,46 +871,51 @@ public class BaseCaptureController : MonoBehaviour
             }
 
             var savedSpawnPoint = plan.spawnPoint;
-            var savedMode = plan.moveTargetMode;
-            var savedPlayerTag = plan.playerTag;
-            var savedTargetTransform = plan.targetTransform;
-            var savedFixedWorldPosition = plan.fixedWorldPosition;
-            var savedUpdateEvery = plan.updatePlannedTargetEvery;
-            var savedContinuous = plan.updatePlannedTargetContinuously;
 
             try
             {
                 if (_backupSpawnOverride != null)
                     plan.spawnPoint = _backupSpawnOverride;
 
-                plan.moveTargetMode = LevelOne.MoveTargetMode.FixedPosition;
-                plan.playerTag = string.IsNullOrWhiteSpace(plan.playerTag) ? "Player" : plan.playerTag;
-                plan.targetTransform = null;
-                plan.fixedWorldPosition = objective;
-                plan.updatePlannedTargetEvery = 0.25f;
-                plan.updatePlannedTargetContinuously = false;
-
+                // Surgical fix:
+                // Let the backup plan keep its OWN configured objective/move-target data.
+                // The old code inherited the watched team's target and then forced the new
+                // team icon arrow to that same point, which made the backup team's arrow
+                // point the wrong way.
                 var runtime = _levelOne.SpawnTeamAndGetRuntime(_backupPlanIndex);
-                if (runtime != null && runtime.anchor != null)
-                    runtime.anchor.SetMoveTarget(objective);
 
                 if (runtime != null && _owner != null)
                     _owner.ShowEnemyInboundWarning();
 
                 if (_debugLogs)
+                {
+                    string objectiveSummary;
+                    switch (plan.moveTargetMode)
+                    {
+                        case LevelOne.MoveTargetMode.Player:
+                            objectiveSummary = $"player tag '{plan.playerTag}'";
+                            break;
+                        case LevelOne.MoveTargetMode.Transform:
+                            objectiveSummary = plan.targetTransform != null
+                                ? $"transform '{plan.targetTransform.name}'"
+                                : "missing transform target";
+                            break;
+                        case LevelOne.MoveTargetMode.FixedPosition:
+                            objectiveSummary = plan.fixedWorldPosition.ToString();
+                            break;
+                        default:
+                            objectiveSummary = "no move target";
+                            break;
+                    }
+
                     Debug.Log(runtime != null
-                        ? $"[BaseCaptureController] Spawned reinforcement backup plan {_backupPlanIndex} toward {objective}."
+                        ? $"[BaseCaptureController] Spawned reinforcement backup plan {_backupPlanIndex} using its own configured objective ({objectiveSummary})."
                         : $"[BaseCaptureController] Failed to spawn reinforcement backup plan {_backupPlanIndex}.", _owner);
+                }
             }
             finally
             {
                 plan.spawnPoint = savedSpawnPoint;
-                plan.moveTargetMode = savedMode;
-                plan.playerTag = savedPlayerTag;
-                plan.targetTransform = savedTargetTransform;
-                plan.fixedWorldPosition = savedFixedWorldPosition;
-                plan.updatePlannedTargetEvery = savedUpdateEvery;
-                plan.updatePlannedTargetContinuously = savedContinuous;
             }
 
             Destroy(this);

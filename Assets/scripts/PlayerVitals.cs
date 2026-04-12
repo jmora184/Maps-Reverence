@@ -53,6 +53,17 @@ public class PlayerVitals : MonoBehaviour, IDamageable
     [Tooltip("How quickly the health-bar flash image fades back to transparent.")]
     [SerializeField] private float healthBarFlashFadeSpeed = 4.5f;
 
+    [Header("Damage SFX (Optional)")]
+    [Tooltip("Sound effect played whenever the player successfully takes damage.")]
+    [SerializeField] private AudioClip playerHitSfx;
+
+    [Tooltip("Optional dedicated AudioSource for the player hit SFX. If left empty, one will be created at runtime.")]
+    [SerializeField] private AudioSource playerHitSfxSource;
+
+    [Tooltip("Volume used when playing the player hit SFX.")]
+    [Range(0f, 1f)]
+    [SerializeField] private float playerHitSfxVolume = 1f;
+
     [Header("Debug")]
     [SerializeField] private bool logChanges = false;
 
@@ -64,6 +75,7 @@ public class PlayerVitals : MonoBehaviour, IDamageable
     private float timeSinceLastDamage = Mathf.Infinity;
     private bool rechargeQueued;
     private float rechargeHealthFloat;
+    private AudioSource runtimePlayerHitSfxSource;
 
     public int MaxHealth => maxHealth;
     public int CurrentHealth => currentHealth;
@@ -164,6 +176,7 @@ public class PlayerVitals : MonoBehaviour, IDamageable
             damageIndicator.FlashFromWorldPosition(sourceWorldPosition);
 
         TriggerHealthBarFlash();
+        PlayPlayerHitSfx();
 
         if (currentHealth <= 0)
         {
@@ -281,6 +294,34 @@ public class PlayerVitals : MonoBehaviour, IDamageable
         Color c = healthBarDamageFlashImage.color;
         c.a = Mathf.Clamp01(alpha);
         healthBarDamageFlashImage.color = c;
+    }
+
+    private void PlayPlayerHitSfx()
+    {
+        if (playerHitSfx == null)
+            return;
+
+        AudioSource source = GetPlayerHitSfxSource();
+        if (source == null)
+            return;
+
+        source.PlayOneShot(playerHitSfx, Mathf.Clamp01(playerHitSfxVolume));
+    }
+
+    private AudioSource GetPlayerHitSfxSource()
+    {
+        if (playerHitSfxSource != null)
+            return playerHitSfxSource;
+
+        if (runtimePlayerHitSfxSource != null)
+            return runtimePlayerHitSfxSource;
+
+        runtimePlayerHitSfxSource = gameObject.AddComponent<AudioSource>();
+        runtimePlayerHitSfxSource.playOnAwake = false;
+        runtimePlayerHitSfxSource.loop = false;
+        runtimePlayerHitSfxSource.spatialBlend = 0f;
+
+        return runtimePlayerHitSfxSource;
     }
 
 #if UNITY_EDITOR

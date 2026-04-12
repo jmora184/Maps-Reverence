@@ -785,6 +785,7 @@ public class CommandOverlayUI : MonoBehaviour
             icon.gameObject.SetActive(true);
 
             EnsureHoverHint(icon, allyHoverHint);
+            EnsureIconRootClickable(icon, requireButton: true);
 
             allyIconByUnit[go.transform] = icon;
 
@@ -792,10 +793,6 @@ public class CommandOverlayUI : MonoBehaviour
             // Ensure PlayerTag starts hidden and icon is clickable by default
             var playerTag = FindDeepChildByName(icon, "PlayerTag");
             if (playerTag != null) playerTag.gameObject.SetActive(false);
-            var btnInit = icon.GetComponent<Button>();
-            if (btnInit != null) btnInit.interactable = true;
-            var cgInit = icon.GetComponent<CanvasGroup>();
-            if (cgInit != null) cgInit.blocksRaycasts = true;
 
 
             // Bind ally UI helpers (health bar, team tag, etc.)
@@ -842,20 +839,8 @@ public class CommandOverlayUI : MonoBehaviour
             icon.GetComponent<EnemyFlankBonusHoverHint>()?.Bind(go.transform);
 
             // Ensure enemy icons are clickable (even if the prefab has no Button/Image on the root).
+            EnsureIconRootClickable(icon, requireButton: true);
             var btn = icon.GetComponent<Button>();
-            if (btn == null) btn = icon.gameObject.AddComponent<Button>();
-
-            var rootImg = icon.GetComponent<Image>();
-            if (rootImg == null)
-            {
-                rootImg = icon.gameObject.AddComponent<Image>();
-                // Invisible raycast catcher; visuals live on children under IconVisual.
-                rootImg.color = new Color(1f, 1f, 1f, 0f);
-            }
-            rootImg.raycastTarget = true; // allow clicking enemy icons even for team members
-
-            // Make sure the Button has a target graphic (required by some Unity versions).
-            btn.targetGraphic = rootImg;
 
             if (btn != null)
             {
@@ -1155,8 +1140,7 @@ public class CommandOverlayUI : MonoBehaviour
         if (playerContextPanel != null && playerContextPanel.IsVisible() && commandCam != null && !commandCam.enabled)
             playerContextPanel.HideImmediate();
 
-        Camera uiCam = canvas != null ? canvas.worldCamera : null;
-        if (uiCam == null) uiCam = Camera.main;
+        Camera uiCam = GetCanvasEventCamera();
 
         if (sm == null) sm = FindObjectOfType<CommandStateMachine>();
 
@@ -1470,6 +1454,54 @@ public class CommandOverlayUI : MonoBehaviour
             for (int i = 0; i < toRemove.Count; i++)
                 dict.Remove(toRemove[i]);
         }
+    }
+
+
+    private Camera GetCanvasEventCamera()
+    {
+        if (canvas == null)
+            return null;
+
+        // For Screen Space - Overlay, RectTransformUtility expects a null camera.
+        if (canvas.renderMode == RenderMode.ScreenSpaceOverlay)
+            return null;
+
+        if (canvas.worldCamera != null)
+            return canvas.worldCamera;
+
+        if (commandCam != null)
+            return commandCam;
+
+        return Camera.main;
+    }
+
+    private void EnsureIconRootClickable(RectTransform icon, bool requireButton)
+    {
+        if (icon == null) return;
+
+        var rootImg = icon.GetComponent<Image>();
+        if (rootImg == null)
+        {
+            rootImg = icon.gameObject.AddComponent<Image>();
+            // Invisible raycast catcher; visuals live on children under IconVisual.
+            rootImg.color = new Color(1f, 1f, 1f, 0f);
+        }
+        rootImg.raycastTarget = true;
+
+        Button btn = icon.GetComponent<Button>();
+        if (btn == null && requireButton)
+            btn = icon.gameObject.AddComponent<Button>();
+
+        if (btn != null)
+        {
+            btn.targetGraphic = rootImg;
+            btn.interactable = true;
+        }
+
+        var cg = icon.GetComponent<CanvasGroup>();
+        if (cg == null) cg = icon.gameObject.AddComponent<CanvasGroup>();
+        cg.interactable = true;
+        cg.blocksRaycasts = true;
     }
 
 
@@ -2093,7 +2125,9 @@ public class CommandOverlayUI : MonoBehaviour
 
         EnsureJoinButtonLabelRefs();
 
-        string desired = IsFullTeamSelected() ? joinLabelWhenTeamSelected : joinLabelWhenSingle;
+        // Keep the button label consistent as "Join" even when a full team is selected.
+        // The underlying join/recruit behavior can still differ; this only controls the UI text.
+        string desired = joinLabelWhenSingle;
 
         if (cachedJoinLabelTMP != null && cachedJoinLabelTMP.text != desired)
             cachedJoinLabelTMP.text = desired;
